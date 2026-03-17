@@ -425,36 +425,75 @@ void VideoSource::OpenStream() {
 
   /* Hardware decoder initialization */
   if (hw_decoder_ != HardwareDecoder::None) {
-    AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
+    // Build the list of hardware device types to try
+    std::vector<AVHWDeviceType> hw_types_to_try;
     if (hw_decoder_ == HardwareDecoder::Auto) {
 #ifdef __APPLE__
-      hw_type = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+      hw_types_to_try.push_back(AV_HWDEVICE_TYPE_VIDEOTOOLBOX);
 #elif defined(__linux__)
-      hw_type = AV_HWDEVICE_TYPE_VAAPI;
+      hw_types_to_try.push_back(AV_HWDEVICE_TYPE_VAAPI);
+      hw_types_to_try.push_back(AV_HWDEVICE_TYPE_CUDA);
+#elif defined(_WIN32)
+      hw_types_to_try.push_back(AV_HWDEVICE_TYPE_D3D12VA);
+      hw_types_to_try.push_back(AV_HWDEVICE_TYPE_D3D11VA);
+      hw_types_to_try.push_back(AV_HWDEVICE_TYPE_DXVA2);
 #endif
-    } else if (hw_decoder_ == HardwareDecoder::VideoToolbox) {
-      hw_type = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
-    } else if (hw_decoder_ == HardwareDecoder::VAAPI) {
-      hw_type = AV_HWDEVICE_TYPE_VAAPI;
-    } else if (hw_decoder_ == HardwareDecoder::CUDA) {
-      hw_type = AV_HWDEVICE_TYPE_CUDA;
+    } else {
+      AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
+      if (hw_decoder_ == HardwareDecoder::VideoToolbox) {
+        hw_type = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+      } else if (hw_decoder_ == HardwareDecoder::VAAPI) {
+        hw_type = AV_HWDEVICE_TYPE_VAAPI;
+      } else if (hw_decoder_ == HardwareDecoder::CUDA) {
+        hw_type = AV_HWDEVICE_TYPE_CUDA;
+      } else if (hw_decoder_ == HardwareDecoder::D3D12VA) {
+        hw_type = AV_HWDEVICE_TYPE_D3D12VA;
+      } else if (hw_decoder_ == HardwareDecoder::D3D11VA) {
+        hw_type = AV_HWDEVICE_TYPE_D3D11VA;
+      } else if (hw_decoder_ == HardwareDecoder::DXVA2) {
+        hw_type = AV_HWDEVICE_TYPE_DXVA2;
+      }
+      if (hw_type != AV_HWDEVICE_TYPE_NONE) {
+        hw_types_to_try.push_back(hw_type);
+      }
     }
 
-    if (hw_type != AV_HWDEVICE_TYPE_NONE) {
+    // Try each hardware device type in order until one succeeds
+    for (AVHWDeviceType hw_type : hw_types_to_try) {
       ret = av_hwdevice_ctx_create(&hw_device_ctx_, hw_type, nullptr, nullptr, 0);
       if (ret < 0) {
-        Logger->warn("Failed to create hw device {}: {}, falling back to software decoding",
+        Logger->warn("Failed to create hw device {}: {}",
                      av_hwdevice_get_type_name(hw_type), ffmpeg_error_string(ret));
         hw_device_ctx_ = nullptr;
-      } else {
-        dec_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
+        continue;
       }
+      Logger->info("Using hardware decoder: {}", av_hwdevice_get_type_name(hw_type));
+      dec_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
+      break;
+    }
+    if (!hw_device_ctx_) {
+      Logger->warn("All hardware decoders failed, falling back to software decoding");
     }
   }
 
   /* Enable multi-threaded decoding */
   dec_ctx_->thread_count = decode_threads_; // 0 means auto-detect
   dec_ctx_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+  /* Set extra_hw_frames to avoid "Static surface pool size exceeded" errors.
+   * The hardware surface pool must be large enough to hold:
+   *   - reference frames used by the codec (up to 16 for H.264)
+   *   - frames held by each decode thread
+   *   - frames cached in the application-level frame_buffer_ (max_cached_frames_)
+   *   - a safety margin for the filter graph and display pipeline
+   */
+  if (hw_device_ctx_) {
+    int thread_count = decode_threads_ > 0 ? decode_threads_ : std::thread::hardware_concurrency();
+    int extra = 16 /* max ref frames */ + thread_count + static_cast<int>(max_cached_frames_) + 8 /* safety margin */;
+    dec_ctx_->extra_hw_frames = extra;
+    Logger->info("Setting extra_hw_frames to {} (ref=16, threads={}, cache={}, margin=8)",
+                 extra, thread_count, max_cached_frames_);
+  }
 
   /* Init the decoders */
   ret = avcodec_open2(dec_ctx_, dec, nullptr);

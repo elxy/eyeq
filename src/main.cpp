@@ -194,10 +194,13 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
       {"videotoolbox", HardwareDecoder::VideoToolbox},
       {"vaapi", HardwareDecoder::VAAPI},
       {"cuda", HardwareDecoder::CUDA},
+      {"d3d12va", HardwareDecoder::D3D12VA},
+      {"d3d11va", HardwareDecoder::D3D11VA},
+      {"dxva2", HardwareDecoder::DXVA2},
   };
   app.add_option("--hardware-decoder", args.hardware_decoder, "Hardware decoder")
       ->transform(CLI::CheckedTransformer(hw_map, CLI::ignore_case))
-      ->option_text("{none,auto,videotoolbox,vaapi,cuda}");
+      ->option_text("{none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}");
 
   app.add_option("--icc-profile", args.icc_profiles,
                  "ICC profile for display color management. "
@@ -408,6 +411,9 @@ int main(int argc, char **argv) {
           {HardwareDecoder::VideoToolbox, "videotoolbox"},
           {HardwareDecoder::VAAPI, "vaapi"},
           {HardwareDecoder::CUDA, "cuda"},
+          {HardwareDecoder::D3D12VA, "d3d12va"},
+          {HardwareDecoder::D3D11VA, "d3d11va"},
+          {HardwareDecoder::DXVA2, "dxva2"},
       };
       auto it = hw_names.find(args.hardware_decoder);
       const char *hardware_decoder = (it != hw_names.end()) ? it->second : "unknown";

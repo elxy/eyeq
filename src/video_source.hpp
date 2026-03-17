@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -24,9 +25,12 @@ namespace EYEQ {
 enum class HardwareDecoder {
   None,
   Auto,
-  VideoToolbox,
-  VAAPI,
-  CUDA,
+  VideoToolbox, // macOS
+  VAAPI,        // Linux
+  CUDA,         // NVIDIA (cross-platform)
+  D3D12VA,      // Windows (Direct3D 12)
+  D3D11VA,      // Windows (Direct3D 11)
+  DXVA2,        // Windows (legacy)
 };
 
 struct AVFrameDeleter {
