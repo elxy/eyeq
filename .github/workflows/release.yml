@@ -40,6 +40,9 @@ jobs:
           mkdir -p dist/bin
           cp build-arm64/bin/eyeq dist/bin/
           bash scripts/package-macos.sh dist
+          # Ad-hoc 签名所有动态库和二进制，避免 Gatekeeper 阻止加载
+          find dist/lib -name '*.dylib' -exec codesign --force --sign - {} \;
+          codesign --force --sign - dist/bin/eyeq
           tar -czvf eyeq-${VERSION}-macos-arm64.tar.gz -C dist .
 
       - uses: actions/upload-artifact@v4
@@ -48,7 +51,7 @@ jobs:
           path: eyeq-*-macos-*.tar.gz
 
   build-linux:
-    name: Linux x86_64 AppImage
+    name: Linux x86_64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +73,47 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install ffmpeg libplacebo sdl3 sdl3_ttf spdlog
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install fmt ffmpeg libplacebo sdl3 sdl3_ttf spdlog patchelf vulkan-headers
+          brew list --formula | while read -r formula; do
+            brew link --overwrite "$formula" || true
+          done
+
+      - name: Debug dependency discovery
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+
+          echo "brew prefix: $(brew --prefix)"
+          echo "fmt prefix: $(brew --prefix fmt)"
+          echo "ffmpeg prefix: $(brew --prefix ffmpeg)"
+          echo "libplacebo prefix: $(brew --prefix libplacebo)"
+          echo "sdl3 prefix: $(brew --prefix sdl3)"
+          echo "sdl3_ttf prefix: $(brew --prefix sdl3_ttf)"
+          echo "spdlog prefix: $(brew --prefix spdlog)"
+          echo "patchelf prefix: $(brew --prefix patchelf)"
+          echo "vulkan-headers prefix: $(brew --prefix vulkan-headers)"
+
+          test -f "$(brew --prefix)/lib/cmake/fmt/fmtConfig.cmake" && echo "global fmtConfig exists" || echo "global fmtConfig missing"
+          test -f "$(brew --prefix fmt)/lib/cmake/fmt/fmtConfig.cmake" && echo "keg fmtConfig exists" || echo "keg fmtConfig missing"
+          test -f "$(brew --prefix)/lib/cmake/SDL3/SDL3Config.cmake" && echo "global SDL3Config exists" || echo "global SDL3Config missing"
+          test -f "$(brew --prefix sdl3)/lib/cmake/SDL3/SDL3Config.cmake" && echo "keg SDL3Config exists" || echo "keg SDL3Config missing"
+          test -f "$(brew --prefix sdl3_ttf)/lib/cmake/SDL3_ttf/SDL3_ttfConfig.cmake" && echo "keg SDL3_ttfConfig exists" || echo "keg SDL3_ttfConfig missing"
+          test -f "$(brew --prefix)/include/vulkan/vulkan.h" && echo "global vulkan.h exists" || echo "global vulkan.h missing"
+          test -f "$(brew --prefix vulkan-headers)/include/vulkan/vulkan.h" && echo "keg vulkan.h exists" || echo "keg vulkan.h missing"
+
+          ls -la "$(brew --prefix)/lib/cmake" || true
+          ls -la "$(brew --prefix fmt)/lib/cmake/fmt" || true
+          ls -la "$(brew --prefix sdl3)/lib/cmake/SDL3" || true
+          ls -la "$(brew --prefix sdl3_ttf)/lib/cmake/SDL3_ttf" || true
+          ls -la "$(brew --prefix vulkan-headers)/include/vulkan" || true
+
+          brew list --versions fmt ffmpeg libplacebo sdl3 sdl3_ttf spdlog patchelf vulkan-headers
+          pkg-config --modversion fmt || true
+          pkg-config --modversion libplacebo
+          pkg-config --modversion libavcodec
+          pkg-config --modversion sdl3
+          pkg-config --modversion SDL3_ttf || pkg-config --modversion sdl3-ttf || true
 
       - name: Build
         run: |
@@ -105,10 +148,31 @@ jobs:
             || mv eyeq-*.AppImage eyeq-${VERSION}-linux-x86_64.AppImage 2>/dev/null \
             || true
 
+      - name: Package tar.gz
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          export LD_LIBRARY_PATH="$(brew --prefix)/lib:$LD_LIBRARY_PATH"
+
+          mkdir -p tar-dist/bin tar-dist/lib
+          cp build/bin/eyeq tar-dist/bin/
+
+          # 收集 Linuxbrew 的 .so 依赖
+          ldd tar-dist/bin/eyeq | grep "$(brew --prefix)" | awk '{print $3}' | while read dep; do
+            cp -L "$dep" tar-dist/lib/
+          done
+
+          # 设置 RPATH 为相对路径，使 tar.gz 可独立运行
+          patchelf --set-rpath '\$ORIGIN/../lib' tar-dist/bin/eyeq
+
+          tar -czvf eyeq-${VERSION}-linux-x86_64.tar.gz -C tar-dist .
+
       - uses: actions/upload-artifact@v4
         with:
           name: eyeq-linux
-          path: eyeq-*-linux-x86_64.AppImage
+          path: |
+            eyeq-*-linux-x86_64.AppImage
+            eyeq-*-linux-x86_64.tar.gz
 
   build-windows:
     name: Windows x86_64
@@ -136,6 +200,7 @@ jobs:
             mingw-w64-ucrt-x86_64-sdl3-ttf
             mingw-w64-ucrt-x86_64-ffmpeg
             mingw-w64-ucrt-x86_64-ntldd
+            git
 
       - name: Build
         run: |
@@ -174,4 +239,5 @@ jobs:
           files: |
             eyeq-macos/eyeq-*-macos-*.tar.gz
             eyeq-linux/eyeq-*-linux-x86_64.AppImage
+            eyeq-linux/eyeq-*-linux-x86_64.tar.gz
             eyeq-windows/eyeq-*-windows-x86_64.zip

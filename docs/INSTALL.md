@@ -7,7 +7,6 @@
 - [SDL3](https://www.libsdl.org/) — window management and user interaction; SDL3_ttf for OSD text rendering
 - [Vulkan](https://www.vulkan.org/) — rendering backend
 - [spdlog](https://github.com/gabime/spdlog) — logging
-- [libdovi](https://github.com/quietvoid/dovi_tool/tree/main/dolby_vision) — Dolby Vision metadata parsing (optional)
 
 Building via Homebrew is recommended on macOS and Linux. On Windows, building via MSYS2 is recommended.
 
@@ -16,8 +15,7 @@ Building via Homebrew is recommended on macOS and Linux. On Windows, building vi
 ```sh
 # Install dependencies
 brew tap elxy/eyeq
-brew install --only-dependencies eyeq           # pre-built libplacebo (no libdovi support)
-brew install --only-dependencies eyeq --with-dovi  # builds libplacebo with libdovi support
+brew install --only-dependencies eyeq
 
 # Clone the source
 git clone https://github.com/elxy/eyeq.git
@@ -40,7 +38,7 @@ pacman -S mingw-w64-ucrt-x86_64-toolchain base-devel
 pacman -S mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
 pacman -S mingw-w64-ucrt-x86_64-spdlog
 pacman -S mingw-w64-ucrt-x86_64-vulkan-headers
-pacman -S mingw-w64-ucrt-x86_64-libplacebo   # includes libdovi support
+pacman -S mingw-w64-ucrt-x86_64-libplacebo
 pacman -S mingw-w64-ucrt-x86_64-sdl3
 pacman -S mingw-w64-ucrt-x86_64-sdl3-ttf
 pacman -S mingw-w64-ucrt-x86_64-ffmpeg

@@ -20,8 +20,16 @@ On macOS and Linux, installing via Homebrew is recommended. On Windows, building
 ```sh
 brew tap elxy/eyeq
 brew install eyeq
-# Or, with Dolby Vision support
-brew install eyeq --with-dovi
+```
+
+### Pre-built Binaries
+
+Pre-built binaries for macOS, Linux, and Windows are available on the [Releases](https://github.com/elxy/eyeq/releases) page. Download the archive for your platform and extract it.
+
+On macOS, you need to remove the quarantine attribute before running:
+
+```sh
+xattr -cr <extracted_directory>
 ```
 
 ## Usage
