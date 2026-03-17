@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: macOS Universal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          brew install ffmpeg libplacebo sdl3 sdl3_ttf spdlog molten-vk
+
+      - name: Build arm64
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+          export CMAKE_PREFIX_PATH="$(brew --prefix)"
+          cmake -B build-arm64 -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64
+          cmake --build build-arm64
+
+      # NOTE: x86_64 交叉编译需要 x86_64 版本的依赖库。
+      # macos-14 (arm64) 上的 Homebrew 只提供 arm64 库，
+      # 因此如果需要真正的 Universal Binary，应拆分为两个 job
+      # (macos-14 + macos-13) 并用 lipo 合并。
+      # 目前先只构建 arm64 版本，后续根据需要扩展。
+      - name: Package
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          mkdir -p dist/bin
+          cp build-arm64/bin/eyeq dist/bin/
+          bash scripts/package-macos.sh dist
+          tar -czvf eyeq-${VERSION}-macos-arm64.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eyeq-macos
+          path: eyeq-*-macos-*.tar.gz
+
+  build-linux:
+    name: Linux x86_64 AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/linuxbrew/.linuxbrew/Cellar
+            /home/linuxbrew/.linuxbrew/opt
+          key: linuxbrew-release-${{ runner.os }}-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: |
+            linuxbrew-release-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          brew install ffmpeg libplacebo sdl3 sdl3_ttf spdlog
+
+      - name: Build
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+          export CMAKE_PREFIX_PATH="$(brew --prefix)"
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build
+          DESTDIR="$(pwd)/AppDir" cmake --install build
+
+      - name: Create AppImage
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+
+          # 下载 linuxdeploy
+          wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          chmod +x linuxdeploy-x86_64.AppImage
+
+          # Linuxbrew 的库路径需要加入 LD_LIBRARY_PATH
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          export LD_LIBRARY_PATH="$(brew --prefix)/lib:$LD_LIBRARY_PATH"
+
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --desktop-file scripts/eyeq.desktop \
+            --icon-file scripts/eyeq.png \
+            --output appimage
+
+          mv EyeQ-*.AppImage eyeq-${VERSION}-linux-x86_64.AppImage 2>/dev/null \
+            || mv eyeq-*.AppImage eyeq-${VERSION}-linux-x86_64.AppImage 2>/dev/null \
+            || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eyeq-linux
+          path: eyeq-*-linux-x86_64.AppImage
+
+  build-windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-spdlog
+            mingw-w64-ucrt-x86_64-vulkan-headers
+            mingw-w64-ucrt-x86_64-libplacebo
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-sdl3-ttf
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-ntldd
+
+      - name: Build
+        run: |
+          cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Package
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          mkdir -p dist
+          cp build/bin/eyeq.exe dist/
+          bash scripts/package-windows.sh dist
+
+      - name: Create zip
+        shell: pwsh
+        run: |
+          $version = ($env:GITHUB_REF -replace 'refs/tags/', '')
+          Compress-Archive -Path dist/* -DestinationPath "eyeq-${version}-windows-x86_64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eyeq-windows
+          path: eyeq-*-windows-x86_64.zip
+
+  release:
+    name: Create GitHub Release
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            eyeq-macos/eyeq-*-macos-*.tar.gz
+            eyeq-linux/eyeq-*-linux-x86_64.AppImage
+            eyeq-windows/eyeq-*-windows-x86_64.zip

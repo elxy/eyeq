@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=EyeQ
+Comment=Multi-video subjective quality comparison tool
+Exec=eyeq
+Icon=eyeq
+Categories=AudioVideo;Video;
+Terminal=true
+MimeType=video/mp4;video/x-matroska;video/x-msvideo;video/webm;
