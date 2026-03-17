@@ -74,41 +74,6 @@ jobs:
             brew link --overwrite "$formula" || true
           done
 
-      - name: Debug dependency discovery
-        run: |
-          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
-
-          echo "brew prefix: $(brew --prefix)"
-          echo "fmt prefix: $(brew --prefix fmt)"
-          echo "ffmpeg prefix: $(brew --prefix ffmpeg)"
-          echo "libplacebo prefix: $(brew --prefix libplacebo)"
-          echo "sdl3 prefix: $(brew --prefix sdl3)"
-          echo "sdl3_ttf prefix: $(brew --prefix sdl3_ttf)"
-          echo "spdlog prefix: $(brew --prefix spdlog)"
-          echo "vulkan-headers prefix: $(brew --prefix vulkan-headers)"
-
-          test -f "$(brew --prefix)/lib/cmake/fmt/fmtConfig.cmake" && echo "global fmtConfig exists" || echo "global fmtConfig missing"
-          test -f "$(brew --prefix fmt)/lib/cmake/fmt/fmtConfig.cmake" && echo "keg fmtConfig exists" || echo "keg fmtConfig missing"
-          test -f "$(brew --prefix)/lib/cmake/SDL3/SDL3Config.cmake" && echo "global SDL3Config exists" || echo "global SDL3Config missing"
-          test -f "$(brew --prefix sdl3)/lib/cmake/SDL3/SDL3Config.cmake" && echo "keg SDL3Config exists" || echo "keg SDL3Config missing"
-          test -f "$(brew --prefix sdl3_ttf)/lib/cmake/SDL3_ttf/SDL3_ttfConfig.cmake" && echo "keg SDL3_ttfConfig exists" || echo "keg SDL3_ttfConfig missing"
-          test -f "$(brew --prefix)/include/vulkan/vulkan.h" && echo "global vulkan.h exists" || echo "global vulkan.h missing"
-          test -f "$(brew --prefix vulkan-headers)/include/vulkan/vulkan.h" && echo "keg vulkan.h exists" || echo "keg vulkan.h missing"
-
-          ls -la "$(brew --prefix)/lib/cmake" || true
-          ls -la "$(brew --prefix fmt)/lib/cmake/fmt" || true
-          ls -la "$(brew --prefix sdl3)/lib/cmake/SDL3" || true
-          ls -la "$(brew --prefix sdl3_ttf)/lib/cmake/SDL3_ttf" || true
-          ls -la "$(brew --prefix vulkan-headers)/include/vulkan" || true
-
-          brew list --versions fmt ffmpeg libplacebo sdl3 sdl3_ttf spdlog vulkan-headers
-          pkg-config --modversion fmt || true
-          pkg-config --modversion libplacebo
-          pkg-config --modversion libavcodec
-          pkg-config --modversion sdl3
-          pkg-config --modversion SDL3_ttf || pkg-config --modversion sdl3-ttf || true
-
       - name: Configure
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
