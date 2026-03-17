@@ -1,5 +1,9 @@
 #include <signal.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -331,6 +335,11 @@ static void fit_to_window(DisplayState &state, SyncPlayer &player, const Window 
 static void sigterm_handler([[maybe_unused]] int sig) { exit(123); }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+  SetConsoleCP(CP_UTF8);
+  SetConsoleOutputCP(CP_UTF8);
+#endif
+
   struct EyeQArgs args{
       .filter_sep = "@",
       .flicker_interval = 0,

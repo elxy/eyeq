@@ -46,7 +46,11 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # Find dependencies
-find_package(spdlog REQUIRED)
+find_package(spdlog QUIET)
+if(NOT spdlog_FOUND)
+  message(STATUS "spdlog not found, building from source via FetchContent")
+  include(BuildSpdlog)
+endif()
 find_package(SDL3 REQUIRED)
 find_package(Libplacebo REQUIRED)
 find_package(SDL3_ttf REQUIRED)

@@ -36,7 +36,7 @@ jobs:
           mkdir -p dist/bin
           cp build/bin/eyeq dist/bin/
           bash scripts/package-macos.sh dist
-          # Ad-hoc 签名所有动态库和二进制，避免 Gatekeeper 阻止加载
+          # Ad-hoc sign all dylibs and the binary to prevent Gatekeeper from blocking them
           find dist/lib -name '*.dylib' -exec codesign --force --sign - {} \;
           codesign --force --sign - dist/bin/eyeq
 

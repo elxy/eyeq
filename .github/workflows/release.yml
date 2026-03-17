@@ -29,18 +29,18 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=arm64
           cmake --build build-arm64
 
-      # NOTE: x86_64 交叉编译需要 x86_64 版本的依赖库。
-      # macos-14 (arm64) 上的 Homebrew 只提供 arm64 库，
-      # 因此如果需要真正的 Universal Binary，应拆分为两个 job
-      # (macos-14 + macos-13) 并用 lipo 合并。
-      # 目前先只构建 arm64 版本，后续根据需要扩展。
+      # NOTE: Cross-compiling for x86_64 requires x86_64 versions of dependencies.
+      # Homebrew on macos-14 (arm64) only provides arm64 libraries,
+      # so a true Universal Binary would require splitting into two jobs
+      # (macos-14 + macos-13) and merging with lipo.
+      # For now, only the arm64 build is produced; expand as needed.
       - name: Package
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           mkdir -p dist/bin
           cp build-arm64/bin/eyeq dist/bin/
           bash scripts/package-macos.sh dist
-          # Ad-hoc 签名所有动态库和二进制，避免 Gatekeeper 阻止加载
+          # Ad-hoc sign all dylibs and the binary to prevent Gatekeeper from blocking them
           find dist/lib -name '*.dylib' -exec codesign --force --sign - {} \;
           codesign --force --sign - dist/bin/eyeq
           tar -czvf eyeq-${VERSION}-macos-arm64.tar.gz -C dist .
@@ -130,11 +130,11 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
 
-          # 下载 linuxdeploy
+          # Download linuxdeploy
           wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
           chmod +x linuxdeploy-x86_64.AppImage
 
-          # Linuxbrew 的库路径需要加入 LD_LIBRARY_PATH
+          # Add Linuxbrew library path to LD_LIBRARY_PATH
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           export LD_LIBRARY_PATH="$(brew --prefix)/lib:$LD_LIBRARY_PATH"
 
@@ -157,12 +157,12 @@ jobs:
           mkdir -p tar-dist/bin tar-dist/lib
           cp build/bin/eyeq tar-dist/bin/
 
-          # 收集 Linuxbrew 的 .so 依赖
+          # Collect shared library dependencies from Linuxbrew
           ldd tar-dist/bin/eyeq | grep "$(brew --prefix)" | awk '{print $3}' | while read dep; do
             cp -L "$dep" tar-dist/lib/
           done
 
-          # 设置 RPATH 为相对路径，使 tar.gz 可独立运行
+          # Set RPATH to a relative path so the tar.gz is self-contained
           patchelf --set-rpath '\$ORIGIN/../lib' tar-dist/bin/eyeq
 
           tar -czvf eyeq-${VERSION}-linux-x86_64.tar.gz -C tar-dist .
