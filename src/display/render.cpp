@@ -31,8 +31,8 @@ std::string OsdInfo::Format() const {
   std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d", hours, minutes, seconds);
 
   char buf[512];
-  std::snprintf(buf, sizeof(buf), "%s #%d %c %s [%d/%d]", filename.c_str(), video_id, pict_type, time_buf, frame_serial,
-                total_frames);
+  std::snprintf(buf, sizeof(buf), "#%d: %s %c %s [%d/%d]", video_id, filename.c_str(), pict_type, time_buf,
+                frame_serial, total_frames);
   return std::string(buf);
 }
 
