@@ -197,13 +197,13 @@ private:
   // Hardware decoding
   HardwareDecoder hw_decoder_;
   AVBufferRef *hw_device_ctx_ = nullptr;
-  bool hw_decode_enabled_ = false;  // Whether hardware decoding is actually used (determined on first frame)
+  bool hw_decode_enabled_ = false; // Whether hardware decoding is actually used (determined on first frame)
 
   std::string filter_graph_;
   AVFilterGraph *graph_;
   AVFilterContext *filt_in_, *filt_out_;
-  std::atomic<bool> need_format_fallback_{false};  // Signal decode thread to append format filter
-  bool format_fallback_applied_{false};            // Whether format fallback has been applied (decode thread only)
+  std::atomic<bool> need_format_fallback_{false}; // Signal decode thread to append format filter
+  bool format_fallback_applied_{false};           // Whether format fallback has been applied (decode thread only)
 
   // Decoding state
   std::thread one_thread_;
@@ -212,8 +212,8 @@ private:
   std::atomic<int64_t> decode_start_pts_{0};   // Decoding start timestamp
 
   std::atomic<bool> eof_{false};
-  std::map<int64_t, int64_t> keyframe_index_; // Keyframe PTS -> file position mapping (in bytes)
-  std::map<int64_t, int> pts_to_serial_;        // PTS -> frame serial (all frames)
+  std::map<int64_t, int64_t> keyframe_index_;    // Keyframe PTS -> file position mapping (in bytes)
+  std::map<int64_t, int> pts_to_serial_;         // PTS -> frame serial (all frames)
   std::map<int, int64_t> keyframe_serial_index_; // Keyframe serial -> PTS
   int total_frames_ = 0;                         // Total frame count
 
@@ -232,8 +232,8 @@ private:
   std::mutex seek_mutex_;
   std::condition_variable seek_cv_;
 
-  bool have_seeked_{false};              // True after any seek; switches serial source to pts_to_serial_
-  int current_frame_serial_ = -1;        // Incremental counter, used only before first seek
+  bool have_seeked_{false};       // True after any seek; switches serial source to pts_to_serial_
+  int current_frame_serial_ = -1; // Incremental counter, used only before first seek
   size_t start_frame_serial_ = 0;
 
   /**

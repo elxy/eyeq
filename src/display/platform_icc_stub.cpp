@@ -17,7 +17,7 @@ void ParseICCProfileHeader(ICCProfileInfo &info) {
   info.header_intent = static_cast<int>(data[67] & 0x03);
   // Simplified version: directly read color space signature
   auto read_sig = [&](int offset) -> std::string {
-    char buf[5] = {(char)data[offset], (char)data[offset+1], (char)data[offset+2], (char)data[offset+3], 0};
+    char buf[5] = {(char)data[offset], (char)data[offset + 1], (char)data[offset + 2], (char)data[offset + 3], 0};
     return std::string(buf);
   };
   info.color_space = read_sig(16);

@@ -41,9 +41,7 @@ public:
  * @param timeout_ms Timeout in ms; if negative, returns a very long duration
  */
 inline std::chrono::milliseconds get_timeout(int timeout_ms) {
-    return (timeout_ms < 0) ? 
-        std::chrono::seconds(10000) : 
-        std::chrono::milliseconds(timeout_ms);
+  return (timeout_ms < 0) ? std::chrono::seconds(10000) : std::chrono::milliseconds(timeout_ms);
 }
 
 int save_frame(AVFrame *frame, const std::filesystem::path &filename, std::string_view format);

@@ -21,10 +21,10 @@ static const char *font_search_paths[] = {
     "/System/Library/Fonts/Monaco.ttf",
     "/System/Library/Fonts/Courier.ttc",
     // Windows - CJK fonts
-    "C:/Windows/Fonts/msyh.ttc",    // Microsoft YaHei
-    "C:/Windows/Fonts/msyhbd.ttc",  // Microsoft YaHei Bold
-    "C:/Windows/Fonts/simhei.ttf",  // SimHei
-    "C:/Windows/Fonts/simsun.ttc",  // SimSun
+    "C:/Windows/Fonts/msyh.ttc",   // Microsoft YaHei
+    "C:/Windows/Fonts/msyhbd.ttc", // Microsoft YaHei Bold
+    "C:/Windows/Fonts/simhei.ttf", // SimHei
+    "C:/Windows/Fonts/simsun.ttc", // SimSun
     // Windows - English monospace fonts (fallback)
     "C:/Windows/Fonts/consola.ttf",
     "C:/Windows/Fonts/cour.ttf",
@@ -136,8 +136,7 @@ pl_tex OsdManager::ComposeOverlay(int window_w, int window_h, const std::vector<
     int padding = static_cast<int>(2 * pixel_density_);
 
     // Draw semi-transparent background rectangle
-    SDL_Rect bg_rect = {entry.x - padding, entry.y - padding, converted->w + padding * 2,
-                        converted->h + padding * 2};
+    SDL_Rect bg_rect = {entry.x - padding, entry.y - padding, converted->w + padding * 2, converted->h + padding * 2};
     // Clip to overlay bounds
     if (bg_rect.x < 0)
       bg_rect.x = 0;

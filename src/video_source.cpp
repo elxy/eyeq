@@ -18,8 +18,7 @@ extern "C" {
 
 using namespace EYEQ;
 
-VideoSource::VideoSource(std::string filename, std::string filter_graph,
-                         int decode_threads, HardwareDecoder hw_decoder)
+VideoSource::VideoSource(std::string filename, std::string filter_graph, int decode_threads, HardwareDecoder hw_decoder)
     : filename_(std::move(filename)), hw_decoder_(hw_decoder), filter_graph_(std::move(filter_graph)),
       max_cached_frames_(kMaxCachedFrames), decode_threads_(decode_threads) {
   fmt_ctx_ = nullptr;
@@ -182,7 +181,7 @@ void VideoSource::Start(size_t start_frame) {
     int frames_to_skip = target_serial - keyframe_serial;
 
     Logger->debug("Fast seek: target_serial={}, keyframe_serial={}, frames_to_skip={} (saved {} full decodes)",
-                 target_serial, keyframe_serial, frames_to_skip, target_serial - frames_to_skip);
+                  target_serial, keyframe_serial, frames_to_skip, target_serial - frames_to_skip);
 
     decode_start_pts_ = keyframe_pts;
     start_frame_serial_ = frames_to_skip;
@@ -278,8 +277,8 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
       // GOP exceeds cache: skip early frames (decode-only, no filter/buffer) so that
       // only the frames around the target end up in the buffer.
       frames_to_skip = frames_in_gop - max_cached_frames_ / 2;
-      SPDLOG_LOGGER_TRACE(Logger, "GOP size ({}) exceeds cache ({}), skipping {} frames via seek",
-                    frames_in_gop, max_cached_frames_, frames_to_skip);
+      SPDLOG_LOGGER_TRACE(Logger, "GOP size ({}) exceeds cache ({}), skipping {} frames via seek", frames_in_gop,
+                          max_cached_frames_, frames_to_skip);
     }
   }
 
@@ -321,7 +320,7 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
     }
   }
   SPDLOG_LOGGER_TRACE(Logger, "Get previous frame with pts {} ({:.3f} s)", frame_buffer_[target_index]->pts,
-                frame_buffer_[target_index]->pts * time_base_);
+                      frame_buffer_[target_index]->pts * time_base_);
 
   // Set current index
   current_frame_index_ = target_index;
@@ -401,8 +400,9 @@ void VideoSource::SeekToFrameSerial(int target_serial, int timeout_ms) {
 
   int frames_to_skip = target_serial - keyframe_serial;
 
-  SPDLOG_LOGGER_TRACE(Logger, "SeekToFrameSerial: target_serial={}, keyframe_serial={}, keyframe_pts={}, frames_to_skip={}",
-                target_serial, keyframe_serial, keyframe_pts, frames_to_skip);
+  SPDLOG_LOGGER_TRACE(Logger,
+                      "SeekToFrameSerial: target_serial={}, keyframe_serial={}, keyframe_pts={}, frames_to_skip={}",
+                      target_serial, keyframe_serial, keyframe_pts, frames_to_skip);
 
   // 2. Notify the decode thread to seek to the keyframe and skip frames_to_skip frames
   //    Reuse start_frame_serial_ mechanism: decode thread skips the specified number of frames (no filter, no buffer)
@@ -516,8 +516,7 @@ void VideoSource::OpenStream() {
     for (AVHWDeviceType hw_type : hw_types_to_try) {
       ret = av_hwdevice_ctx_create(&hw_device_ctx_, hw_type, nullptr, nullptr, 0);
       if (ret < 0) {
-        Logger->warn("Failed to create hw device {}: {}",
-                     av_hwdevice_get_type_name(hw_type), ffmpeg_error_string(ret));
+        Logger->warn("Failed to create hw device {}: {}", av_hwdevice_get_type_name(hw_type), ffmpeg_error_string(ret));
         hw_device_ctx_ = nullptr;
         continue;
       }
@@ -545,8 +544,8 @@ void VideoSource::OpenStream() {
     int thread_count = decode_threads_ > 0 ? decode_threads_ : std::thread::hardware_concurrency();
     int extra = 16 /* max ref frames */ + thread_count + static_cast<int>(max_cached_frames_) + 8 /* safety margin */;
     dec_ctx_->extra_hw_frames = extra;
-    SPDLOG_LOGGER_TRACE(Logger, "Setting extra_hw_frames to {} (ref=16, threads={}, cache={}, margin=8)",
-                 extra, thread_count, max_cached_frames_);
+    SPDLOG_LOGGER_TRACE(Logger, "Setting extra_hw_frames to {} (ref=16, threads={}, cache={}, margin=8)", extra,
+                        thread_count, max_cached_frames_);
   }
 
   /* Init the decoders */
@@ -815,10 +814,10 @@ int VideoSource::FilterNextFrame(AVFrame *out, AVFrame *in) {
 void VideoSource::CreateFilterGraph(const AVFrame *frame) {
   // Print actual decoded frame format to confirm hardware decoding status
   bool is_hardware = frame->hw_frames_ctx != nullptr;
-  hw_decode_enabled_ = is_hardware;  // Record whether hardware decoding is actually used
+  hw_decode_enabled_ = is_hardware; // Record whether hardware decoding is actually used
   Logger->debug("{}: decoded frame format: {}{}", filename_,
-               av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)),
-               is_hardware ? " (hardware)" : " (software)");
+                av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)),
+                is_hardware ? " (hardware)" : " (software)");
 
   AVFilterGraph *graph = nullptr;
 

@@ -50,7 +50,8 @@ VideoFrame::~VideoFrame() {
 }
 
 void VideoFrame::UpdateAVFrame(std::shared_ptr<AVFrame> frame, AVBufferRef *hw_device_ref) {
-  // Calling av_frame_unref(pl_frame_.user_data.avframe): hardware frame textures are destroyed, software frame textures are not
+  // Calling av_frame_unref(pl_frame_.user_data.avframe): hardware frame textures are destroyed, software frame textures
+  // are not
   pl_unmap_avframe(gpu_, &pl_frame_);
 
   frame_ = frame;
@@ -105,13 +106,12 @@ convert:
   // Window::FeedFrames() (render.cpp). The main.cpp frame callback then triggers an automatic
   // fallback: appending format=rgb48le to the FFmpeg filter graph and re-decoding.
   if (!pl_map_avframe_ex(gpu_, &pl_frame_, &params)) {
-    throw texture_format_error(fmt::format(
-        "pl_map_avframe_ex() failed for pixel format {}",
-        av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame_->format))));
+    throw texture_format_error(fmt::format("pl_map_avframe_ex() failed for pixel format {}",
+                                           av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame_->format))));
   }
   Logger->trace("convert avframe from format {} to pl_frame texture {}",
                 av_get_pix_fmt_name(static_cast<enum AVPixelFormat>(frame_->format)), tex_[0]->params.format->name);
-  AVStream * stream = (AVStream *)frame_->opaque;
+  AVStream *stream = (AVStream *)frame_->opaque;
   pl_frame_copy_stream_props(&pl_frame_, stream);
 }
 

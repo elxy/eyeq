@@ -17,7 +17,8 @@ namespace EYEQ {
 /**
  * @class SyncVideoPlayer
  * @brief Multi-video synchronized player, coordinates all video decoders with the master clock
- *        The first added video stream is used as the reference stream; other streams fetch frames relative to it. Assumes all video streams share the same frame rate
+ *        The first added video stream is used as the reference stream; other streams fetch frames relative to it.
+ * Assumes all video streams share the same frame rate
  */
 class SyncPlayer {
 public:
@@ -184,10 +185,12 @@ protected:
 
   int waitint_time_ms_ = kTooLongIntervalMS;
 
-  std::atomic<bool> start_on_pause_{false};   // Indicates whether PlayerLoop should pause after submitting the first frame
-  std::atomic<bool> frames_outdated_{true};    // Indicates whether PlayerLoop needs to fetch the next frame
-  std::atomic<bool> step_forward_{true};      // Indicates the direction for PlayerLoop to fetch the next frame
-  std::atomic<bool> position_updated_{false}; // Indicates whether PlayerLoop needs to update playback position from the fetched frame's timestamp
+  std::atomic<bool> start_on_pause_{
+      false}; // Indicates whether PlayerLoop should pause after submitting the first frame
+  std::atomic<bool> frames_outdated_{true}; // Indicates whether PlayerLoop needs to fetch the next frame
+  std::atomic<bool> step_forward_{true};    // Indicates the direction for PlayerLoop to fetch the next frame
+  std::atomic<bool> position_updated_{
+      false}; // Indicates whether PlayerLoop needs to update playback position from the fetched frame's timestamp
 
   // Playback FPS calculation (fixed time window statistics)
   static constexpr float kFpsWindowSeconds = 1.0f; // Statistics window length (seconds)

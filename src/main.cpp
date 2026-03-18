@@ -173,7 +173,8 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
       ->option_text(sm_option_text);
 
   app.add_option("--seek-to", args.seek_to, "Seek to seconds before playing");
-  app.add_option("--seek-to-frame", args.seek_to_frame, "Start playing from the Nth frame (0-based)")->excludes("--seek-to");
+  app.add_option("--seek-to-frame", args.seek_to_frame, "Start playing from the Nth frame (0-based)")
+      ->excludes("--seek-to");
 
   app.add_flag("--save-in-source", args.save_in_source, "Use source's directory to save frames");
   app.add_option("--save-format", args.save_format, "Format of saved frames, default is png");
@@ -207,7 +208,6 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
                  "Use 'auto' for system profile, a file path for custom profile, "
                  "or 'N:path' to assign to specific video N (e.g. '0:display.icc')")
       ->expected(1, 10);
-
 
   try {
     app.parse(argc, argv);
@@ -385,9 +385,8 @@ int main(int argc, char **argv) {
   std::vector<int> ids;
   for (int i = 0; i < num_videos; i++) {
     try {
-      player.AddVideoSource(std::make_unique<VideoSource>(args.videos[i], args.filters[i],
-                                                          decode_threads, args.hardware_decoder),
-                            i);
+      player.AddVideoSource(
+          std::make_unique<VideoSource>(args.videos[i], args.filters[i], decode_threads, args.hardware_decoder), i);
     } catch (const std::exception &e) {
       Logger->critical(e.what());
       return 1;
@@ -417,8 +416,7 @@ int main(int argc, char **argv) {
       } else if (total_pixels > k8KPixels) {
         frame_cache = 16;
       }
-      Logger->debug("Total resolution {:.1f} Mpx, frame cache auto-set to {}",
-                   total_pixels / 1e6, frame_cache);
+      Logger->debug("Total resolution {:.1f} Mpx, frame cache auto-set to {}", total_pixels / 1e6, frame_cache);
     }
     for (auto &[id, src] : player) {
       src->SetMaxCachedFrames(frame_cache);
@@ -439,12 +437,9 @@ int main(int argc, char **argv) {
         codec_list += fmt::format("#{} ({})", id, args.videos[id]);
       }
       static const std::map<HardwareDecoder, const char *> hw_names = {
-          {HardwareDecoder::Auto, "auto"},
-          {HardwareDecoder::VideoToolbox, "videotoolbox"},
-          {HardwareDecoder::VAAPI, "vaapi"},
-          {HardwareDecoder::CUDA, "cuda"},
-          {HardwareDecoder::D3D12VA, "d3d12va"},
-          {HardwareDecoder::D3D11VA, "d3d11va"},
+          {HardwareDecoder::Auto, "auto"},       {HardwareDecoder::VideoToolbox, "videotoolbox"},
+          {HardwareDecoder::VAAPI, "vaapi"},     {HardwareDecoder::CUDA, "cuda"},
+          {HardwareDecoder::D3D12VA, "d3d12va"}, {HardwareDecoder::D3D11VA, "d3d11va"},
           {HardwareDecoder::DXVA2, "dxva2"},
       };
       auto it = hw_names.find(args.hardware_decoder);
@@ -585,12 +580,13 @@ int main(int argc, char **argv) {
     state.playback_fps = player.GetPlaybackFps();
     state.main_fps = player.FrameRate();
 
-    // Hardware acceleration suggestion: only logged once when hardware decoding is disabled and playback FPS is significantly lower than video FPS
+    // Hardware acceleration suggestion: only logged once when hardware decoding is disabled and playback FPS is
+    // significantly lower than video FPS
     {
       static bool hw_warn_emitted = false;
       if (!hw_warn_emitted && args.hardware_decoder == HardwareDecoder::None &&
-          player.CurrentTime() - player.StartTime() > 1.0f && state.playback_fps > 1.0f &&
-          state.main_fps > 1.0f && state.playback_fps < state.main_fps * 0.75f) {
+          player.CurrentTime() - player.StartTime() > 1.0f && state.playback_fps > 1.0f && state.main_fps > 1.0f &&
+          state.playback_fps < state.main_fps * 0.75f) {
         Logger->warn("Playback FPS ({:.1f}) is significantly lower than video FPS ({:.1f}). "
                      "Consider enabling hardware decoding with --hardware-decoder auto",
                      state.playback_fps, state.main_fps);
