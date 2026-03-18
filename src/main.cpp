@@ -28,6 +28,7 @@ extern "C" {
 #include "sync_player.hpp"
 #include "display/window.hpp"
 #include "display/render.hpp"
+#include "display/platform_activate.h"
 
 #include <libplacebo/colorspace.h>
 
@@ -372,6 +373,10 @@ int main(int argc, char **argv) {
     Logger->critical("Could not initialize SDL: {}", SDL_GetError());
     exit(1);
   }
+
+  // Allow mouse clicks to pass through to inactive windows on macOS, so that
+  // click events reach the SDL event loop even when the app is not activated.
+  SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
   SDL_DisplayID display_id = Window::CurrentDisplay();
 
   SyncPlayer player;
@@ -625,6 +630,7 @@ int main(int argc, char **argv) {
   // Fix macOS issue where the window loses focus after lengthy initialization
   SDL_PumpEvents();
   window.Raise();
+  EYEQ::ActivateApp();
 
   SDL_Event event;
   SDL_Keymod keymod;
@@ -696,14 +702,11 @@ int main(int argc, char **argv) {
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
       // Activate window on click if it doesn't have keyboard focus
       if (!window.HasInputFocus()) {
+        EYEQ::ActivateApp();
         window.Raise();
       }
       break;
     case SDL_EVENT_MOUSE_MOTION:
-      // Activate window on mouse enter if it doesn't have keyboard focus
-      if (!window.HasInputFocus()) {
-        window.Raise();
-      }
       if (event.motion.state & SDL_BUTTON_MMASK) {
         state.offset_x += event.motion.xrel * window.GetDisplayPixelDensity();
         state.offset_y += event.motion.yrel * window.GetDisplayPixelDensity();
@@ -801,6 +804,12 @@ int main(int argc, char **argv) {
       need_refresh = true;
     } break;
       // Window event handling for tracking mouse state
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+      // Ensure the app is fully activated when the window gains focus.
+      // On macOS, window focus and app activation are separate concepts;
+      // the title bar stays grey until the app itself is activated.
+      EYEQ::ActivateApp();
+      break;
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
       Logger->debug("Window pixel size changed {}x{}", event.window.data1, event.window.data2);
       need_refresh = window.OnResized();

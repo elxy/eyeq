@@ -60,13 +60,16 @@ find_package(FFmpeg REQUIRED COMPONENTS avcodec avfilter avformat avutil swscale
 file(GLOB_RECURSE C_SOURCES "${CMAKE_SOURCE_DIR}/src/*.c")
 file(GLOB_RECURSE CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/*.cpp")
 
-# Platform-specific ICC profile detection source files
+# Platform-specific source files
 if(APPLE)
-  # macOS: use .mm implementation, exclude stub
+  # macOS: use .mm implementations, exclude stubs
   list(REMOVE_ITEM CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_icc_stub.cpp")
-  set(PLATFORM_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_icc_mac.mm")
+  list(REMOVE_ITEM CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_activate_stub.cpp")
+  set(PLATFORM_SOURCES
+    "${CMAKE_SOURCE_DIR}/src/display/platform_icc_mac.mm"
+    "${CMAKE_SOURCE_DIR}/src/display/platform_activate_mac.mm")
 else()
-  # Other platforms: stub already collected by GLOB_RECURSE
+  # Other platforms: stubs already collected by GLOB_RECURSE
   set(PLATFORM_SOURCES "")
 endif()
 
