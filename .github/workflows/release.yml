@@ -208,7 +208,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: eyeq-windows-x86_64
+          name: eyeq-windows
           path: eyeq-*-windows-x86_64.zip
 
   release:
