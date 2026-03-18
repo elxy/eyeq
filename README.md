@@ -183,13 +183,16 @@ After launching, the following keyboard and mouse controls are available:
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
 - `--seek-to <secs>`: Start playback at the specified time (in seconds)
 - `--seek-frames <frames>`: Start playback at the specified frame number (may be slow for large values)
-- `--frame-cache <frames>`: Frame cache size (default 16). If the cache size is smaller than the I-frame interval, stepping backward with `A` may jump to the previous I-frame
 - `--save-in-source`: Save frames (via `Ctrl + S`) to the source video's directory instead of the current working directory
 - `--save-format <format>`: Frame save format (default `png`)
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`: Hardware decoder (default `none`)
 - `--icc-profile <profile>`: ICC color management — `auto` uses the system profile (macOS only); a file path specifies a custom ICC profile; `N:path` specifies a profile for a specific video
 - `--loglevel <level>`: Log level — `debug`, `info`, `warning`, `error`, `critical`, `off` (default `info`)
 - `--debug`: Equivalent to `--loglevel debug`
+
+### Environment Variables
+
+- `EYEQ_FRAME_CACHE`: Override the automatic frame cache size. By default, EyeQ adjusts the frame cache based on total video resolution: 32 frames for ≤ 8K, 16 frames for > 8K, and 8 frames for > 16K total pixels. Set this variable to a positive integer to use a fixed cache size instead
 
 ## FAQ
 

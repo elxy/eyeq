@@ -177,13 +177,16 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
 - `--seek-to <secs>`：播放起始时间，单位为秒
 - `--seek-frames <frames>`：播放起始帧数，当帧数较大时速度会比较慢
-- `--frame-cache <frames>`：帧缓存数量，默认为16。如果帧缓存大小小于I帧间隔，则按`A`回退时可能会跳跃到上一个I帧
 - `--save-in-source`：设置后，`Ctrl + S`将保存视频当前帧到视频文件所在目录中
 - `--save-format <format>`：帧保存格式，默认为`png`
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`：硬件解码器，默认`none`
 - `--icc-profile <profile>`：ICC色彩管理。`auto`使用系统配置(仅macOS)，也可指定ICC文件路径，或`N:path`为特定视频指定
 - `--loglevel <level>`：日志级别，包括`debug`、`info`、`warning`、`error`、`critical`、`off`，默认为`info`
 - `--debug`：等同于`--loglevel debug`
+
+### 环境变量
+
+- `EYEQ_FRAME_CACHE`：覆盖自动帧缓存大小。默认情况下，EyeQ根据所有视频的总分辨率自动调整帧缓存：总像素≤8K时为32帧，>8K时为16帧，>16K时为8帧。设置该环境变量为正整数可使用固定的缓存大小
 
 ## FAQ
 

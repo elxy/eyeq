@@ -47,6 +47,12 @@ public:
   int GetMainId() const { return main_id_; }
   bool HasVideoSource(int id) const { return sources_.find(id) != sources_.end(); }
 
+  // Iterator support for range-based for loops over video sources
+  auto begin() { return sources_.begin(); }
+  auto end() { return sources_.end(); }
+  auto begin() const { return sources_.begin(); }
+  auto end() const { return sources_.end(); }
+
   int Width(int id = -1);
   int Height(int id = -1);
   float FrameRate(int id = -1);

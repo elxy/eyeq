@@ -39,14 +39,29 @@ struct AVFrameDeleter {
 
 class VideoSource {
 public:
-  explicit VideoSource(std::string filename, std::string filter_graph, size_t max_cached_frames = kMaxCachedFrames,
-                       int decode_threads = 0, HardwareDecoder hw_decoder = HardwareDecoder::None);
+  explicit VideoSource(std::string filename, std::string filter_graph, int decode_threads = 0,
+                       HardwareDecoder hw_decoder = HardwareDecoder::None);
   ~VideoSource();
 
   const std::string &Filename() const { return filename_; }
   int StreamIndex() const { return stream_index_; }
   int Width();
   int Height();
+
+  /**
+   * @brief Get codec-level width (available immediately after construction, no decoding needed)
+   */
+  int CodecWidth() const { return dec_ctx_->width; }
+
+  /**
+   * @brief Get codec-level height (available immediately after construction, no decoding needed)
+   */
+  int CodecHeight() const { return dec_ctx_->height; }
+
+  /**
+   * @brief Set the maximum number of cached frames (must be called before Start())
+   */
+  void SetMaxCachedFrames(size_t max_cached_frames);
   const char *CodecName() const { return avcodec_get_name(dec_ctx_->codec_id); }
   const char *PixelFormat() const { return av_get_pix_fmt_name(dec_ctx_->pix_fmt); }
   const char *ColorSpace() const { return av_color_space_name(dec_ctx_->colorspace); }
@@ -205,7 +220,7 @@ private:
   // Cached frames; the last element is the newest, index 0 is the oldest
   // The decoding thread only appends new frames at the end; it does not access the front or current_frame_index_
   static constexpr size_t kMaxCachedFrames = 16;
-  const size_t max_cached_frames_;
+  size_t max_cached_frames_;
   int decode_threads_;
   std::deque<std::shared_ptr<AVFrame>> frame_buffer_;
   // Current frame index

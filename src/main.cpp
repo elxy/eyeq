@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -53,7 +54,6 @@ struct EyeQArgs {
 
   float seek_to;
   size_t seek_frames;
-  size_t frame_cache;
 
   bool save_in_source;
   std::string save_format;
@@ -173,7 +173,6 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
 
   app.add_option("--seek-to", args.seek_to, "Seek to seconds before playing");
   app.add_option("--seek-frames", args.seek_frames, "Seek for frames before playing")->excludes("--seek-to");
-  app.add_option("--frame-cache", args.frame_cache, "The number of cached frames for step next/previous frame");
 
   app.add_flag("--save-in-source", args.save_in_source, "Use source's directory to save frames");
   app.add_option("--save-format", args.save_format, "Format of saved frames, default is png");
@@ -356,7 +355,6 @@ int main(int argc, char **argv) {
       .plane_scale_method = ScaleMethod::Lanczos,
       .seek_to = 0.,
       .seek_frames = 0,
-      .frame_cache = 32,
       .save_in_source = false,
       .save_format = "png",
       .log_level = LoggingLevel::INFO,
@@ -382,7 +380,7 @@ int main(int argc, char **argv) {
   std::vector<int> ids;
   for (int i = 0; i < num_videos; i++) {
     try {
-      player.AddVideoSource(std::make_unique<VideoSource>(args.videos[i], args.filters[i], args.frame_cache,
+      player.AddVideoSource(std::make_unique<VideoSource>(args.videos[i], args.filters[i],
                                                           decode_threads, args.hardware_decoder),
                             i);
     } catch (const std::exception &e) {
@@ -391,6 +389,35 @@ int main(int argc, char **argv) {
     }
     if (!args.ref_id.has_value() || i != args.ref_id.value())
       ids.push_back(i);
+  }
+
+  // Determine frame cache size: env override > auto based on total resolution
+  {
+    size_t frame_cache = 32;
+    const char *env_cache = std::getenv("EYEQ_FRAME_CACHE");
+    if (env_cache) {
+      frame_cache = std::stoul(env_cache);
+      Logger->info("Frame cache set to {} via EYEQ_FRAME_CACHE", frame_cache);
+    } else {
+      // Total resolution = sum of width * height across all videos
+      int64_t total_pixels = 0;
+      for (auto &[id, src] : player) {
+        total_pixels += static_cast<int64_t>(src->CodecWidth()) * src->CodecHeight();
+      }
+      // 8K ~ 7680x4320 = 33,177,600 pixels;  16K ~ 2x 8K = 66,355,200 pixels
+      constexpr int64_t k8KPixels = 33'177'600;
+      constexpr int64_t k16KPixels = k8KPixels * 4;
+      if (total_pixels > k16KPixels) {
+        frame_cache = 8;
+      } else if (total_pixels > k8KPixels) {
+        frame_cache = 16;
+      }
+      Logger->info("Total resolution {:.1f} Mpx, frame cache auto-set to {}",
+                   total_pixels / 1e6, frame_cache);
+    }
+    for (auto &[id, src] : player) {
+      src->SetMaxCachedFrames(frame_cache);
+    }
   }
   player.SetMainId(args.main_id);
   Logger->info("Main video is #{}: {}", args.main_id, args.videos[args.main_id]);

@@ -18,10 +18,10 @@ extern "C" {
 
 using namespace EYEQ;
 
-VideoSource::VideoSource(std::string filename, std::string filter_graph, size_t max_cached_frames,
+VideoSource::VideoSource(std::string filename, std::string filter_graph,
                          int decode_threads, HardwareDecoder hw_decoder)
     : filename_(std::move(filename)), hw_decoder_(hw_decoder), filter_graph_(std::move(filter_graph)),
-      max_cached_frames_(max_cached_frames), decode_threads_(decode_threads) {
+      max_cached_frames_(kMaxCachedFrames), decode_threads_(decode_threads) {
   fmt_ctx_ = nullptr;
   dec_ctx_ = nullptr;
   stream_index_ = -1;
@@ -89,6 +89,15 @@ int VideoSource::Height() {
   } else {
     return dec_ctx_->height;
   }
+}
+
+void VideoSource::SetMaxCachedFrames(size_t max_cached_frames) {
+  if (one_thread_.joinable()) {
+    Logger->critical("SetMaxCachedFrames() called after Start(), this is a bug");
+    std::abort();
+  }
+  max_cached_frames_ = max_cached_frames;
+  Logger->debug("{}: frame cache set to {}", filename_, max_cached_frames_);
 }
 
 int VideoSource::GetCurrentFrameSerial() {
