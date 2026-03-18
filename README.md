@@ -121,7 +121,7 @@ eyeq --hardware-decoder videotoolbox <test_0> <test_1>
 eyeq --hardware-decoder vaapi <test_0> <test_1>
 ```
 
-Supported hardware decoders: `none` (default), `auto`, `videotoolbox` (macOS), `vaapi` (Linux), `cuda` (NVIDIA), `d3d12va` (Windows), `d3d11va` (Windows), `dxva2` (Windows).
+Supported hardware decoders: `auto` (default), `none`, `videotoolbox` (macOS), `vaapi` (Linux), `cuda` (NVIDIA), `d3d12va` (Windows), `d3d11va` (Windows), `dxva2` (Windows).
 
 ### ICC Color Management
 
@@ -185,7 +185,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--seek-to-frame <N>`: Start playback from the Nth frame (0-based)
 - `--save-in-source`: Save frames (via `Ctrl + S`) to the source video's directory instead of the current working directory
 - `--save-format <format>`: Frame save format (default `png`)
-- `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`: Hardware decoder (default `none`)
+- `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`: Hardware decoder (default `auto`)
 - `--icc-profile <profile>`: ICC color management — `auto` uses the system profile (macOS only); a file path specifies a custom ICC profile; `N:path` specifies a profile for a specific video
 - `--loglevel <level>`: Log level — `debug`, `info`, `warning`, `error`, `critical`, `off` (default `info`)
 - `--debug`: Equivalent to `--loglevel debug`

@@ -115,7 +115,7 @@ eyeq --hardware-decoder videotoolbox <test_0> <test_1>
 eyeq --hardware-decoder vaapi <test_0> <test_1>
 ```
 
-支持的硬件解码器：`none`(默认)、`auto`、`videotoolbox`(macOS)、`vaapi`(Linux)、`cuda`(NVIDIA)、`d3d12va` (Windows)、`d3d11va` (Windows)、`dxva2` (Windows)。
+支持的硬件解码器：`auto`(默认)、`none`、`videotoolbox`(macOS)、`vaapi`(Linux)、`cuda`(NVIDIA)、`d3d12va` (Windows)、`d3d11va` (Windows)、`dxva2` (Windows)。
 
 ### ICC色彩管理
 
@@ -179,7 +179,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--seek-to-frame <N>`：从第 N 帧开始播放（从 0 开始计数）
 - `--save-in-source`：设置后，`Ctrl + S`将保存视频当前帧到视频文件所在目录中
 - `--save-format <format>`：帧保存格式，默认为`png`
-- `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`：硬件解码器，默认`none`
+- `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`：硬件解码器，默认`auto`
 - `--icc-profile <profile>`：ICC色彩管理。`auto`使用系统配置(仅macOS)，也可指定ICC文件路径，或`N:path`为特定视频指定
 - `--loglevel <level>`：日志级别，包括`debug`、`info`、`warning`、`error`、`critical`、`off`，默认为`info`
 - `--debug`：等同于`--loglevel debug`

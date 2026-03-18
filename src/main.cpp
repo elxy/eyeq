@@ -359,7 +359,7 @@ int main(int argc, char **argv) {
       .save_in_source = false,
       .save_format = "png",
       .log_level = LoggingLevel::INFO,
-      .hardware_decoder = HardwareDecoder::None,
+      .hardware_decoder = HardwareDecoder::Auto,
   };
 
   parse_args(args, argc, argv);
