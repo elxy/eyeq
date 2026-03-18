@@ -221,7 +221,7 @@ After launching, the following keyboard and mouse controls are available:
 
 4. **Error: `Failed picking any compatible texture format for a plane!`**
 
-   This means libplacebo does not support the current pixel format. Use `--filter format=rgb48le` to convert the format via FFmpeg.
+   This means libplacebo does not support the current pixel format. EyeQ will automatically append a `format=rgb48le` filter to convert the pixel format via FFmpeg. If you have already specified a `format=` filter manually, EyeQ will not override it — in that case, try `--filter format=rgb48le`.
 
 ## License
 

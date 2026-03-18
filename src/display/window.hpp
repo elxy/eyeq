@@ -100,8 +100,9 @@ public:
    * @brief Feed frames to the renderer for rendering
    *
    * @param frames Video frames
+   * @return List of video IDs that failed due to incompatible texture format
    */
-  void FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames);
+  std::vector<int> FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames);
   void Render(const DisplayState &state);
 
   OsdManager &GetOsdManager() { return *osd_manager_; }

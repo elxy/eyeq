@@ -159,6 +159,12 @@ public:
    */
   bool IsEOF() const { return eof_.load(); }
 
+  /**
+   * @brief Request the decode thread to append format=rgb48le on next filter graph rebuild
+   * @return true if the request was accepted; false if user already specified format or fallback was already attempted
+   */
+  bool RequestFormatFallback();
+
 private:
   std::string filename_;
 
@@ -181,6 +187,8 @@ private:
   std::string filter_graph_;
   AVFilterGraph *graph_;
   AVFilterContext *filt_in_, *filt_out_;
+  std::atomic<bool> need_format_fallback_{false};  // Signal decode thread to append format filter
+  bool format_fallback_applied_{false};            // Whether format fallback has been applied (decode thread only)
 
   // Decoding state
   std::thread one_thread_;

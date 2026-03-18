@@ -215,4 +215,4 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 4. 错误提示：`Failed picking any compatible texture format for a plane!`
 
-   说明libplacebo不支持当前pixel format。可以使用`--filter format=rgb48le`，通过FFmpeg进行格式转换。
+   说明libplacebo不支持当前pixel format。EyeQ会自动追加`format=rgb48le`滤镜，通过FFmpeg进行格式转换。如果已手动指定了`format=`滤镜，EyeQ不会覆盖，此时请尝试`--filter format=rgb48le`。

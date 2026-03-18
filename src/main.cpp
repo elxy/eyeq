@@ -566,7 +566,20 @@ int main(int argc, char **argv) {
       }
     }
 
-    window.FeedFrames(frames);
+    auto failed_ids = window.FeedFrames(frames);
+    if (!failed_ids.empty()) {
+      for (int id : failed_ids) {
+        if (!player.GetVideoSource(id)->RequestFormatFallback()) {
+          Logger->critical("Video #{} ({}): texture format incompatible and auto fallback failed. "
+                           "Try manually specifying --filter format=rgb48le",
+                           id, args.videos[id]);
+          exit(1);
+        }
+      }
+      // Re-seek to current position to trigger filter graph rebuild in decode thread
+      player.SeekTo(player.CurrentTime());
+      return;
+    }
     need_refresh = true;
   });
   player.SetFlickerCallback(args.flicker_interval, [&state, &need_refresh]() {

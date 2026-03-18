@@ -146,6 +146,13 @@ public:
    */
   float GetPlaybackFps() const;
 
+  /**
+   * @brief Get video source by ID
+   * @param id Video ID
+   * @return Pointer to the video source
+   */
+  VideoSource *GetVideoSource(int id) { return sources_.at(id).get(); }
+
 protected:
   int ResolveId(int id) const { return id < 0 ? main_id_ : id; }
 

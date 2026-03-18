@@ -15,6 +15,7 @@ extern "C" {
 
 #include "log.hpp"
 #include "osd.hpp"
+#include "utils.hpp"
 #include "window.hpp"
 #include "fill_render.hpp"
 #include "slide_render.hpp"
@@ -98,23 +99,32 @@ void Window::InitRender(DisplayMode display_mode, ScaleMethod &scale_method, Sca
   osd_manager_ = std::make_unique<OsdManager>(swapchain_->gpu, pixel_density);
 }
 
-void Window::FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames) {
+std::vector<int> Window::FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames) {
+  std::vector<int> failed_ids;
   std::unique_lock<std::mutex> lock(render_mutex_);
   for (auto [i, frame] : frames) {
-    auto search = av_frames_.find(i);
-    if (search != av_frames_.end()) {
-      av_frames_.at(i).UpdateAVFrame(frame, hw_device_ref_);
-    } else {
-      // Avoid creating a temporary Frame that gets immediately destroyed
-      av_frames_.try_emplace(i, frame, swapchain_->gpu, hw_device_ref_);
+    try {
+      auto search = av_frames_.find(i);
+      if (search != av_frames_.end()) {
+        av_frames_.at(i).UpdateAVFrame(frame, hw_device_ref_);
+      } else {
+        // Avoid creating a temporary Frame that gets immediately destroyed
+        av_frames_.try_emplace(i, frame, swapchain_->gpu, hw_device_ref_);
+      }
+      pl_frames_[i] = av_frames_.at(i).GetPLFrame();
+    } catch (const texture_format_error &e) {
+      Logger->warn("Video #{}: {}", i, e.what());
+      failed_ids.push_back(i);
     }
-
-    pl_frames_[i] = av_frames_.at(i).GetPLFrame();
+  }
+  if (!failed_ids.empty()) {
+    return failed_ids;
   }
   struct pl_frame *main = pl_frames_.at(main_id_);
   struct pl_color_space *color = &main->color;
   ColorspaceHint(colorspace_hint_ ? color : nullptr);
   display_render_->UpdateMainFrame(main);
+  return failed_ids;
 }
 
 // Format seconds as HH:MM:SS

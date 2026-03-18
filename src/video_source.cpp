@@ -807,6 +807,18 @@ void VideoSource::CreateFilterGraph(const AVFrame *frame) {
     Logger->info("Auto-inserted hwdownload for hardware frames, effective filter: {}", effective_filter);
   }
 
+  // Auto-append format=rgb48le when texture format is incompatible with libplacebo
+  if (need_format_fallback_.load()) {
+    if (effective_filter.empty()) {
+      effective_filter = "format=rgb48le";
+    } else {
+      effective_filter += ",format=rgb48le";
+    }
+    format_fallback_applied_ = true;
+    need_format_fallback_.store(false);
+    Logger->warn("{}: auto-appending format=rgb48le filter to handle incompatible texture format", filename_);
+  }
+
   int nb_filters = graph->nb_filters;
   AVFilterInOut *outputs = nullptr, *inputs = nullptr;
   if (!effective_filter.empty()) {
@@ -851,6 +863,22 @@ void VideoSource::CreateFilterGraph(const AVFrame *frame) {
   avfilter_inout_free(&outputs);
   avfilter_inout_free(&inputs);
   av_freep(&par);
+}
+
+bool VideoSource::RequestFormatFallback() {
+  // User filter already contains format=, do not override
+  if (filter_graph_.find("format=") != std::string::npos) {
+    Logger->warn("{}: user filter already contains format specifier, skipping auto format fallback", filename_);
+    return false;
+  }
+  // Already attempted fallback, do not retry
+  if (need_format_fallback_.load() || format_fallback_applied_) {
+    Logger->error("{}: format fallback already attempted, giving up", filename_);
+    return false;
+  }
+  need_format_fallback_.store(true);
+  decode_need_reset_.store(true);
+  return true;
 }
 
 void VideoSource::CleanupOldFrames() {

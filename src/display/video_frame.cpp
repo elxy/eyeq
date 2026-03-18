@@ -97,7 +97,9 @@ convert:
   struct pl_avframe_params params = {.frame = frame_.get(), .tex = tex_, .map_dovi = true};
   // pl_map_avframe_ex clones the frame via av_frame_clone. tex stores textures for non-hardware frames
   if (!pl_map_avframe_ex(gpu_, &pl_frame_, &params)) {
-    throw std::runtime_error("pl_map_avframe_ex() failed");
+    throw texture_format_error(fmt::format(
+        "pl_map_avframe_ex() failed for pixel format {}",
+        av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame_->format))));
   }
   Logger->trace("convert avframe from format {} to pl_frame texture {}",
                 av_get_pix_fmt_name(static_cast<enum AVPixelFormat>(frame_->format)), tex_[0]->params.format->name);

@@ -29,6 +29,12 @@ public:
   timeout_error(const char *what_arg) : std::runtime_error(what_arg) {}
 };
 
+class texture_format_error : public std::runtime_error {
+public:
+  texture_format_error(const std::string &what_arg) : std::runtime_error(what_arg) {}
+  texture_format_error(const char *what_arg) : std::runtime_error(what_arg) {}
+};
+
 /**
  * @brief Convert timeout to std::chrono::milliseconds
  *
