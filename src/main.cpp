@@ -580,20 +580,6 @@ int main(int argc, char **argv) {
     state.playback_fps = player.GetPlaybackFps();
     state.main_fps = player.FrameRate();
 
-    // Hardware acceleration suggestion: only logged once when hardware decoding is disabled and playback FPS is
-    // significantly lower than video FPS
-    {
-      static bool hw_warn_emitted = false;
-      if (!hw_warn_emitted && args.hardware_decoder == HardwareDecoder::None &&
-          player.CurrentTime() - player.StartTime() > 1.0f && state.playback_fps > 1.0f && state.main_fps > 1.0f &&
-          state.playback_fps < state.main_fps * 0.75f) {
-        Logger->warn("Playback FPS ({:.1f}) is significantly lower than video FPS ({:.1f}). "
-                     "Consider enabling hardware decoding with --hardware-decoder auto",
-                     state.playback_fps, state.main_fps);
-        hw_warn_emitted = true;
-      }
-    }
-
     auto failed_ids = window.FeedFrames(frames);
     if (!failed_ids.empty()) {
       for (int id : failed_ids) {
@@ -799,13 +785,6 @@ int main(int argc, char **argv) {
                     state.scale, mouse_x, mouse_y, state.offset_x, state.offset_y);
       need_refresh = true;
     } break;
-      // Window event handling for tracking mouse state
-    case SDL_EVENT_WINDOW_FOCUS_GAINED:
-      // Ensure the app is fully activated when the window gains focus.
-      // On macOS, window focus and app activation are separate concepts;
-      // the title bar stays grey until the app itself is activated.
-      EYEQ::ActivateApp();
-      break;
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
       Logger->debug("Window pixel size changed {}x{}", event.window.data1, event.window.data2);
       need_refresh = window.OnResized();
