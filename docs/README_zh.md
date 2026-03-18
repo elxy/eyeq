@@ -172,6 +172,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--filter <filter>`：指定视频滤镜，作为未单独指定滤镜的视频的默认滤镜，即[FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html)。也可以在视频路径后使用`@`分隔符为单个视频指定滤镜，如`video.mp4@"filter"`
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
 - `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
+- `--sdr-white-on-hdr <nits>`：当主视频为HDR时，设置SDR视频的参考白电平（单位nits）。默认按照标准参考白203 nits（ITU-R BT.2408）进行映射。该选项仅在主视频为HDR、对比视频为SDR时生效
 - `--high-dpi {auto,yes,no}`：High-DPI模式，默认`auto`自动检测
 - `--scale-method <method>`：视频放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
@@ -214,7 +215,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
    可以，但需要注意通过`--main`指定主视频。
    - 如果主视频是SDR，则渲染的目标色彩空间是SDR的，HDR视频会进行色调映射
-   - 如果主视频是HDR10，则渲染的目标色彩空间是HDR10的，SDR视频按照参考白(203 nits)进行映射
+   - 如果主视频是HDR10，则渲染的目标色彩空间是HDR10的，SDR视频按照参考白(203 nits)进行映射。可通过`--sdr-white-on-hdr`调整该亮度
 
 4. 不兼容的像素格式（如提示`pl_map_avframe_ex() failed`）
 

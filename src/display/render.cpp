@@ -123,6 +123,21 @@ std::vector<int> Window::FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &fra
   struct pl_frame *main = pl_frames_.at(main_id_);
   struct pl_color_space *color = &main->color;
   ColorspaceHint(colorspace_hint_ ? color : nullptr);
+
+  // Override SDR white level when the main video is HDR
+  if (sdr_white_on_hdr_ > 0 && pl_color_space_is_hdr(color)) {
+    static bool sdr_white_logged = false;
+    for (auto &[id, frame] : pl_frames_) {
+      if (!pl_color_space_is_hdr(&frame->color)) {
+        frame->color.hdr.max_luma = sdr_white_on_hdr_;
+        if (!sdr_white_logged) {
+          Logger->info("Video #{}: SDR white on HDR set to {:.0f} nits", id, sdr_white_on_hdr_);
+        }
+      }
+    }
+    sdr_white_logged = true;
+  }
+
   display_render_->UpdateMainFrame(main);
   return failed_ids;
 }

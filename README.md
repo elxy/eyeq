@@ -178,6 +178,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--filter <filter>`: Default video filter applied to videos without a per-video filter, using [FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html) syntax. Per-video filters can be appended after the video path with `@`, e.g. `video.mp4@"filter"`
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
 - `--no-colorspace-hint`: Disable video color space hinting; uses the default color space instead. Enable this for tone mapping when the display does not support HDR
+- `--sdr-white-on-hdr <nits>`: Set the SDR reference white level (in nits) when the main video is HDR. By default, SDR videos are mapped using the standard reference white of 203 nits (ITU-R BT.2408). This option only takes effect when the main video is HDR and the target video is SDR
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
 - `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
@@ -220,7 +221,7 @@ After launching, the following keyboard and mouse controls are available:
 
    Yes, but you need to use `--main` to specify the main video.
    - If the main video is SDR, the target color space is SDR, and HDR videos will be tone-mapped
-   - If the main video is HDR10, the target color space is HDR10, and SDR videos will be mapped using a reference white of 203 nits
+   - If the main video is HDR10, the target color space is HDR10, and SDR videos will be mapped using a reference white of 203 nits. Use `--sdr-white-on-hdr` to override this value
 
 4. **Incompatible pixel format (e.g. `pl_map_avframe_ex() failed`)**
 

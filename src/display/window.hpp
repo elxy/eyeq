@@ -72,6 +72,7 @@ public:
   bool HasInputFocus() const { return SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS; }
 
   void SetMainSource(int id) { main_id_ = id; }
+  void SetSdrWhiteOnHdr(float nits) { sdr_white_on_hdr_ = nits; }
 
   /**
    * @brief Load ICC profile
@@ -150,6 +151,7 @@ protected:
   std::unique_ptr<OsdManager> osd_manager_;
 
   int main_id_;
+  float sdr_white_on_hdr_ = 0; // SDR white level override (nits) for HDR rendering
   std::map<int, VideoFrame> av_frames_;
   std::map<int, struct pl_frame *> pl_frames_;
   std::mutex render_mutex_;

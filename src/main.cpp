@@ -63,6 +63,7 @@ struct EyeQArgs {
   HardwareDecoder hardware_decoder;
 
   std::vector<std::string> icc_profiles; // ICC profile specifications
+  float sdr_white_on_hdr;                // SDR white level (nits) when rendering under HDR
 };
 
 void print_version([[maybe_unused]] int count) {
@@ -150,6 +151,8 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
       "Specific the numbers of columns and rows in grid mode, e.g. 3x1. Default is auto selected");
 
   app.add_flag("!--no-colorspace-hint", args.colorspace_hint, "Disable colorspace hint to allow tone mapping");
+  app.add_option("--sdr-white-on-hdr", args.sdr_white_on_hdr,
+                 "SDR reference white level in nits when the main video is HDR (default: 203)");
   std::map<std::string, HighDpiMode> hdpi_map{
       {"auto", HighDpiMode::Auto}, {"yes", HighDpiMode::Yes}, {"no", HighDpiMode::No}};
   app.add_option("--high-dpi", args.high_dpi_mode, "High DPI mode")
@@ -360,6 +363,7 @@ int main(int argc, char **argv) {
       .save_format = "png",
       .log_level = LoggingLevel::INFO,
       .hardware_decoder = HardwareDecoder::Auto,
+      .sdr_white_on_hdr = 0,
   };
 
   parse_args(args, argc, argv);
@@ -506,6 +510,9 @@ int main(int argc, char **argv) {
     window.LoadICCProfile(spec, std::nullopt);
   }
 
+  if (args.sdr_white_on_hdr > 0) {
+    window.SetSdrWhiteOnHdr(args.sdr_white_on_hdr);
+  }
   window.SetMainSource(args.main_id);
 
   struct DisplayState state = {
