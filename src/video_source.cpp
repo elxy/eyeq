@@ -97,7 +97,7 @@ void VideoSource::SetMaxCachedFrames(size_t max_cached_frames) {
     std::abort();
   }
   max_cached_frames_ = max_cached_frames;
-  Logger->debug("{}: frame cache set to {}", filename_, max_cached_frames_);
+  SPDLOG_LOGGER_TRACE(Logger, "{}: frame cache set to {}", filename_, max_cached_frames_);
 }
 
 int VideoSource::GetCurrentFrameSerial() {
@@ -181,7 +181,7 @@ void VideoSource::Start(size_t start_frame) {
 
     int frames_to_skip = target_serial - keyframe_serial;
 
-    Logger->info("Fast seek: target_serial={}, keyframe_serial={}, frames_to_skip={} (saved {} full decodes)",
+    Logger->debug("Fast seek: target_serial={}, keyframe_serial={}, frames_to_skip={} (saved {} full decodes)",
                  target_serial, keyframe_serial, frames_to_skip, target_serial - frames_to_skip);
 
     decode_start_pts_ = keyframe_pts;
@@ -278,7 +278,7 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
       // GOP exceeds cache: skip early frames (decode-only, no filter/buffer) so that
       // only the frames around the target end up in the buffer.
       frames_to_skip = frames_in_gop - max_cached_frames_ / 2;
-      Logger->debug("GOP size ({}) exceeds cache ({}), skipping {} frames via seek",
+      SPDLOG_LOGGER_TRACE(Logger, "GOP size ({}) exceeds cache ({}), skipping {} frames via seek",
                     frames_in_gop, max_cached_frames_, frames_to_skip);
     }
   }
@@ -320,7 +320,7 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
       break;
     }
   }
-  Logger->debug("Get previous frame with pts {} ({:.3f} s)", frame_buffer_[target_index]->pts,
+  SPDLOG_LOGGER_TRACE(Logger, "Get previous frame with pts {} ({:.3f} s)", frame_buffer_[target_index]->pts,
                 frame_buffer_[target_index]->pts * time_base_);
 
   // Set current index
@@ -401,7 +401,7 @@ void VideoSource::SeekToFrameSerial(int target_serial, int timeout_ms) {
 
   int frames_to_skip = target_serial - keyframe_serial;
 
-  Logger->debug("SeekToFrameSerial: target_serial={}, keyframe_serial={}, keyframe_pts={}, frames_to_skip={}",
+  SPDLOG_LOGGER_TRACE(Logger, "SeekToFrameSerial: target_serial={}, keyframe_serial={}, keyframe_pts={}, frames_to_skip={}",
                 target_serial, keyframe_serial, keyframe_pts, frames_to_skip);
 
   // 2. Notify the decode thread to seek to the keyframe and skip frames_to_skip frames
@@ -521,12 +521,12 @@ void VideoSource::OpenStream() {
         hw_device_ctx_ = nullptr;
         continue;
       }
-      Logger->info("Using hardware decoder: {}", av_hwdevice_get_type_name(hw_type));
+      Logger->debug("Using hardware decoder: {}", av_hwdevice_get_type_name(hw_type));
       dec_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
       break;
     }
     if (!hw_device_ctx_) {
-      Logger->warn("All hardware decoders failed, falling back to software decoding");
+      Logger->debug("All hardware decoders failed, falling back to software decoding");
     }
   }
 
@@ -545,7 +545,7 @@ void VideoSource::OpenStream() {
     int thread_count = decode_threads_ > 0 ? decode_threads_ : std::thread::hardware_concurrency();
     int extra = 16 /* max ref frames */ + thread_count + static_cast<int>(max_cached_frames_) + 8 /* safety margin */;
     dec_ctx_->extra_hw_frames = extra;
-    Logger->info("Setting extra_hw_frames to {} (ref=16, threads={}, cache={}, margin=8)",
+    SPDLOG_LOGGER_TRACE(Logger, "Setting extra_hw_frames to {} (ref=16, threads={}, cache={}, margin=8)",
                  extra, thread_count, max_cached_frames_);
   }
 
@@ -624,7 +624,7 @@ void VideoSource::BuildKeyFrameIndex() {
 
   total_frames_ = serial;
 
-  Logger->info("Built keyframe index: {} keyframes, {} total frames", keyframe_serial_index_.size(), total_frames_);
+  Logger->debug("Built keyframe index: {} keyframes, {} total frames", keyframe_serial_index_.size(), total_frames_);
 
   start_pts_ = start_pts;
   end_pts_ = end_pts;
@@ -870,7 +870,7 @@ void VideoSource::CreateFilterGraph(const AVFrame *frame) {
     AVHWFramesContext *hw_frames = (AVHWFramesContext *)frame->hw_frames_ctx->data;
     const char *sw_fmt_name = av_get_pix_fmt_name(hw_frames->sw_format);
     effective_filter = fmt::format("hwdownload,format={},{}", sw_fmt_name, filter_graph_);
-    Logger->info("Auto-inserted hwdownload for hardware frames, effective filter: {}", effective_filter);
+    Logger->debug("Auto-inserted hwdownload for hardware frames, effective filter: {}", effective_filter);
   }
 
   // Auto-append format=rgb48le when texture format is incompatible with libplacebo

@@ -448,10 +448,10 @@ void Window::LoadICCProfile(const std::string &path, std::optional<int> video_id
       Logger->error("Failed to open ICC profile for video {}", id);
       return;
     }
-    Logger->info("ICC profile assigned to video {}: {} ({} bytes, {} → {}), gamma={:.3f}, primaries={}", id,
-                 profile_info.name, data_size, profile_info.color_space, profile_info.connection_space,
-                 per_video_icc_objects_[id]->gamma,
-                 pl_color_primaries_name(per_video_icc_objects_[id]->containing_primaries));
+    Logger->debug("ICC profile assigned to video {}: {} ({} bytes, {} → {}), gamma={:.3f}, primaries={}", id,
+                  profile_info.name, data_size, profile_info.color_space, profile_info.connection_space,
+                  per_video_icc_objects_[id]->gamma,
+                  pl_color_primaries_name(per_video_icc_objects_[id]->containing_primaries));
   } else {
     global_icc_data_ = std::move(profile_info.data);
     pl_profile.data = global_icc_data_.data();
@@ -468,9 +468,9 @@ void Window::LoadICCProfile(const std::string &path, std::optional<int> video_id
       Logger->error("Failed to open ICC profile globally");
       return;
     }
-    Logger->info("ICC profile assigned globally: {} ({} bytes, {} → {}), gamma={:.3f}, primaries={}", profile_info.name,
-                 global_icc_data_.size(), profile_info.color_space, profile_info.connection_space,
-                 global_icc_object_->gamma, pl_color_primaries_name(global_icc_object_->containing_primaries));
+    Logger->debug("ICC profile assigned globally: {} ({} bytes, {} → {}), gamma={:.3f}, primaries={}",
+                  profile_info.name, global_icc_data_.size(), profile_info.color_space, profile_info.connection_space,
+                  global_icc_object_->gamma, pl_color_primaries_name(global_icc_object_->containing_primaries));
   }
 }
 

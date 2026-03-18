@@ -417,7 +417,7 @@ int main(int argc, char **argv) {
       } else if (total_pixels > k8KPixels) {
         frame_cache = 16;
       }
-      Logger->info("Total resolution {:.1f} Mpx, frame cache auto-set to {}",
+      Logger->debug("Total resolution {:.1f} Mpx, frame cache auto-set to {}",
                    total_pixels / 1e6, frame_cache);
     }
     for (auto &[id, src] : player) {

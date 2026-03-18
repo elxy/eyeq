@@ -18,8 +18,8 @@ int SyncPlayer::AddVideoSource(std::unique_ptr<VideoSource> &&source, int id) {
   }
 
   Logger->info("Video #{}: {}", id, source->Filename());
-  Logger->info("\tstream {}: {}, {:.3f} fps, start time {:.3f}s, duration {:.3f}s", source->StreamIndex(),
-               source->CodecString(), source->FrameRate(), source->StartTime(), source->Duration());
+  Logger->info("\t{}, {:.3f} fps, start time {:.3f}s, duration {:.3f}s", source->CodecString(), source->FrameRate(),
+               source->StartTime(), source->Duration());
 
   sources_[id] = std::move(source);
   return id;
@@ -79,7 +79,7 @@ void SyncPlayer::StartSources(float seek_to, size_t seek_to_frame) {
   }
 
   if (seek_to > 0 || seek_to_frame > 0) {
-    Logger->info("Waiting for seeking");
+    Logger->debug("Waiting for seeking");
   }
 
   for (auto &[id, source] : sources_) {
@@ -87,7 +87,7 @@ void SyncPlayer::StartSources(float seek_to, size_t seek_to_frame) {
   }
 
   if (seek_to > 0 || seek_to_frame > 0) {
-    Logger->info("Seek ready");
+    Logger->debug("Seek ready");
     position_updated_ = true; // Sync playback clock to the first frame's PTS after seek
   }
 }
@@ -139,7 +139,7 @@ void SyncPlayer::Play() {
     last_update_time_ = std::chrono::steady_clock::now();
     state_.store(PlayState::kPlaying);
   } else {
-    Logger->warn("SyncPlayer::Play() called when not playing");
+    Logger->error("SyncPlayer::Play() called when not playing");
   }
 }
 
@@ -147,7 +147,7 @@ void SyncPlayer::Pause() {
   if (PlayState::kPlaying == state_) {
     state_.store(PlayState::kPaused);
   } else {
-    Logger->warn("SyncPlayer::Pause() called when not paused");
+    Logger->error("SyncPlayer::Pause() called when not paused");
   }
 }
 
@@ -157,7 +157,7 @@ void SyncPlayer::InvertPause() {
   } else if (PlayState::kPaused == state_) {
     Play();
   } else {
-    Logger->warn("SyncPlayer::InvertPause() called when not playing or paused");
+    Logger->error("SyncPlayer::InvertPause() called when not playing or paused");
   }
 }
 
@@ -189,14 +189,14 @@ void SyncPlayer::SeekTo(float time_s) {
   if (!std::isnan(start_time)) {
     if (time_s < start_time) {
       time_s = start_time;
-      Logger->info("Seeking to {:.3f}s, which is before the start time", time_s);
+      Logger->debug("Seeking to {:.3f}s, which is before the start time", time_s);
     }
   }
   float end_time = EndTime();
   if (!std::isnan(end_time)) {
     if (end_time < time_s) {
       time_s = end_time;
-      Logger->info("Seeking to {:.3f}s, which is after the end time", time_s);
+      Logger->debug("Seeking to {:.3f}s, which is after the end time", time_s);
     }
   }
 
@@ -204,14 +204,14 @@ void SyncPlayer::SeekTo(float time_s) {
   // Pause first, then seek. Prevents newly fetched frames in PlayerLoop() from affecting display
   // 1. Seek main video by time; returns the frame serial of the keyframe seeked to
   int main_serial = sources_[main_id_]->SeekTo(time_s);
-  Logger->debug("Sync seek: main(id={}) frame_serial={}", main_id_, main_serial);
+  SPDLOG_LOGGER_TRACE(Logger, "Sync seek: main(id={}) frame_serial={}", main_id_, main_serial);
 
   // 2. Seek other videos to the same frame serial
   for (auto &[id, source] : sources_) {
     if (id == main_id_)
       continue;
     source->SeekToFrameSerial(main_serial);
-    Logger->debug("Sync seek: video {} seek to frame_serial={}", id, main_serial);
+    SPDLOG_LOGGER_TRACE(Logger, "Sync seek: video {} seek to frame_serial={}", id, main_serial);
   }
 
   fps_window_frame_count_ = 0; // Reset FPS calculation after seek
@@ -264,7 +264,7 @@ std::map<int, std::shared_ptr<AVFrame>> SyncPlayer::GetFrames(bool forward) {
                       frames[id]->pts, frames[id]->duration, av_get_picture_type_char(frames[id]->pict_type));
         break;
       } catch (const timeout_error &e) {
-        Logger->debug("timeout when getting frame from source {}", id);
+        SPDLOG_LOGGER_TRACE(Logger, "timeout when getting frame from source {}", id);
       }
     }
     // TODO: Show prompt when frame retrieval times out
@@ -289,12 +289,12 @@ void SyncPlayer::PlayerLoop() {
         frames = GetFrames(step_forward_);
         step_forward_ = true; // Default to forward playback at all times
       } catch (const timeout_error &e) {
-        Logger->info("Cannot get frames right now, wait for a moment");
+        Logger->debug("Cannot get frames right now, wait for a moment");
         continue;
       } catch (const std::out_of_range &e) {
-        Logger->info("{}: {}", step_forward_ ? "Reached EOF" : "Reached start frame", e.what());
+        Logger->debug("{}: {}", step_forward_ ? "Reached EOF" : "Reached start frame", e.what());
         if (PlayState::kPlaying == state_) {
-          Logger->info("change state to paused");
+          Logger->debug("change state to paused");
           Pause();
         }
         frames_outdated_ = false;
@@ -331,7 +331,7 @@ void SyncPlayer::PlayerLoop() {
 
         if (last_width_ != Width() || last_height_ != Height()) {
           if (last_width_ > 0 && last_height_ > 0) {
-            Logger->info("Resolution changed from {}x{} to {}x{}", last_width_, last_height_, Width(), Height());
+            Logger->debug("Resolution changed from {}x{} to {}x{}", last_width_, last_height_, Width(), Height());
             resolution_changed_callback_();
           }
           last_width_ = Width();
