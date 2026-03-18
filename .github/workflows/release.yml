@@ -29,6 +29,9 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=arm64
           cmake --build build-arm64
 
+      - name: Smoke test
+        run: ./build-arm64/bin/eyeq --help
+
       # NOTE: Cross-compiling for x86_64 requires x86_64 versions of dependencies.
       # Homebrew on macos-14 (arm64) only provides arm64 libraries,
       # so a true Universal Binary would require splitting into two jobs
@@ -74,56 +77,35 @@ jobs:
       - name: Install dependencies
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          brew install fmt ffmpeg libplacebo sdl3 sdl3_ttf spdlog patchelf vulkan-headers
+          brew install fmt ffmpeg libplacebo sdl3 sdl3_ttf spdlog vulkan-headers
+          sudo apt-get install -y patchelf
           brew list --formula | while read -r formula; do
             brew link --overwrite "$formula" || true
           done
 
-      - name: Debug dependency discovery
+      - name: Configure
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
-
-          echo "brew prefix: $(brew --prefix)"
-          echo "fmt prefix: $(brew --prefix fmt)"
-          echo "ffmpeg prefix: $(brew --prefix ffmpeg)"
-          echo "libplacebo prefix: $(brew --prefix libplacebo)"
-          echo "sdl3 prefix: $(brew --prefix sdl3)"
-          echo "sdl3_ttf prefix: $(brew --prefix sdl3_ttf)"
-          echo "spdlog prefix: $(brew --prefix spdlog)"
-          echo "patchelf prefix: $(brew --prefix patchelf)"
-          echo "vulkan-headers prefix: $(brew --prefix vulkan-headers)"
-
-          test -f "$(brew --prefix)/lib/cmake/fmt/fmtConfig.cmake" && echo "global fmtConfig exists" || echo "global fmtConfig missing"
-          test -f "$(brew --prefix fmt)/lib/cmake/fmt/fmtConfig.cmake" && echo "keg fmtConfig exists" || echo "keg fmtConfig missing"
-          test -f "$(brew --prefix)/lib/cmake/SDL3/SDL3Config.cmake" && echo "global SDL3Config exists" || echo "global SDL3Config missing"
-          test -f "$(brew --prefix sdl3)/lib/cmake/SDL3/SDL3Config.cmake" && echo "keg SDL3Config exists" || echo "keg SDL3Config missing"
-          test -f "$(brew --prefix sdl3_ttf)/lib/cmake/SDL3_ttf/SDL3_ttfConfig.cmake" && echo "keg SDL3_ttfConfig exists" || echo "keg SDL3_ttfConfig missing"
-          test -f "$(brew --prefix)/include/vulkan/vulkan.h" && echo "global vulkan.h exists" || echo "global vulkan.h missing"
-          test -f "$(brew --prefix vulkan-headers)/include/vulkan/vulkan.h" && echo "keg vulkan.h exists" || echo "keg vulkan.h missing"
-
-          ls -la "$(brew --prefix)/lib/cmake" || true
-          ls -la "$(brew --prefix fmt)/lib/cmake/fmt" || true
-          ls -la "$(brew --prefix sdl3)/lib/cmake/SDL3" || true
-          ls -la "$(brew --prefix sdl3_ttf)/lib/cmake/SDL3_ttf" || true
-          ls -la "$(brew --prefix vulkan-headers)/include/vulkan" || true
-
-          brew list --versions fmt ffmpeg libplacebo sdl3 sdl3_ttf spdlog patchelf vulkan-headers
-          pkg-config --modversion fmt || true
-          pkg-config --modversion libplacebo
-          pkg-config --modversion libavcodec
-          pkg-config --modversion sdl3
-          pkg-config --modversion SDL3_ttf || pkg-config --modversion sdl3-ttf || true
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)"
 
       - name: Build
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
-          export CMAKE_PREFIX_PATH="$(brew --prefix)"
-          cmake -B build -S . \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
+
+      - name: Smoke test
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          export LD_LIBRARY_PATH="$(brew --prefix)/lib:$LD_LIBRARY_PATH"
+          ./build/bin/eyeq --help
+
+      - name: Install to AppDir
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           DESTDIR="$(pwd)/AppDir" cmake --install build
 
       - name: Create AppImage
@@ -175,7 +157,7 @@ jobs:
             eyeq-*-linux-x86_64.tar.gz
 
   build-windows:
-    name: Windows x86_64
+    name: Windows (x86_64 MSYS2)
     runs-on: windows-latest
     defaults:
       run:
@@ -202,10 +184,14 @@ jobs:
             mingw-w64-ucrt-x86_64-ntldd
             git
 
+      - name: Configure
+        run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+
       - name: Build
-        run: |
-          cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
+        run: cmake --build build
+
+      - name: Smoke test
+        run: ./build/bin/eyeq.exe --help
 
       - name: Package
         run: |
@@ -222,7 +208,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: eyeq-windows
+          name: eyeq-windows-x86_64
           path: eyeq-*-windows-x86_64.zip
 
   release:
