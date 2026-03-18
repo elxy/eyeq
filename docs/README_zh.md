@@ -215,4 +215,4 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 4. 不兼容的像素格式（如提示`pl_map_avframe_ex() failed`）
 
-   部分像素格式不被libplacebo的Vulkan后端支持。EyeQ会自动追加`format=rgb48le`滤镜，通过FFmpeg进行格式转换。如果已手动指定了`format=`滤镜，EyeQ不会覆盖，此时请尝试`--filter format=rgb48le`。
+   部分像素格式不被libplacebo的Vulkan后端支持——可能是格式的分量步长不兼容（如`y210le`），也可能是GPU没有对应的纹理格式（如`bgr8`）。EyeQ会自动追加`format=rgb48le`滤镜，通过FFmpeg进行格式转换。如果已手动指定了`format=`滤镜，EyeQ不会覆盖，此时请尝试`--filter format=rgb48le`。

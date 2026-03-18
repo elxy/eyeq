@@ -221,7 +221,7 @@ After launching, the following keyboard and mouse controls are available:
 
 4. **Incompatible pixel format (e.g. `pl_map_avframe_ex() failed`)**
 
-   Some pixel formats are not supported by libplacebo's Vulkan backend. EyeQ will automatically append a `format=rgb48le` filter to convert the pixel format via FFmpeg. If you have already specified a `format=` filter manually, EyeQ will not override it — in that case, try `--filter format=rgb48le`.
+   Some pixel formats are not supported by libplacebo's Vulkan backend — either the format has incompatible component strides (e.g. `y210le`) or no matching GPU texture format exists (e.g. `bgr8`). EyeQ will automatically append a `format=rgb48le` filter to convert the pixel format via FFmpeg. If you have already specified a `format=` filter manually, EyeQ will not override it — in that case, try `--filter format=rgb48le`.
 
 ## License
 

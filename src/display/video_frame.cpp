@@ -95,7 +95,15 @@ void VideoFrame::GeneratePLFrame(AVBufferRef *hw_device_ref) {
 
 convert:
   struct pl_avframe_params params = {.frame = frame_.get(), .tex = tex_, .map_dovi = true};
-  // pl_map_avframe_ex clones the frame via av_frame_clone. tex stores textures for non-hardware frames
+  // pl_map_avframe_ex clones the frame via av_frame_clone. tex stores textures for non-hardware frames.
+  // It may fail for two reasons:
+  //   1. The pixel format has incompatible component strides (e.g. y210le), rejected silently
+  //      by libplacebo's pl_plane_data_from_pixfmt() before any GPU texture lookup.
+  //   2. The pixel format passes validation but has no matching GPU texture format (e.g. bgr8),
+  //      which triggers libplacebo's PL_ERR("Failed picking any compatible texture format").
+  // In both cases we throw texture_format_error, which is caught per-video in
+  // Window::FeedFrames() (render.cpp). The main.cpp frame callback then triggers an automatic
+  // fallback: appending format=rgb48le to the FFmpeg filter graph and re-decoding.
   if (!pl_map_avframe_ex(gpu_, &pl_frame_, &params)) {
     throw texture_format_error(fmt::format(
         "pl_map_avframe_ex() failed for pixel format {}",
