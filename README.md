@@ -219,9 +219,9 @@ After launching, the following keyboard and mouse controls are available:
    - If the main video is SDR, the target color space is SDR, and HDR videos will be tone-mapped
    - If the main video is HDR10, the target color space is HDR10, and SDR videos will be mapped using a reference white of 203 nits
 
-4. **Error: `Failed picking any compatible texture format for a plane!`**
+4. **Incompatible pixel format (e.g. `pl_map_avframe_ex() failed`)**
 
-   This means libplacebo does not support the current pixel format. EyeQ will automatically append a `format=rgb48le` filter to convert the pixel format via FFmpeg. If you have already specified a `format=` filter manually, EyeQ will not override it — in that case, try `--filter format=rgb48le`.
+   Some pixel formats are not supported by libplacebo's Vulkan backend. EyeQ will automatically append a `format=rgb48le` filter to convert the pixel format via FFmpeg. If you have already specified a `format=` filter manually, EyeQ will not override it — in that case, try `--filter format=rgb48le`.
 
 ## License
 

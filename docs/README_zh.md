@@ -213,6 +213,6 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
    - 如果主视频是SDR，则渲染的目标色彩空间是SDR的，HDR视频会进行色调映射
    - 如果主视频是HDR10，则渲染的目标色彩空间是HDR10的，SDR视频按照参考白(203 nits)进行映射
 
-4. 错误提示：`Failed picking any compatible texture format for a plane!`
+4. 不兼容的像素格式（如提示`pl_map_avframe_ex() failed`）
 
-   说明libplacebo不支持当前pixel format。EyeQ会自动追加`format=rgb48le`滤镜，通过FFmpeg进行格式转换。如果已手动指定了`format=`滤镜，EyeQ不会覆盖，此时请尝试`--filter format=rgb48le`。
+   部分像素格式不被libplacebo的Vulkan后端支持。EyeQ会自动追加`format=rgb48le`滤镜，通过FFmpeg进行格式转换。如果已手动指定了`format=`滤镜，EyeQ不会覆盖，此时请尝试`--filter format=rgb48le`。
