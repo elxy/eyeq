@@ -217,8 +217,8 @@ private:
   std::mutex seek_mutex_;
   std::condition_variable seek_cv_;
 
-  bool have_seeked_{false};
-  int current_frame_serial_ = 0;
+  bool have_seeked_{false};              // True after any seek; switches serial source to pts_to_serial_
+  int current_frame_serial_ = 0;         // Incremental counter, used only before first seek
   size_t start_frame_serial_ = 0;
 
   /**

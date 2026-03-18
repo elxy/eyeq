@@ -1,6 +1,7 @@
 #include "video_source.hpp"
 
 #include <limits>
+#include <set>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/fmt.h>
@@ -96,9 +97,11 @@ int VideoSource::GetCurrentFrameSerial() {
   }
 
   std::unique_lock<std::mutex> lock(buffer_mutex_);
+  if (current_frame_index_ < 0 || current_frame_index_ >= (int)frame_buffer_.size()) {
+    return -1;
+  }
   int64_t pts = frame_buffer_[current_frame_index_]->pts;
 
-  // Prefer index lookup (supports VFR)
   if (!pts_to_serial_.empty()) {
     auto it = pts_to_serial_.find(pts);
     if (it != pts_to_serial_.end()) {
@@ -108,12 +111,10 @@ int VideoSource::GetCurrentFrameSerial() {
 
   // Fallback: estimate using pts/duration (CFR scenario)
   int64_t duration = frame_buffer_[current_frame_index_]->duration;
-  Logger->debug("Use pts {} and duration {} to guess frame serial...", pts, duration);
   if (AV_NOPTS_VALUE != pts && duration > 0) {
-    return pts / duration;
-  } else {
-    return -1;
+    return static_cast<int>(pts / duration);
   }
+  return -1;
 }
 
 void VideoSource::SaveCurrentFrame(const std::filesystem::path &path) {
@@ -178,7 +179,9 @@ std::shared_ptr<AVFrame> VideoSource::GetNextFrame(int timeout_ms) {
   // Get current frame
   auto frame = frame_buffer_[current_frame_index_];
   current_frame_pts_ = frame->pts;
-  current_frame_serial_ += 1;
+  if (!have_seeked_) {
+    current_frame_serial_ += 1;
+  }
 
   CleanupOldFrames();
 
@@ -198,7 +201,9 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
     current_frame_index_--;
     frame = frame_buffer_[current_frame_index_];
     current_frame_pts_ = frame->pts;
-    current_frame_serial_ -= 1;
+    if (!have_seeked_) {
+      current_frame_serial_ -= 1;
+    }
     SPDLOG_LOGGER_TRACE(Logger, "GetPrevFrame frame {}, pts {}. frame_buffer_.size() {}, current_frame_index_ {}",
                         fmt::ptr(frame.get()), frame->pts, frame_buffer_.size(), current_frame_index_);
     return frame;
@@ -214,24 +219,25 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
   }
   SPDLOG_LOGGER_TRACE(Logger, "Get previous keyframe pts {} ({:.3f} s) for target pts {}", keyframe_pts,
                       keyframe_pts * time_base_, target_pts);
-  // Check if frame cache is sufficient
+
+  // Calculate how many frames lie between the keyframe and the target
+  size_t frames_to_skip = 0;
   {
     int64_t diff_pts = current_frame_pts_ - keyframe_pts;
     int64_t interval_pts = static_cast<int64_t>(1. / (time_base_ * frame_rate_));
-    if ((diff_pts / interval_pts) > (int)max_cached_frames_) {
-      Logger->debug("Frame cache size {} not meet requirement {} = ({} / {})", max_cached_frames_,
-                    diff_pts / interval_pts, diff_pts, interval_pts);
-      // TODO: support --frame-cache option
-      Logger->warn("Due to limited frame buffer size ({}), step back will skip frames and may affect synchronization."
-                   " Consider setting --frame-cache to {} for a larger cache,"
-                   " or set --frame-cache to -1 for dynamic cache sizing.",
-                   max_cached_frames_, std::ceil(diff_pts / interval_pts));
+    size_t frames_in_gop = static_cast<size_t>(diff_pts / interval_pts);
+    if (frames_in_gop > max_cached_frames_) {
+      // GOP exceeds cache: skip early frames (decode-only, no filter/buffer) so that
+      // only the frames around the target end up in the buffer.
+      frames_to_skip = frames_in_gop - max_cached_frames_ / 2;
+      Logger->debug("GOP size ({}) exceeds cache ({}), skipping {} frames via seek",
+                    frames_in_gop, max_cached_frames_, frames_to_skip);
     }
   }
 
   { // Request the decode thread to re-decode from the keyframe
-    // Notify the decode thread to seek
     decode_start_pts_ = keyframe_pts;
+    start_frame_serial_ = frames_to_skip;
     decode_need_reset_ = true;
 
     // Wait for the decode thread to finish seeking
@@ -530,23 +536,25 @@ void VideoSource::BuildKeyFrameIndex() {
 
   int64_t start_pts = std::numeric_limits<int64_t>::max();
   int64_t end_pts = std::numeric_limits<int64_t>::min();
-  int serial = 0;
 
-  // Scan the entire video to build keyframe index and frame serial mapping
+  // Collect all PTS values and record which ones are keyframes.
+  // av_read_frame() returns packets in decode (DTS) order, which differs from
+  // display (PTS) order for videos with B-frames.  We therefore collect first
+  // and assign serial numbers by PTS order afterwards.
+  std::set<int64_t> keyframe_pts_set;
+
   while (av_read_frame(scan_ctx, packet) >= 0) {
     if (packet->stream_index == stream_index_) {
       if (packet->pts != AV_NOPTS_VALUE) {
-        pts_to_serial_[packet->pts] = serial;
+        // Insert PTS into the map with a placeholder serial (will be reassigned)
+        pts_to_serial_[packet->pts] = 0;
 
         if (packet->flags & AV_PKT_FLAG_KEY) {
-          // NOTE: The interval between keyframes may exceed the cache queue size
-          // Record keyframe PTS and file position
           keyframe_index_[packet->pts] = packet->pos;
-          keyframe_serial_index_[serial] = packet->pts;
+          keyframe_pts_set.insert(packet->pts);
         }
         start_pts = std::min(start_pts, packet->pts);
         end_pts = std::max(end_pts, packet->pts);
-        serial++;
       }
     }
     av_packet_unref(packet);
@@ -554,6 +562,17 @@ void VideoSource::BuildKeyFrameIndex() {
 
   av_packet_free(&packet);
   avformat_close_input(&scan_ctx);
+
+  // Assign serial numbers in PTS (display) order.
+  // std::map iterates in key order, so pts_to_serial_ is already sorted by PTS.
+  int serial = 0;
+  for (auto &[pts, s] : pts_to_serial_) {
+    s = serial;
+    if (keyframe_pts_set.count(pts)) {
+      keyframe_serial_index_[serial] = pts;
+    }
+    serial++;
+  }
 
   total_frames_ = serial;
 
@@ -636,7 +655,6 @@ void VideoSource::AllInOneThread() {
       if (AVERROR_EOF != ret) {
         av_frame_unref(tmp_frame);
         av_frame_move_ref(tmp_frame, frame);
-        current_frame_serial_++;
         start_frame_serial_--;
         continue;
       } else {
