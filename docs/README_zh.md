@@ -176,7 +176,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--scale-method <method>`：视频放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
 - `--seek-to <secs>`：播放起始时间，单位为秒
-- `--seek-frames <frames>`：播放起始帧数，当帧数较大时速度会比较慢
+- `--seek-to-frame <N>`：从第 N 帧开始播放（从 0 开始计数）
 - `--save-in-source`：设置后，`Ctrl + S`将保存视频当前帧到视频文件所在目录中
 - `--save-format <format>`：帧保存格式，默认为`png`
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`：硬件解码器，默认`none`

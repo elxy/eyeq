@@ -71,7 +71,7 @@ public:
   /**
    * @brief Start playback from the specified time/frame
    */
-  void StartSources(float seek_to = -1., size_t seek_frames = -1);
+  void StartSources(float seek_to = -1., size_t seek_to_frame = -1);
 
   /**
    * @brief Set callback for when new frames are available

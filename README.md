@@ -182,7 +182,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
 - `--seek-to <secs>`: Start playback at the specified time (in seconds)
-- `--seek-frames <frames>`: Start playback at the specified frame number (may be slow for large values)
+- `--seek-to-frame <N>`: Start playback from the Nth frame (0-based)
 - `--save-in-source`: Save frames (via `Ctrl + S`) to the source video's directory instead of the current working directory
 - `--save-format <format>`: Frame save format (default `png`)
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`: Hardware decoder (default `none`)

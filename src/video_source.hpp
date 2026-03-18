@@ -233,7 +233,7 @@ private:
   std::condition_variable seek_cv_;
 
   bool have_seeked_{false};              // True after any seek; switches serial source to pts_to_serial_
-  int current_frame_serial_ = 0;         // Incremental counter, used only before first seek
+  int current_frame_serial_ = -1;        // Incremental counter, used only before first seek
   size_t start_frame_serial_ = 0;
 
   /**

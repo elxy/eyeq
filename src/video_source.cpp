@@ -153,7 +153,46 @@ void VideoSource::Start(size_t start_frame) {
     return;
   }
 
-  start_frame_serial_ = start_frame;
+  // Fast path: when seeking a large number of frames, build keyframe index and
+  // seek directly to the nearest keyframe before the target, then only decode
+  // the remaining frames within the GOP.  This avoids decoding thousands of
+  // frames sequentially.
+  static constexpr size_t kSeekFrameThreshold = 500;
+  if (start_frame >= kSeekFrameThreshold) {
+    BuildKeyFrameIndex();
+
+    int target_serial = static_cast<int>(start_frame);
+    if (target_serial >= total_frames_) {
+      target_serial = total_frames_ - 1;
+    }
+
+    // Find the nearest keyframe before the target
+    auto it = keyframe_serial_index_.upper_bound(target_serial);
+    int keyframe_serial;
+    int64_t keyframe_pts;
+    if (it == keyframe_serial_index_.begin()) {
+      keyframe_serial = it->first;
+      keyframe_pts = it->second;
+    } else {
+      --it;
+      keyframe_serial = it->first;
+      keyframe_pts = it->second;
+    }
+
+    int frames_to_skip = target_serial - keyframe_serial;
+
+    Logger->info("Fast seek: target_serial={}, keyframe_serial={}, frames_to_skip={} (saved {} full decodes)",
+                 target_serial, keyframe_serial, frames_to_skip, target_serial - frames_to_skip);
+
+    decode_start_pts_ = keyframe_pts;
+    start_frame_serial_ = frames_to_skip;
+    have_seeked_ = true;
+    decode_need_reset_ = true;
+  } else {
+    start_frame_serial_ = start_frame;
+    current_frame_serial_ = static_cast<int>(start_frame) - 1;
+  }
+
   one_thread_ = std::thread(&VideoSource::AllInOneThread, this);
 }
 

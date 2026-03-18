@@ -54,7 +54,7 @@ struct EyeQArgs {
   ScaleMethod plane_scale_method;
 
   float seek_to;
-  size_t seek_frames;
+  size_t seek_to_frame;
 
   bool save_in_source;
   std::string save_format;
@@ -173,7 +173,7 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
       ->option_text(sm_option_text);
 
   app.add_option("--seek-to", args.seek_to, "Seek to seconds before playing");
-  app.add_option("--seek-frames", args.seek_frames, "Seek for frames before playing")->excludes("--seek-to");
+  app.add_option("--seek-to-frame", args.seek_to_frame, "Start playing from the Nth frame (0-based)")->excludes("--seek-to");
 
   app.add_flag("--save-in-source", args.save_in_source, "Use source's directory to save frames");
   app.add_option("--save-format", args.save_format, "Format of saved frames, default is png");
@@ -355,7 +355,7 @@ int main(int argc, char **argv) {
       .scale_method = ScaleMethod::Nearest,
       .plane_scale_method = ScaleMethod::Lanczos,
       .seek_to = 0.,
-      .seek_frames = 0,
+      .seek_to_frame = 0,
       .save_in_source = false,
       .save_format = "png",
       .log_level = LoggingLevel::INFO,
@@ -426,7 +426,7 @@ int main(int argc, char **argv) {
   }
   player.SetMainId(args.main_id);
   Logger->info("Main video is #{}: {}", args.main_id, args.videos[args.main_id]);
-  player.StartSources(args.seek_to, args.seek_frames);
+  player.StartSources(args.seek_to, args.seek_to_frame);
 
   // Check if hardware decoding took effect for all videos
   if (args.hardware_decoder != HardwareDecoder::None) {

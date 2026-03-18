@@ -70,19 +70,25 @@ std::vector<int> SyncPlayer::CheckUnusedHardwareDecoders() const {
 
 float SyncPlayer::GetPlaybackFps() const { return playback_fps_.load(); }
 
-void SyncPlayer::StartSources(float seek_to, size_t seek_frames) {
+void SyncPlayer::StartSources(float seek_to, size_t seek_to_frame) {
   for (auto &[id, source] : sources_) {
     if (seek_to > 0) {
       source->SeekTo(seek_to, 0);
     }
-    source->Start(seek_frames);
+    source->Start(seek_to_frame);
   }
-  if (seek_to > 0 || seek_frames > 0) {
-    Logger->info("Seek ready");
+
+  if (seek_to > 0 || seek_to_frame > 0) {
+    Logger->info("Waiting for seeking");
   }
 
   for (auto &[id, source] : sources_) {
     source->WaitForFrameAvailable();
+  }
+
+  if (seek_to > 0 || seek_to_frame > 0) {
+    Logger->info("Seek ready");
+    position_updated_ = true; // Sync playback clock to the first frame's PTS after seek
   }
 }
 
