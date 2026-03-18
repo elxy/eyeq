@@ -20,6 +20,10 @@ On macOS and Linux, installing via Homebrew is recommended. On Windows, building
 ```sh
 brew tap elxy/eyeq
 brew install eyeq
+# If you are on macOS, you need to sign the binary:
+codesign --force --deep --sign - /opt/homebrew/bin/eyeq
+# Or build from source:
+brew install --build-from-source eyeq
 ```
 
 ### Pre-built Binaries
