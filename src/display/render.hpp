@@ -40,7 +40,6 @@ struct OsdInfo {
   float current_time_s; // Current time (seconds)
   int frame_serial;     // Current frame serial
   int total_frames;     // Total frames
-  int frame_offset = 0; // Per-video frame offset from single-video operations
 
   std::string Format() const;
 };

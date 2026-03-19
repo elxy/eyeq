@@ -17,10 +17,9 @@ std::string OsdInfo::Format() const {
   char time_buf[16];
   std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d", hours, minutes, seconds);
 
-  int display_serial = frame_serial + frame_offset;
   char buf[512];
   std::snprintf(buf, sizeof(buf), "#%d: %s %c %s [%d/%d]", video_id, filename.c_str(), pict_type, time_buf,
-                display_serial, total_frames);
+                frame_serial, total_frames);
   return std::string(buf);
 }
 

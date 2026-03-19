@@ -174,7 +174,7 @@ public:
    */
   float CurrentTime() const;
 
-  int GetCurrentFrameSerial() const;
+  int GetCurrentFrameSerial(int id = -1) const;
 
   int GetTotalFrames(int id = -1) const;
 

@@ -585,11 +585,8 @@ int main(int argc, char **argv) {
       info.video_id = id;
       info.pict_type = av_get_picture_type_char(frame->pict_type);
       info.current_time_s = player.CurrentTime();
-      info.frame_serial = player.GetCurrentFrameSerial();
+      info.frame_serial = player.GetCurrentFrameSerial(id);
       info.total_frames = player.GetTotalFrames(id);
-      auto &vo = player.GetVideoOffset(id);
-      info.frame_offset = vo.frame_offset;
-
       state.osd_infos[id] = info;
     }
     {

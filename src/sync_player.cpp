@@ -56,7 +56,7 @@ void SyncPlayer::SaveCurrentFrames(bool save_in_source, const std::string &ext) 
 
 float SyncPlayer::CurrentTime() const { return current_position_s_.load(); }
 
-int SyncPlayer::GetCurrentFrameSerial() const { return sources_.at(main_id_)->GetCurrentFrameSerial(); }
+int SyncPlayer::GetCurrentFrameSerial(int id) const { return sources_.at(ResolveId(id))->GetCurrentFrameSerial(); }
 
 int SyncPlayer::GetTotalFrames(int id) const { return sources_.at(ResolveId(id))->GetTotalFrames(); }
 
