@@ -35,10 +35,6 @@ std::string OsdInfo::Format() const {
   if (frame_offset != 0) {
     suffix += fmt::format(" [{:+d}f]", frame_offset);
   }
-  if (individual_paused) {
-    suffix += " ||";
-  }
-
   char buf[512];
   std::snprintf(buf, sizeof(buf), "#%d: %s %c %s [%d/%d]%s", video_id, filename.c_str(), pict_type, time_buf,
                 frame_serial, total_frames, suffix.c_str());

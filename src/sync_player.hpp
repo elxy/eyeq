@@ -133,8 +133,7 @@ public:
 
   // Per-video independent offset state
   struct VideoOffset {
-    int frame_offset = 0;           // Frame offset relative to main video (positive = ahead)
-    bool individual_paused = false; // Whether this video is individually paused
+    int frame_offset = 0; // Frame offset relative to main video (positive = ahead)
   };
 
   /**
@@ -150,12 +149,6 @@ public:
    * @param offset_s Time offset in seconds
    */
   void SeekOffsetSingle(int video_id, float offset_s);
-
-  /**
-   * @brief Toggle individual pause for a single video
-   * @param video_id Target video ID
-   */
-  void InvertPauseSingle(int video_id);
 
   /**
    * @brief Reset a single video's offset and re-align with main video

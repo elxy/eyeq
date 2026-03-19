@@ -210,16 +210,11 @@ void SyncPlayer::SeekTo(float time_s) {
   if (base_serial < 0) {
     // Fallback: use SeekTo for all videos when frame index is unavailable
     for (auto &[id, source] : sources_) {
-      if (id != main_id_ && video_offsets_.count(id) && video_offsets_[id].individual_paused)
-        continue;
       source->SeekTo(time_s);
     }
   } else {
     // 2. Seek all videos uniformly via SeekToFrameSerial(base_serial + offset)
     for (auto &[id, source] : sources_) {
-      if (id != main_id_ && video_offsets_.count(id) && video_offsets_[id].individual_paused)
-        continue;
-
       int frame_offset = video_offsets_.count(id) ? video_offsets_[id].frame_offset : 0;
       int target_serial = std::max(0, base_serial + frame_offset);
       source->SeekToFrameSerial(target_serial);
@@ -343,12 +338,6 @@ void SyncPlayer::SeekOffsetSingle(int video_id, float offset_s) {
   }
 }
 
-void SyncPlayer::InvertPauseSingle(int video_id) {
-  auto &offset = video_offsets_[video_id];
-  offset.individual_paused = !offset.individual_paused;
-  Logger->info("Video {} individually {}", video_id, offset.individual_paused ? "paused" : "resumed");
-}
-
 void SyncPlayer::ResetVideoOffset(int video_id) {
   state_ = PlayState::kPaused;
   Logger->info("Resetting offset for video {}", video_id);
@@ -396,16 +385,6 @@ std::map<int, std::shared_ptr<AVFrame>> SyncPlayer::GetFrames(bool forward) {
 
   SPDLOG_LOGGER_TRACE(Logger, "getting frames...");
   for (auto &[id, source] : sources_) {
-    // Skip individually paused videos; reuse their last cached frame
-    if (video_offsets_.count(id) && video_offsets_[id].individual_paused) {
-      if (last_frames_.count(id)) {
-        frames[id] = last_frames_[id];
-        SPDLOG_LOGGER_TRACE(Logger, "Reusing cached frame for individually paused video {}", id);
-        continue;
-      }
-      // Fall through to fetch if no cached frame available
-    }
-
     int try_count = 0;
     while (try_count <= 3) {
       try_count += 1;

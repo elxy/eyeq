@@ -34,14 +34,13 @@ enum class DisplayMode {
 };
 
 struct OsdInfo {
-  std::string filename;           // basename
-  int video_id;                   // Video index
-  char pict_type;                 // 'I', 'P', 'B'
-  float current_time_s;           // Current time (seconds)
-  int frame_serial;               // Current frame serial
-  int total_frames;               // Total frames
-  int frame_offset = 0;           // Per-video frame offset from single-video operations
-  bool individual_paused = false; // Whether this video is individually paused
+  std::string filename; // basename
+  int video_id;         // Video index
+  char pict_type;       // 'I', 'P', 'B'
+  float current_time_s; // Current time (seconds)
+  int frame_serial;     // Current frame serial
+  int total_frames;     // Total frames
+  int frame_offset = 0; // Per-video frame offset from single-video operations
 
   std::string Format() const;
 };

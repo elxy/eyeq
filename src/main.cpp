@@ -589,7 +589,7 @@ int main(int argc, char **argv) {
       info.total_frames = player.GetTotalFrames(id);
       auto &vo = player.GetVideoOffset(id);
       info.frame_offset = vo.frame_offset;
-      info.individual_paused = vo.individual_paused;
+
       state.osd_infos[id] = info;
     }
     {
@@ -895,21 +895,10 @@ int main(int argc, char **argv) {
         fit_to_window(state, player, window, args.display_mode);
         need_refresh = true;
         break;
-      case SDLK_SPACE: {
-        auto held = get_held_digits();
-        if (!held.empty()) {
-          for (int id : held) {
-            Logger->debug("{} + Space: toggle pause for video {}", id, id);
-            digit_keys[id].used_as_modifier = true;
-            player.InvertPauseSingle(id);
-          }
-          need_refresh = true;
-        } else {
-          Logger->debug("space key pressed, switch pause state");
-          player.InvertPause();
-        }
+      case SDLK_SPACE:
+        Logger->debug("space key pressed, switch pause state");
+        player.InvertPause();
         break;
-      }
       case SDLK_F5: {
         auto held = get_held_digits();
         if (!held.empty()) {

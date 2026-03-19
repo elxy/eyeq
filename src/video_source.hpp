@@ -150,7 +150,6 @@ public:
    */
   int SeekTo(float time_s, int timeout_ms = -1);
 
-
   /**
    * @brief Seek to and precisely position at the specified frame serial
    *        Finds the nearest keyframe before the target frame serial via keyframe index,
