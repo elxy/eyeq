@@ -168,7 +168,6 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 - N + A：视频N回退一帧
 - N + D：视频N前进一帧
-- N + Space：视频N单独暂停/恢复
 - N + →/←：视频N前进/回退一秒
 - N + ↓/↑：视频N前进/回退五秒
 - N + ] / Page Down / [ / Page Up：视频N前进/回退一分钟

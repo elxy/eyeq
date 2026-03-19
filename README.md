@@ -170,7 +170,6 @@ After launching, the following keyboard and mouse controls are available:
 
 - N + A: Step video N backward 1 frame
 - N + D: Step video N forward 1 frame
-- N + Space: Toggle pause for video N only
 - N + →/←: Seek video N forward/backward 1 second
 - N + ↓/↑: Seek video N forward/backward 5 seconds
 - N + ] / Page Down / [ / Page Up: Seek video N forward/backward 1 minute
