@@ -23,24 +23,6 @@ extern "C" {
 
 using namespace EYEQ;
 
-std::string OsdInfo::Format() const {
-  int hours = static_cast<int>(current_time_s) / 3600;
-  int minutes = (static_cast<int>(current_time_s) % 3600) / 60;
-  int seconds = static_cast<int>(current_time_s) % 60;
-  char time_buf[16];
-  std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d", hours, minutes, seconds);
-
-  // Build suffix for per-video offset info
-  std::string suffix;
-  if (frame_offset != 0) {
-    suffix += fmt::format(" [{:+d}f]", frame_offset);
-  }
-  char buf[512];
-  std::snprintf(buf, sizeof(buf), "#%d: %s %c %s [%d/%d]%s", video_id, filename.c_str(), pict_type, time_buf,
-                frame_serial, total_frames, suffix.c_str());
-  return std::string(buf);
-}
-
 static const struct pl_filter_config *get_filter_config(ScaleMethod method) {
   switch (method) {
   case ScaleMethod::Nearest:

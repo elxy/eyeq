@@ -10,6 +10,20 @@
 
 using namespace EYEQ;
 
+std::string OsdInfo::Format() const {
+  int hours = static_cast<int>(current_time_s) / 3600;
+  int minutes = (static_cast<int>(current_time_s) % 3600) / 60;
+  int seconds = static_cast<int>(current_time_s) % 60;
+  char time_buf[16];
+  std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d", hours, minutes, seconds);
+
+  int display_serial = frame_serial + frame_offset;
+  char buf[512];
+  std::snprintf(buf, sizeof(buf), "#%d: %s %c %s [%d/%d]", video_id, filename.c_str(), pict_type, time_buf,
+                display_serial, total_frames);
+  return std::string(buf);
+}
+
 // System font search paths (prefer CJK fonts, with English fallback)
 static const char *font_search_paths[] = {
     // macOS - CJK fonts
