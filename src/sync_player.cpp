@@ -204,7 +204,7 @@ void SyncPlayer::SeekTo(float time_s) {
 
   SPDLOG_LOGGER_TRACE(Logger, "Seeking to {:.3f}s", time_s);
   // Pause first, then seek. Prevents newly fetched frames in PlayerLoop() from affecting display
-  // 1. Seek main video by time; returns the frame serial of the keyframe seeked to
+  // 1. Seek main video by time; returns the frame serial of the target frame
   int main_serial = sources_[main_id_]->SeekTo(time_s);
   SPDLOG_LOGGER_TRACE(Logger, "Sync seek: main(id={}) frame_serial={}", main_id_, main_serial);
 
