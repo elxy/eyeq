@@ -333,7 +333,7 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
   return frame;
 }
 
-int VideoSource::SeekTo(float time_s, int timeout_ms) {
+int VideoSource::TimeToFrameSerial(float time_s) {
   if (pts_to_serial_.empty()) {
     BuildKeyFrameIndex();
   }
@@ -351,10 +351,9 @@ int VideoSource::SeekTo(float time_s, int timeout_ms) {
     }
   }
 
-  // Convert target time to PTS and find the corresponding frame serial
   int64_t target_pts = time_s / time_base_;
 
-  // Find the frame serial closest to (but not exceeding) target_pts using pts_to_serial_ map
+  // Find the frame serial closest to (but not exceeding) target_pts
   int target_serial = -1;
   if (!pts_to_serial_.empty()) {
     auto it = pts_to_serial_.upper_bound(target_pts);
@@ -365,9 +364,15 @@ int VideoSource::SeekTo(float time_s, int timeout_ms) {
       target_serial = it->second;
     }
   }
+  return target_serial;
+}
+
+int VideoSource::SeekTo(float time_s, int timeout_ms) {
+  int target_serial = TimeToFrameSerial(time_s);
 
   if (target_serial < 0) {
-    // Fallback: seek without frame skipping (same as before)
+    // Fallback: seek without frame skipping
+    int64_t target_pts = time_s / time_base_;
     decode_start_pts_ = target_pts;
     decode_need_reset_ = true;
 
@@ -377,33 +382,7 @@ int VideoSource::SeekTo(float time_s, int timeout_ms) {
     return -1;
   }
 
-  // Find the nearest keyframe before target_serial (same logic as SeekToFrameSerial)
-  auto kit = keyframe_serial_index_.upper_bound(target_serial);
-  int keyframe_serial;
-  int64_t keyframe_pts;
-  if (kit == keyframe_serial_index_.begin()) {
-    keyframe_serial = kit->first;
-    keyframe_pts = kit->second;
-  } else {
-    --kit;
-    keyframe_serial = kit->first;
-    keyframe_pts = kit->second;
-  }
-
-  int frames_to_skip = target_serial - keyframe_serial;
-
-  Logger->debug("SeekTo: time={:.3f}s target_pts={} target_serial={} keyframe_serial={} frames_to_skip={}", time_s,
-                target_pts, target_serial, keyframe_serial, frames_to_skip);
-
-  // Notify the decode thread to seek to the keyframe and skip frames
-  decode_start_pts_ = keyframe_pts;
-  start_frame_serial_ = frames_to_skip;
-  decode_need_reset_ = true;
-
-  // Wait for the decode thread to finish seeking
-  std::unique_lock<std::mutex> lock(seek_mutex_);
-  std::chrono::milliseconds timeout = get_timeout(timeout_ms);
-  seek_cv_.wait_for(lock, timeout);
+  SeekToFrameSerial(target_serial, timeout_ms);
   return target_serial;
 }
 

@@ -203,25 +203,29 @@ void SyncPlayer::SeekTo(float time_s) {
   }
 
   SPDLOG_LOGGER_TRACE(Logger, "Seeking to {:.3f}s", time_s);
-  // Pause first, then seek. Prevents newly fetched frames in PlayerLoop() from affecting display
-  // 1. Seek main video by time; returns the frame serial of the target frame
-  int main_serial = sources_[main_id_]->SeekTo(time_s);
-  SPDLOG_LOGGER_TRACE(Logger, "Sync seek: main(id={}) frame_serial={}", main_id_, main_serial);
+  // 1. Convert time to base frame serial (no actual seek)
+  int base_serial = sources_[main_id_]->TimeToFrameSerial(time_s);
+  Logger->debug("Sync seek: time={:.3f}s base_serial={}", time_s, base_serial);
 
-  // 2. Seek other videos, applying per-video frame offsets
-  for (auto &[id, source] : sources_) {
-    if (id == main_id_)
-      continue;
-    // Skip individually paused videos
-    if (video_offsets_.count(id) && video_offsets_[id].individual_paused)
-      continue;
+  if (base_serial < 0) {
+    // Fallback: use SeekTo for all videos when frame index is unavailable
+    for (auto &[id, source] : sources_) {
+      if (id != main_id_ && video_offsets_.count(id) && video_offsets_[id].individual_paused)
+        continue;
+      source->SeekTo(time_s);
+    }
+  } else {
+    // 2. Seek all videos uniformly via SeekToFrameSerial(base_serial + offset)
+    for (auto &[id, source] : sources_) {
+      if (id != main_id_ && video_offsets_.count(id) && video_offsets_[id].individual_paused)
+        continue;
 
-    int frame_offset = video_offsets_.count(id) ? video_offsets_[id].frame_offset : 0;
-    int target_serial = main_serial + frame_offset;
-    target_serial = std::max(0, target_serial);
-    source->SeekToFrameSerial(target_serial);
-    SPDLOG_LOGGER_TRACE(Logger, "Sync seek: video {} seek to frame_serial={} (main={} + offset={})", id, target_serial,
-                        main_serial, frame_offset);
+      int frame_offset = video_offsets_.count(id) ? video_offsets_[id].frame_offset : 0;
+      int target_serial = std::max(0, base_serial + frame_offset);
+      source->SeekToFrameSerial(target_serial);
+      SPDLOG_LOGGER_TRACE(Logger, "Sync seek: video {} -> frame_serial={} (base={} + offset={})", id, target_serial,
+                          base_serial, frame_offset);
+    }
   }
 
   fps_window_frame_count_ = 0; // Reset FPS calculation after seek

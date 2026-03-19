@@ -146,9 +146,10 @@ public:
    *
    * @param time_s Target time in seconds
    * @param timeout_ms Timeout
-   * @return Frame serial of the keyframe seeked to; returns -1 if undetermined
+   * @return Frame serial of the target frame; returns -1 if undetermined
    */
   int SeekTo(float time_s, int timeout_ms = -1);
+
 
   /**
    * @brief Seek to and precisely position at the specified frame serial
@@ -159,6 +160,16 @@ public:
    * @param timeout_ms Timeout
    */
   void SeekToFrameSerial(int target_serial, int timeout_ms = -1);
+
+  /**
+   * @brief Convert time to frame serial without seeking
+   *        Returns the serial of the frame at or just before the given time.
+   *        Automatically calls BuildKeyFrameIndex() if not yet built.
+   *
+   * @param time_s Target time in seconds
+   * @return Frame serial; returns -1 if undetermined
+   */
+  int TimeToFrameSerial(float time_s);
 
   /**
    * @brief Wait for an available frame
