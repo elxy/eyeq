@@ -547,6 +547,23 @@ int main(int argc, char **argv) {
 
   std::atomic<bool> need_refresh = false;
   float seek_offset_s = 0.0;
+
+  // Digit key modifier state for single-video operations
+  struct DigitKeyState {
+    bool held = false;
+    bool used_as_modifier = false;
+  } digit_keys[10];
+
+  // Returns all held digit keys that have valid video sources
+  auto get_held_digits = [&digit_keys, &player]() -> std::vector<int> {
+    std::vector<int> held_ids;
+    for (int i = 0; i < 10; i++) {
+      if (digit_keys[i].held && player.HasVideoSource(i)) {
+        held_ids.push_back(i);
+      }
+    }
+    return held_ids;
+  };
   std::string title_;
   player.SetFrameUpdateCallback([&player, &title_, &title, &window, &need_refresh, &state,
                                  &args](std::map<int, std::shared_ptr<AVFrame>> &frames) {
@@ -570,6 +587,9 @@ int main(int argc, char **argv) {
       info.current_time_s = player.CurrentTime();
       info.frame_serial = player.GetCurrentFrameSerial();
       info.total_frames = player.GetTotalFrames(id);
+      auto &vo = player.GetVideoOffset(id);
+      info.frame_offset = vo.frame_offset;
+      info.individual_paused = vo.individual_paused;
       state.osd_infos[id] = info;
     }
     {
@@ -651,14 +671,12 @@ int main(int argc, char **argv) {
     case SDL_EVENT_KEY_DOWN:
       if (SDLK_0 <= event.key.key && event.key.key <= SDLK_9) {
         int id = event.key.key - SDLK_0;
-        Logger->debug("{} key pressed, display {} video", id, id);
-        if (player.HasVideoSource(id)) {
-          state.fill.id = id;
-          need_refresh = true;
-        } else {
-          Logger->warn("{} is not a valid video ID", id);
+        if (!event.key.repeat) {
+          Logger->debug("{} key pressed, marking as held", id);
+          digit_keys[id].held = true;
+          digit_keys[id].used_as_modifier = false;
         }
-        break;
+        break; // Do NOT switch video on KEY_DOWN; handled on KEY_UP
       }
       switch (event.key.key) {
       case SDLK_R:
@@ -806,15 +824,51 @@ int main(int argc, char **argv) {
       if (event.key.key == SDLK_ESCAPE || event.key.key == SDLK_Q) {
         goto exit;
       }
+      // Handle digit key release: switch video only if not used as modifier
+      if (SDLK_0 <= event.key.key && event.key.key <= SDLK_9) {
+        int id = event.key.key - SDLK_0;
+        if (digit_keys[id].held && !digit_keys[id].used_as_modifier) {
+          Logger->debug("{} key released (not modifier), switch to video {}", id, id);
+          if (player.HasVideoSource(id)) {
+            state.fill.id = id;
+            need_refresh = true;
+          } else {
+            Logger->warn("{} is not a valid video ID", id);
+          }
+        }
+        digit_keys[id].held = false;
+        digit_keys[id].used_as_modifier = false;
+        break;
+      }
       switch (event.key.key) {
-      case SDLK_A:
-        Logger->debug("a key released, step to previous frame");
-        player.StepPrevFrame();
+      case SDLK_A: {
+        auto held = get_held_digits();
+        if (!held.empty()) {
+          for (int id : held) {
+            Logger->debug("{} + A: step video {} to previous frame", id, id);
+            digit_keys[id].used_as_modifier = true;
+            player.StepPrevFrameSingle(id);
+          }
+        } else {
+          Logger->debug("a key released, step to previous frame");
+          player.StepPrevFrame();
+        }
         break;
-      case SDLK_D:
-        Logger->debug("d key released, step to next frame");
-        player.StepNextFrame();
+      }
+      case SDLK_D: {
+        auto held = get_held_digits();
+        if (!held.empty()) {
+          for (int id : held) {
+            Logger->debug("{} + D: step video {} to next frame", id, id);
+            digit_keys[id].used_as_modifier = true;
+            player.StepNextFrameSingle(id);
+          }
+        } else {
+          Logger->debug("d key released, step to next frame");
+          player.StepNextFrame();
+        }
         break;
+      }
       case SDLK_R:
         if (!state.ref_id.has_value()) {
           break;
@@ -841,10 +895,36 @@ int main(int argc, char **argv) {
         fit_to_window(state, player, window, args.display_mode);
         need_refresh = true;
         break;
-      case SDLK_SPACE:
-        Logger->debug("space key pressed, switch pause state");
-        player.InvertPause();
+      case SDLK_SPACE: {
+        auto held = get_held_digits();
+        if (!held.empty()) {
+          for (int id : held) {
+            Logger->debug("{} + Space: toggle pause for video {}", id, id);
+            digit_keys[id].used_as_modifier = true;
+            player.InvertPauseSingle(id);
+          }
+          need_refresh = true;
+        } else {
+          Logger->debug("space key pressed, switch pause state");
+          player.InvertPause();
+        }
         break;
+      }
+      case SDLK_F5: {
+        auto held = get_held_digits();
+        if (!held.empty()) {
+          for (int id : held) {
+            Logger->debug("{} + F5: reset offset for video {}", id, id);
+            digit_keys[id].used_as_modifier = true;
+            player.ResetVideoOffset(id);
+          }
+        } else {
+          Logger->debug("F5: reset all video offsets");
+          player.ResetAllVideoOffsets();
+        }
+        need_refresh = true;
+        break;
+      }
       case SDLK_I:
         Logger->debug("i key released, toggle OSD");
         state.show_osd = !state.show_osd;
@@ -900,9 +980,19 @@ int main(int argc, char **argv) {
         } else {
           seek_offset_s = 60;
         }
-      do_seek:
-        player.SeekOffset(seek_offset_s);
+      do_seek: {
+        auto held = get_held_digits();
+        if (!held.empty()) {
+          for (int id : held) {
+            Logger->debug("{} + seek: video {} seek offset {:.0f}s", id, id, seek_offset_s);
+            digit_keys[id].used_as_modifier = true;
+            player.SeekOffsetSingle(id, seek_offset_s);
+          }
+        } else {
+          player.SeekOffset(seek_offset_s);
+        }
         break;
+      }
       }
       break;
     }

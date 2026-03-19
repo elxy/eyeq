@@ -142,7 +142,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 After launching, the following keyboard and mouse controls are available:
 
-- 0–9: Switch to the corresponding video (video indices start from 0)
+- 0–9: Switch to the corresponding video (video indices start from 0; triggers on key release)
 - R: Show the reference video (hold; releases back on key up)
 - T: Swap left/right videos (hold; releases back on key up)
 - Space: Pause / Play
@@ -163,7 +163,20 @@ After launching, the following keyboard and mouse controls are available:
 - Shift + S: Seek to the relative time at the cursor position
 - Z: Reset zoom and position (fit to window)
 - X: Force refresh (press multiple times if the window goes black after resizing)
+- F5: Reset all video offsets (re-align all videos with the main video)
 - Q / Esc: Quit
+
+**Single Video Operations** (hold digit key N as modifier, then press an action key):
+
+- N + A: Step video N backward 1 frame
+- N + D: Step video N forward 1 frame
+- N + Space: Toggle pause for video N only
+- N + →/←: Seek video N forward/backward 1 second
+- N + ↓/↑: Seek video N forward/backward 5 seconds
+- N + ] / Page Down / [ / Page Up: Seek video N forward/backward 1 minute
+- N + F5: Reset video N offset (re-align with main video)
+- Multiple digit keys can be held simultaneously to operate on multiple videos
+- Frame offsets are preserved across global seek operations
 
 ### Command-Line Options
 

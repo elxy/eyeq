@@ -4,6 +4,8 @@
 
 using namespace EYEQ;
 
+const SyncPlayer::VideoOffset SyncPlayer::kDefaultVideoOffset{};
+
 SyncPlayer::SyncPlayer() {
   main_id_ = -1;
   state_.store(PlayState::kStopped);
@@ -206,12 +208,20 @@ void SyncPlayer::SeekTo(float time_s) {
   int main_serial = sources_[main_id_]->SeekTo(time_s);
   SPDLOG_LOGGER_TRACE(Logger, "Sync seek: main(id={}) frame_serial={}", main_id_, main_serial);
 
-  // 2. Seek other videos to the same frame serial
+  // 2. Seek other videos, applying per-video frame offsets
   for (auto &[id, source] : sources_) {
     if (id == main_id_)
       continue;
-    source->SeekToFrameSerial(main_serial);
-    SPDLOG_LOGGER_TRACE(Logger, "Sync seek: video {} seek to frame_serial={}", id, main_serial);
+    // Skip individually paused videos
+    if (video_offsets_.count(id) && video_offsets_[id].individual_paused)
+      continue;
+
+    int frame_offset = video_offsets_.count(id) ? video_offsets_[id].frame_offset : 0;
+    int target_serial = main_serial + frame_offset;
+    target_serial = std::max(0, target_serial);
+    source->SeekToFrameSerial(target_serial);
+    SPDLOG_LOGGER_TRACE(Logger, "Sync seek: video {} seek to frame_serial={} (main={} + offset={})", id, target_serial,
+                        main_serial, frame_offset);
   }
 
   fps_window_frame_count_ = 0; // Reset FPS calculation after seek
@@ -246,11 +256,152 @@ void SyncPlayer::StepPrevFrame() {
   position_updated_ = true;
 }
 
+const SyncPlayer::VideoOffset &SyncPlayer::GetVideoOffset(int video_id) const {
+  auto it = video_offsets_.find(video_id);
+  if (it != video_offsets_.end()) {
+    return it->second;
+  }
+  return kDefaultVideoOffset;
+}
+
+void SyncPlayer::StepNextFrameSingle(int video_id) {
+  state_ = PlayState::kPaused;
+  try {
+    auto frame = sources_.at(video_id)->GetNextFrame(-1);
+    video_offsets_[video_id].frame_offset += 1;
+    last_frames_[video_id] = frame;
+    Logger->debug("StepNextFrameSingle: video {} frame_offset={}", video_id, video_offsets_[video_id].frame_offset);
+    if (frame_callback_) {
+      frame_callback_(last_frames_);
+    }
+  } catch (const std::out_of_range &e) {
+    Logger->debug("Single step forward: video {} reached boundary: {}", video_id, e.what());
+  }
+}
+
+void SyncPlayer::StepPrevFrameSingle(int video_id) {
+  state_ = PlayState::kPaused;
+  try {
+    auto frame = sources_.at(video_id)->GetPrevFrame(-1);
+    video_offsets_[video_id].frame_offset -= 1;
+    last_frames_[video_id] = frame;
+    Logger->debug("StepPrevFrameSingle: video {} frame_offset={}", video_id, video_offsets_[video_id].frame_offset);
+    if (frame_callback_) {
+      frame_callback_(last_frames_);
+    }
+  } catch (const std::out_of_range &e) {
+    Logger->debug("Single step backward: video {} reached boundary: {}", video_id, e.what());
+  }
+}
+
+void SyncPlayer::SeekOffsetSingle(int video_id, float offset_s) {
+  state_ = PlayState::kPaused;
+
+  if (last_frames_.find(video_id) == last_frames_.end()) {
+    Logger->warn("SeekOffsetSingle: no cached frame for video {}", video_id);
+    return;
+  }
+
+  // 1. Record serial before seek
+  int serial_before = sources_.at(video_id)->GetCurrentFrameSerial();
+
+  // 2. Seek by time (efficient, uses keyframe index)
+  float current_time = last_frames_[video_id]->pts * sources_[video_id]->TimeBase();
+  float target_time = current_time + offset_s;
+  float start_time = sources_[video_id]->StartTime();
+  float end_time = sources_[video_id]->EndTime();
+  if (!std::isnan(start_time)) {
+    target_time = std::max(target_time, start_time);
+  }
+  if (!std::isnan(end_time)) {
+    target_time = std::min(target_time, end_time);
+  }
+
+  try {
+    sources_[video_id]->SeekTo(target_time);
+    sources_[video_id]->WaitForFrameAvailable();
+    auto frame = sources_[video_id]->GetNextFrame(-1);
+
+    // 3. Calculate actual frame offset from serial difference
+    int serial_after = sources_[video_id]->GetCurrentFrameSerial();
+    int actual_delta = serial_after - serial_before;
+    video_offsets_[video_id].frame_offset += actual_delta;
+
+    Logger->debug("SeekOffsetSingle: video {} offset_s={:.1f} serial {} -> {} delta={} frame_offset={}", video_id,
+                  offset_s, serial_before, serial_after, actual_delta, video_offsets_[video_id].frame_offset);
+
+    last_frames_[video_id] = frame;
+    if (frame_callback_) {
+      frame_callback_(last_frames_);
+    }
+  } catch (const std::exception &e) {
+    Logger->debug("SeekOffsetSingle: video {} seek failed: {}", video_id, e.what());
+  }
+}
+
+void SyncPlayer::InvertPauseSingle(int video_id) {
+  auto &offset = video_offsets_[video_id];
+  offset.individual_paused = !offset.individual_paused;
+  Logger->info("Video {} individually {}", video_id, offset.individual_paused ? "paused" : "resumed");
+}
+
+void SyncPlayer::ResetVideoOffset(int video_id) {
+  state_ = PlayState::kPaused;
+  Logger->info("Resetting offset for video {}", video_id);
+  video_offsets_[video_id] = VideoOffset{};
+
+  if (video_id != main_id_ && !last_frames_.empty()) {
+    // Re-align to main video's current frame serial
+    int main_serial = sources_[main_id_]->GetCurrentFrameSerial();
+    Logger->debug("ResetVideoOffset: video {} re-aligning to main serial {}", video_id, main_serial);
+    sources_[video_id]->SeekToFrameSerial(main_serial);
+    sources_[video_id]->WaitForFrameAvailable();
+    auto frame = sources_[video_id]->GetNextFrame(-1);
+    last_frames_[video_id] = frame;
+  }
+
+  if (frame_callback_ && !last_frames_.empty()) {
+    frame_callback_(last_frames_);
+  }
+}
+
+void SyncPlayer::ResetAllVideoOffsets() {
+  state_ = PlayState::kPaused;
+  Logger->info("Resetting all video offsets");
+
+  int main_serial = sources_[main_id_]->GetCurrentFrameSerial();
+
+  for (auto &[id, source] : sources_) {
+    video_offsets_[id] = VideoOffset{};
+    if (id != main_id_ && !last_frames_.empty()) {
+      Logger->debug("ResetAllVideoOffsets: video {} re-aligning to main serial {}", id, main_serial);
+      source->SeekToFrameSerial(main_serial);
+      source->WaitForFrameAvailable();
+      auto frame = source->GetNextFrame(-1);
+      last_frames_[id] = frame;
+    }
+  }
+
+  if (frame_callback_ && !last_frames_.empty()) {
+    frame_callback_(last_frames_);
+  }
+}
+
 std::map<int, std::shared_ptr<AVFrame>> SyncPlayer::GetFrames(bool forward) {
   std::map<int, std::shared_ptr<AVFrame>> frames;
 
   SPDLOG_LOGGER_TRACE(Logger, "getting frames...");
   for (auto &[id, source] : sources_) {
+    // Skip individually paused videos; reuse their last cached frame
+    if (video_offsets_.count(id) && video_offsets_[id].individual_paused) {
+      if (last_frames_.count(id)) {
+        frames[id] = last_frames_[id];
+        SPDLOG_LOGGER_TRACE(Logger, "Reusing cached frame for individually paused video {}", id);
+        continue;
+      }
+      // Fall through to fetch if no cached frame available
+    }
+
     int try_count = 0;
     while (try_count <= 3) {
       try_count += 1;
@@ -327,6 +478,7 @@ void SyncPlayer::PlayerLoop() {
       }
 
       if (frame_callback_) {
+        last_frames_ = frames; // Cache frames for single-video operations
         frame_callback_(frames);
 
         if (last_width_ != Width() || last_height_ != Height()) {

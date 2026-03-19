@@ -30,9 +30,18 @@ std::string OsdInfo::Format() const {
   char time_buf[16];
   std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d", hours, minutes, seconds);
 
+  // Build suffix for per-video offset info
+  std::string suffix;
+  if (frame_offset != 0) {
+    suffix += fmt::format(" [{:+d}f]", frame_offset);
+  }
+  if (individual_paused) {
+    suffix += " ||";
+  }
+
   char buf[512];
-  std::snprintf(buf, sizeof(buf), "#%d: %s %c %s [%d/%d]", video_id, filename.c_str(), pict_type, time_buf,
-                frame_serial, total_frames);
+  std::snprintf(buf, sizeof(buf), "#%d: %s %c %s [%d/%d]%s", video_id, filename.c_str(), pict_type, time_buf,
+                frame_serial, total_frames, suffix.c_str());
   return std::string(buf);
 }
 

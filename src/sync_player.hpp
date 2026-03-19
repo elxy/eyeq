@@ -131,6 +131,50 @@ public:
   void StepNextFrame();
   void StepPrevFrame();
 
+  // Per-video independent offset state
+  struct VideoOffset {
+    int frame_offset = 0;           // Frame offset relative to main video (positive = ahead)
+    bool individual_paused = false; // Whether this video is individually paused
+  };
+
+  /**
+   * @brief Step a single video forward/backward one frame
+   * @param video_id Target video ID
+   */
+  void StepNextFrameSingle(int video_id);
+  void StepPrevFrameSingle(int video_id);
+
+  /**
+   * @brief Seek a single video by time offset, recording the actual frame offset
+   * @param video_id Target video ID
+   * @param offset_s Time offset in seconds
+   */
+  void SeekOffsetSingle(int video_id, float offset_s);
+
+  /**
+   * @brief Toggle individual pause for a single video
+   * @param video_id Target video ID
+   */
+  void InvertPauseSingle(int video_id);
+
+  /**
+   * @brief Reset a single video's offset and re-align with main video
+   * @param video_id Target video ID
+   */
+  void ResetVideoOffset(int video_id);
+
+  /**
+   * @brief Reset all videos' offsets and re-align with main video
+   */
+  void ResetAllVideoOffsets();
+
+  /**
+   * @brief Query per-video offset state (for OSD display)
+   * @param video_id Target video ID
+   * @return VideoOffset for the specified video
+   */
+  const VideoOffset &GetVideoOffset(int video_id) const;
+
   /**
    * @brief Get current playback time
    * @return Current playback time (seconds)
@@ -202,6 +246,13 @@ protected:
   // Playback thread: periodically fetches next frame and calls frame_callback_ to display
   std::thread loop_thread_;
   void PlayerLoop();
+
+  // Per-video offset tracking for single-video operations
+  std::map<int, VideoOffset> video_offsets_;
+  static const VideoOffset kDefaultVideoOffset; // Default empty offset for unknown video IDs
+
+  // Cached frames from the last render, used by single-video operations
+  std::map<int, std::shared_ptr<AVFrame>> last_frames_;
 };
 
 } // namespace EYEQ
