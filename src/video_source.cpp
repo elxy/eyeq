@@ -449,7 +449,13 @@ void VideoSource::WaitForFrameAvailable(int timeout_ms) {
 void VideoSource::OpenStream() {
   int ret;
   /* open input file, and allocate format context */
-  ret = avformat_open_input(&fmt_ctx_, filename_.c_str(), nullptr, nullptr);
+  // Enable scan_all_pmts so MPEG-TS streams declared with private stream_type=0x06
+  // (commonly used by Dolby Vision profile 5 .ts files) can be probed and recognized
+  // as HEVC. This mirrors the default behavior of the ffmpeg/ffprobe CLI tools.
+  AVDictionary *open_opts = nullptr;
+  av_dict_set(&open_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+  ret = avformat_open_input(&fmt_ctx_, filename_.c_str(), nullptr, &open_opts);
+  av_dict_free(&open_opts);
   if (ret < 0) {
     throw std::runtime_error(fmt::format("Could not open file {}, {}: {}", filename_, ret, ffmpeg_error_string(ret)));
   }
