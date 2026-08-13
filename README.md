@@ -81,14 +81,16 @@ eyeq --display-mode slide --ref <ref> <test_a> --main <test_b>
 - **Grid mode for comparing images across multiple directories**
 
 ```sh
-eyeq --display-mode grid <test_0>/%*.jpg <test_1>/%*.png <test_2>/%*.jpg
+eyeq --display-mode grid '<test_0>/*.jpg' '<test_1>/*.png' '<test_2>/*.jpg'
 ```
 
 Image sequences are handled by FFmpeg's [image2 demuxer](https://ffmpeg.org/ffmpeg-formats.html#image2-1). Supported path patterns:
-  - `dir/%*.jpg` — glob pattern, matches all `.jpg` files in the directory (sorted by filename)
-  - `dir/%03d.jpg` — sequence pattern, matches `000.jpg`, `001.jpg`, `002.jpg`, …
+  - `'dir/*.jpg'` — glob pattern, matches all `.jpg` files in the directory (sorted by filename). **Quote it**, otherwise the shell expands it into separate arguments, each treated as a distinct video
+  - `dir/%04d.jpg` — numbered sequence pattern, matches `0000.jpg`, `0001.jpg`, `0002.jpg`, …
 
-These patterns also work in `fill` and `slide` modes, not limited to `grid` mode. Note that passing a bare directory path (e.g. `./images/`) is not supported.
+These patterns also work in `fill` and `slide` modes, not limited to `grid` mode. Passing a bare directory path (e.g. `./images/`) is not supported.
+
+> **Note:** EyeQ selects the `pattern_type` that the linked FFmpeg build actually supports. The legacy `dir/%*.jpg` syntax (required by `pattern_type=glob_sequence`, removed in FFmpeg 8.x) is accepted and automatically rewritten to plain glob, with a warning. If FFmpeg is built without glob support (`HAVE_GLOB`), EyeQ reports this explicitly — use the numbered sequence pattern instead.
 
 ### Filters
 

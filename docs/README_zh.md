@@ -79,14 +79,16 @@ eyeq --display-mode slide --ref <ref> <test_a> --main <test_b>
 - **使用网格模式对比多个文件夹的图片**
 
 ```sh
-eyeq --display-mode grid <test_0>/%*.jpg <test_1>/%*.png <test_2>/%*.jpg
+eyeq --display-mode grid '<test_0>/*.jpg' '<test_1>/*.png' '<test_2>/*.jpg'
 ```
 
 图片序列由 FFmpeg 的 [image2 demuxer](https://ffmpeg.org/ffmpeg-formats.html#image2-1) 处理，支持以下路径模式：
-  - `dir/%*.jpg` — glob 模式，匹配目录下所有 `.jpg` 文件（按文件名排序）
-  - `dir/%03d.jpg` — sequence 模式，匹配 `000.jpg`、`001.jpg`、`002.jpg`……
+  - `'dir/*.jpg'` — glob 模式，匹配目录下所有 `.jpg` 文件（按文件名排序）。**必须加引号**，否则会被 shell 展开成多个参数，每个被当成独立视频源
+  - `dir/%04d.jpg` — 序号模式，匹配 `0000.jpg`、`0001.jpg`、`0002.jpg`……
 
-这些模式在 `fill` 和 `slide` 模式下同样适用，不限于 `grid` 模式。注意不能直接传入裸目录路径（如 `./images/`）。
+这些模式在 `fill` 和 `slide` 模式下同样适用，不限于 `grid` 模式。不支持直接传入裸目录路径（如 `./images/`）。
+
+> **注意：** EyeQ 会探测所链接的 FFmpeg 实际支持哪种 `pattern_type` 并自动选择。旧语法 `dir/%*.jpg`（属于 FFmpeg 8.x 已移除的 `pattern_type=glob_sequence`）仍可接受，会被自动改写为普通 glob 并给出警告。若 FFmpeg 编译时未启用 glob 支持（`HAVE_GLOB`），EyeQ 会明确报告该原因，此时请改用序号模式。
 
 ### 滤镜
 

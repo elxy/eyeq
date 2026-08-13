@@ -18,6 +18,88 @@ extern "C" {
 
 using namespace EYEQ;
 
+namespace {
+
+// Glob metacharacters recognized by FFmpeg's image2 demuxer (see is_glob() in img2dec.c)
+constexpr std::string_view kGlobMetaChars = "*?[]{}";
+
+/**
+ * @brief Query whether the image2 demuxer exposes the given pattern_type named constant
+ *
+ * The available set differs across FFmpeg builds, so it must be probed instead of assumed:
+ *   - "glob_sequence" was removed in FFmpeg 8.x (libavformat 62)
+ *   - neither "glob" nor "glob_sequence" exists when FFmpeg is built without HAVE_GLOB
+ * Passing an unsupported value to avformat_open_input() is fatal, hence the up-front probe.
+ */
+bool image2_has_pattern_type(const char *name) {
+  static std::mutex mutex;
+  static std::map<std::string, bool> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (auto it = cache.find(name); it != cache.end())
+    return it->second;
+
+  bool available = false;
+  const AVInputFormat *ifmt = av_find_input_format("image2");
+  const AVClass *cls = ifmt ? ifmt->priv_class : nullptr;
+  if (cls) {
+    const AVOption *opt =
+        av_opt_find2(static_cast<void *>(&cls), "pattern_type", nullptr, 0, AV_OPT_SEARCH_FAKE_OBJ, nullptr);
+    if (opt && opt->unit)
+      available = av_opt_find(static_cast<void *>(&cls), name, opt->unit, 0, AV_OPT_SEARCH_FAKE_OBJ) != nullptr;
+  }
+  cache.emplace(name, available);
+  return available;
+}
+
+/**
+ * @brief Detect glob metacharacters in a path, with or without the legacy '%' escape
+ *
+ * @param legacy_escaped Set to true if any metacharacter is '%'-escaped, i.e. the old
+ *                       glob_sequence syntax such as "dir/%*.dpx"
+ */
+bool has_glob_meta(const std::string &path, bool &legacy_escaped) {
+  legacy_escaped = false;
+  bool found = false;
+  for (size_t i = 0; i < path.size(); i++) {
+    if (kGlobMetaChars.find(path[i]) == std::string_view::npos)
+      continue;
+    found = true;
+    if (i > 0 && '%' == path[i - 1])
+      legacy_escaped = true;
+  }
+  return found;
+}
+
+/**
+ * @brief Drop legacy glob_sequence escapes, e.g. "dir%*.dpx" becomes "dir*.dpx"
+ */
+std::string drop_glob_escapes(const std::string &path) {
+  std::string out;
+  out.reserve(path.size());
+  for (size_t i = 0; i < path.size(); i++) {
+    if ('%' == path[i] && i + 1 < path.size() && kGlobMetaChars.find(path[i + 1]) != std::string_view::npos)
+      continue;
+    out += path[i];
+  }
+  return out;
+}
+
+/**
+ * @brief Add legacy glob_sequence escapes, e.g. "dir*.dpx" becomes "dir%*.dpx"
+ */
+std::string add_glob_escapes(const std::string &path) {
+  std::string out;
+  out.reserve(path.size() * 2);
+  for (char c : path) {
+    if (kGlobMetaChars.find(c) != std::string_view::npos)
+      out += '%';
+    out += c;
+  }
+  return out;
+}
+
+} // namespace
+
 VideoSource::VideoSource(std::string filename, std::string filter_graph, int decode_threads, HardwareDecoder hw_decoder)
     : filename_(std::move(filename)), hw_decoder_(hw_decoder), filter_graph_(std::move(filter_graph)),
       max_cached_frames_(kMaxCachedFrames), decode_threads_(decode_threads) {
@@ -454,10 +536,40 @@ void VideoSource::OpenStream() {
   // as HEVC. This mirrors the default behavior of the ffmpeg/ffprobe CLI tools.
   AVDictionary *open_opts = nullptr;
   av_dict_set(&open_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
-  ret = avformat_open_input(&fmt_ctx_, filename_.c_str(), nullptr, &open_opts);
+
+  // Image sequences via glob patterns: pick the dialect this FFmpeg build actually supports,
+  // instead of guessing from a failed open. The pattern_type constant set is version-dependent.
+  std::string open_path = filename_;
+  bool legacy_escaped = false;
+  const bool glob_pattern = has_glob_meta(filename_, legacy_escaped);
+  if (glob_pattern) {
+    if (image2_has_pattern_type("glob")) {
+      open_path = drop_glob_escapes(filename_);
+      av_dict_set(&open_opts, "pattern_type", "glob", AV_DICT_DONT_OVERWRITE);
+      if (legacy_escaped) {
+        Logger->warn("Path '{}' uses the legacy '%*' glob syntax, which this FFmpeg build no longer accepts; "
+                     "rewritten to '{}' with pattern_type=glob",
+                     filename_, open_path);
+      } else {
+        Logger->info("Opening '{}' as an image sequence (pattern_type=glob)", open_path);
+      }
+    } else if (image2_has_pattern_type("glob_sequence")) {
+      open_path = add_glob_escapes(drop_glob_escapes(filename_));
+      av_dict_set(&open_opts, "pattern_type", "glob_sequence", AV_DICT_DONT_OVERWRITE);
+      Logger->info("Opening '{}' as an image sequence (pattern_type=glob_sequence)", open_path);
+    } else {
+      throw std::runtime_error(
+          fmt::format("Path '{}' looks like a glob pattern, but this FFmpeg build has no glob support: "
+                      "the image2 demuxer exposes neither pattern_type=glob nor pattern_type=glob_sequence "
+                      "(built without HAVE_GLOB). Use a numbered sequence pattern instead, e.g. 'dir/%05d.dpx'.",
+                      filename_));
+    }
+  }
+
+  ret = avformat_open_input(&fmt_ctx_, open_path.c_str(), nullptr, &open_opts);
   av_dict_free(&open_opts);
   if (ret < 0) {
-    throw std::runtime_error(fmt::format("Could not open file {}, {}: {}", filename_, ret, ffmpeg_error_string(ret)));
+    throw std::runtime_error(fmt::format("Could not open file {}, {}: {}", open_path, ret, ffmpeg_error_string(ret)));
   }
 
   /* retrieve stream information */
@@ -466,8 +578,27 @@ void VideoSource::OpenStream() {
     throw std::runtime_error(fmt::format("Could not find stream information, {}: {}", ret, ffmpeg_error_string(ret)));
   }
 
+  // FFmpeg calls glob() with GLOB_NOCHECK, so a pattern matching nothing yields the pattern
+  // string itself as the only "file" and opens as a 0x0 stream. Fail loudly instead.
+  if (glob_pattern) {
+    bool matched = false;
+    for (unsigned int i = 0; i < fmt_ctx_->nb_streams; i++) {
+      const AVCodecParameters *par = fmt_ctx_->streams[i]->codecpar;
+      if (par->width > 0 && par->height > 0) {
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      throw std::runtime_error(
+          fmt::format("Glob pattern '{}' matched no readable image file. Check the directory and extension, "
+                      "and quote the pattern (e.g. 'dir/*.dpx') so the shell does not expand it.",
+                      open_path));
+    }
+  }
+
   /* dump input information to stderr */
-  av_dump_format(fmt_ctx_, stream_index_, filename_.c_str(), 0);
+  av_dump_format(fmt_ctx_, stream_index_, open_path.c_str(), 0);
 
   ret = av_find_best_stream(fmt_ctx_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
   if (ret < 0) {
