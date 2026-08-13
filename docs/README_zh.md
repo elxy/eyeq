@@ -82,6 +82,12 @@ eyeq --display-mode slide --ref <ref> <test_a> --main <test_b>
 eyeq --display-mode grid <test_0>/%*.jpg <test_1>/%*.png <test_2>/%*.jpg
 ```
 
+图片序列由 FFmpeg 的 [image2 demuxer](https://ffmpeg.org/ffmpeg-formats.html#image2-1) 处理，支持以下路径模式：
+  - `dir/%*.jpg` — glob 模式，匹配目录下所有 `.jpg` 文件（按文件名排序）
+  - `dir/%03d.jpg` — sequence 模式，匹配 `000.jpg`、`001.jpg`、`002.jpg`……
+
+这些模式在 `fill` 和 `slide` 模式下同样适用，不限于 `grid` 模式。注意不能直接传入裸目录路径（如 `./images/`）。
+
 ### 滤镜
 
 - **指定色彩空间**
