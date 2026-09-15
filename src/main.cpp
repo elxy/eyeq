@@ -58,6 +58,7 @@ struct EyeQArgs {
 
   bool save_in_source;
   std::string save_format;
+  std::string save_render_format;
 
   LoggingLevel log_level;
   HardwareDecoder hardware_decoder;
@@ -113,6 +114,7 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
              "  - A: Previous frame\n"
              "  - D: Next frame\n"
              "  - Ctrl + S: Save current frame of video\n"
+             "  - Ctrl + E: Save rendered frame (DPX)\n"
              "  - Shift + S: Seek to mouse X position\n"
              "  - I: Toggle OSD (On-Screen Display)\n"
              "  - Mouse wheel: Zoom video (centered on cursor)\n"
@@ -181,6 +183,8 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
 
   app.add_flag("--save-in-source", args.save_in_source, "Use source's directory to save frames");
   app.add_option("--save-format", args.save_format, "Format of saved frames, default is png");
+  app.add_option("--save-render-format", args.save_render_format,
+                 "Format of saved rendered frames, default is dpx");
 
   std::map<std::string, LoggingLevel> ll_map{
       {"off", LoggingLevel::NONE},     {"critical", LoggingLevel::FATAL}, {"error", LoggingLevel::ERR},
@@ -361,6 +365,7 @@ int main(int argc, char **argv) {
       .seek_to_frame = 0,
       .save_in_source = false,
       .save_format = "png",
+      .save_render_format = "dpx",
       .log_level = LoggingLevel::INFO,
       .hardware_decoder = HardwareDecoder::Auto,
       .sdr_white_on_hdr = 0,
@@ -691,6 +696,21 @@ int main(int argc, char **argv) {
         if (keymod & SDL_KMOD_CTRL) {
           Logger->debug("ctrl+s key pressed, save frames");
           player.SaveCurrentFrames(args.save_in_source, args.save_format);
+        }
+        break;
+      case SDLK_E:
+        if (keymod & SDL_KMOD_CTRL) {
+          Logger->debug("ctrl+e key pressed, save rendered frame");
+          const int id = args.main_id;
+          std::filesystem::path path;
+          std::filesystem::path src(args.videos[id]);
+          if (args.save_in_source) {
+            path = src.parent_path();
+          }
+          const int serial = player.GetCurrentFrameSerial(id);
+          path /= fmt::format("render_{:04d}.{}.{}.{}", serial, id, src.filename().string(), args.save_render_format);
+          window.RequestSaveRenderedFrame(path);
+          need_refresh = true; // force one render pass to consume the save request
         }
         break;
       case SDLK_T:

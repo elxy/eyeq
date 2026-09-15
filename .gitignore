@@ -1,4 +1,6 @@
 .cache/
 .envrc
 build/
+build_full/
+build-full.sh
 compile_commands.json

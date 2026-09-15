@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -12,6 +13,7 @@ extern "C" {
 }
 #include <SDL3/SDL_vulkan.h>
 #include <libplacebo/vulkan.h>
+#include <libplacebo/dispatch.h>
 #include <libplacebo/renderer.h>
 
 #include <libplacebo/colorspace.h>
@@ -73,6 +75,14 @@ public:
 
   void SetMainSource(int id) { main_id_ = id; }
   void SetSdrWhiteOnHdr(float nits) { sdr_white_on_hdr_ = nits; }
+
+  /**
+   * @brief Request saving the next rendered frame (final display image) to the given path
+   *
+   * The actual readback and encoding happens inside Render(); the request is consumed by the
+   * next Render() call.
+   */
+  void RequestSaveRenderedFrame(const std::filesystem::path &path) { pending_render_save_ = path; }
 
   /**
    * @brief Load ICC profile
@@ -149,6 +159,11 @@ protected:
   struct pl_render_params render_params_;
   std::unique_ptr<FillRender> display_render_;
   std::unique_ptr<OsdManager> osd_manager_;
+
+  // Rendering result save (rendered frame -> DPX)
+  std::optional<std::filesystem::path> pending_render_save_;
+  pl_tex render_save_tex_ = nullptr;  // host-readable RGBA32F intermediate target
+  pl_dispatch render_save_dp_ = nullptr; // pass-through shader to blit intermediate -> swapchain
 
   int main_id_;
   float sdr_white_on_hdr_ = 0; // SDR white level override (nits) for HDR rendering

@@ -66,6 +66,13 @@ Window::~Window() {
   osd_manager_.reset();
   display_render_.reset();
 
+  if (render_save_tex_) {
+    pl_tex_destroy(swapchain_->gpu, &render_save_tex_);
+  }
+  if (render_save_dp_) {
+    pl_dispatch_destroy(&render_save_dp_);
+  }
+
   if (vulkan_) {
     pl_swapchain_destroy(&swapchain_);
     pl_vulkan_destroy(&vulkan_);

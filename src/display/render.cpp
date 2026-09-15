@@ -1,6 +1,7 @@
 #include "render.hpp"
 
 #include <cstdio>
+#include <vector>
 
 extern "C" {
 #include <libavutil/file.h>
@@ -259,7 +260,98 @@ void Window::Render(const DisplayState &state) {
   // 1. Use sample + rect to zoom/pan the video, outputting a frame the same size as swap_frame
   // 2. Blend according to the DisplayMode
   // 3. Draw text or status info (including OSD overlay)
-  display_render_->Render(target, pl_frames_, state);
+  struct pl_frame render_dst = target;
+  bool saving = pending_render_save_.has_value();
+  if (saving) {
+    // When saving, render into a host-readable RGBA32F texture instead of the
+    // swapchain, then blit the result to the swapchain and download it.
+    pl_fmt save_fmt = pl_find_fmt(swapchain_->gpu, PL_FMT_FLOAT, 4, 32, 32,
+                                  static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE |
+                                                                PL_FMT_CAP_HOST_READABLE));
+    struct pl_tex_params save_params = {
+        .w = target.planes[0].texture->params.w,
+        .h = target.planes[0].texture->params.h,
+        .format = save_fmt,
+        .sampleable = true,
+        .renderable = true,
+        .host_readable = true,
+    };
+    if (!save_fmt || !pl_tex_recreate(swapchain_->gpu, &render_save_tex_, &save_params)) {
+      Logger->error("Failed to create save texture; frame save aborted");
+      pending_render_save_.reset();
+      saving = false;
+    } else {
+      render_dst.planes[0].texture = render_save_tex_;
+      render_dst.planes[0].components = 4;
+      render_dst.planes[0].component_mapping[0] = 0;
+      render_dst.planes[0].component_mapping[1] = 1;
+      render_dst.planes[0].component_mapping[2] = 2;
+      render_dst.planes[0].component_mapping[3] = 3;
+    }
+  }
+
+  display_render_->Render(render_dst, pl_frames_, state);
+
+  if (saving) {
+    // Blit the intermediate texture to the swapchain (pure format conversion)
+    if (!render_save_dp_) {
+      render_save_dp_ = pl_dispatch_create(swapchain_->log, swapchain_->gpu);
+    }
+    if (render_save_dp_) {
+      pl_shader shader = pl_dispatch_begin(render_save_dp_);
+      struct pl_shader_desc desc = {
+          .desc =
+              {
+                  .name = "src_tex",
+                  .type = PL_DESC_SAMPLED_TEX,
+              },
+          .binding =
+              {
+                  .object = render_save_tex_,
+                  .sample_mode = PL_TEX_SAMPLE_NEAREST,
+              },
+      };
+      struct pl_custom_shader params = {
+          .body = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
+                  "vec2 pos = gl_FragCoord.xy / tex_size;\n"
+                  "color = texture(src_tex, pos);\n",
+          .output = PL_SHADER_SIG_COLOR,
+          .descriptors = &desc,
+          .num_descriptors = 1,
+      };
+      pl_shader_custom(shader, &params);
+      struct pl_dispatch_params dp_params = {.shader = &shader, .target = target.planes[0].texture};
+      if (!pl_dispatch_finish(render_save_dp_, &dp_params)) {
+        Logger->error("Failed to blit save texture to swapchain");
+      }
+    } else {
+      Logger->error("Failed to create save dispatch; frame save aborted");
+    }
+
+    // Download the rendered frame
+    const size_t w = render_save_tex_->params.w;
+    const size_t h = render_save_tex_->params.h;
+    std::vector<float> pixels(w * h * 4);
+    struct pl_tex_transfer_params transfer_params = {
+        .tex = render_save_tex_,
+        .row_pitch = w * 4 * sizeof(float),
+        .ptr = pixels.data(),
+    };
+    if (!pl_tex_download(swapchain_->gpu, &transfer_params)) {
+      Logger->error("Failed to download save texture");
+    } else {
+      int ret = save_render_frame(pixels.data(), static_cast<int>(w), static_cast<int>(h), target.color.transfer,
+                                  target.color.primaries, target.color.hdr.max_luma,
+                                  target.planes[0].texture->params.format->component_depth[0],
+                                  *pending_render_save_);
+      if (ret < 0) {
+        Logger->error("Failed to save rendered frame to {}", pending_render_save_->string());
+      } else {
+        Logger->info("{} saved", pending_render_save_->string());
+      }
+    }
+    pending_render_save_.reset();
+  }
 
   if (!pl_swapchain_submit_frame(swapchain_)) {
     throw std::runtime_error("pl_swapchain_submit_frame failed.");
