@@ -65,6 +65,8 @@ struct EyeQArgs {
 
   std::vector<std::string> icc_profiles; // ICC profile specifications
   float sdr_white_on_hdr;                // SDR white level (nits) when rendering under HDR
+  double target_display_nits;            // Target display peak luminance (nits); overrides HDR max_luma when passed
+  bool target_display_set;               // Whether --target-display-nits was explicitly passed
 };
 
 void print_version([[maybe_unused]] int count) {
@@ -155,6 +157,9 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   app.add_flag("!--no-colorspace-hint", args.colorspace_hint, "Disable colorspace hint to allow tone mapping");
   app.add_option("--sdr-white-on-hdr", args.sdr_white_on_hdr,
                  "SDR reference white level in nits when the main video is HDR (default: 203)");
+  app.add_option("--target-display-nits", args.target_display_nits,
+                 "Target display peak luminance (nits); when passed, overrides the peak (max_luma) of all HDR "
+                 "content");
   std::map<std::string, HighDpiMode> hdpi_map{
       {"auto", HighDpiMode::Auto}, {"yes", HighDpiMode::Yes}, {"no", HighDpiMode::No}};
   app.add_option("--high-dpi", args.high_dpi_mode, "High DPI mode")
@@ -225,6 +230,9 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   if (app.count("--debug")) {
     args.log_level = LoggingLevel::DEBUG;
   }
+
+  // Overriding HDR max_luma is opt-in: only when the user explicitly passes --target-display-nits.
+  args.target_display_set = app.count("--target-display-nits") > 0;
 
   int video_idx = 0;
   std::optional<int> ref_idx;
@@ -369,10 +377,17 @@ int main(int argc, char **argv) {
       .log_level = LoggingLevel::INFO,
       .hardware_decoder = HardwareDecoder::Auto,
       .sdr_white_on_hdr = 0,
+      .target_display_nits = 1000.0,
+      .target_display_set = false,
   };
 
   parse_args(args, argc, argv);
   set_log_level(args.log_level);
+
+  if (args.target_display_set && (args.target_display_nits <= 0.0 || args.target_display_nits > 10000.0)) {
+    Logger->critical("--target-display-nits must be in the range (0, 10000] nits");
+    return 1;
+  }
 
   signal(SIGINT, sigterm_handler);  // Interrupt (ANSI)
   signal(SIGTERM, sigterm_handler); // Termination (ANSI)
@@ -493,6 +508,7 @@ int main(int argc, char **argv) {
   }
   Window window(title, args.win_w, args.win_h, args.log_level, args.colorspace_hint, high_dpi, display_id);
   window.InitRender(args.display_mode, args.scale_method, args.plane_scale_method);
+  window.SetTargetDisplayNits(args.target_display_nits, args.target_display_set);
 
   // Load ICC profiles
   for (const auto &spec : args.icc_profiles) {

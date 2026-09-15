@@ -85,6 +85,18 @@ public:
   void RequestSaveRenderedFrame(const std::filesystem::path &path) { pending_render_save_ = path; }
 
   /**
+   * @brief Set the target display peak luminance (nits) and whether to override HDR max_luma
+   *
+   * @param nits Target display peak luminance
+   * @param override_enabled Whether to force max_luma to @p nits on all HDR content
+   *        (opt-in, i.e. only when the user explicitly passes --target-display-nits)
+   */
+  void SetTargetDisplayNits(double nits, bool override_enabled) {
+    target_display_nits_ = nits;
+    target_display_override_enabled_ = override_enabled;
+  }
+
+  /**
    * @brief Load ICC profile
    *
    * @param path ICC file path, or "auto" to auto-detect system display ICC
@@ -167,6 +179,11 @@ protected:
 
   int main_id_;
   float sdr_white_on_hdr_ = 0; // SDR white level override (nits) for HDR rendering
+
+  double target_display_nits_ = 1000.0;
+  bool target_display_override_enabled_ = false; // opt-in max_luma override (explicit --target-display-nits)
+  bool target_display_override_logged_ = false;  // one-time log for max_luma override
+
   std::map<int, VideoFrame> av_frames_;
   std::map<int, struct pl_frame *> pl_frames_;
   std::mutex render_mutex_;

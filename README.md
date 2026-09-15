@@ -199,6 +199,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
 - `--no-colorspace-hint`: Disable video color space hinting; uses the default color space instead. Enable this for tone mapping when the display does not support HDR
 - `--sdr-white-on-hdr <nits>`: Set the SDR reference white level (in nits) when the main video is HDR. By default, SDR videos are mapped using the standard reference white of 203 nits (ITU-R BT.2408). This option only takes effect when the main video is HDR and the target video is SDR
+- `--target-display-nits <nits>`: Target display peak luminance in nits. When passed, it overrides the peak (`max_luma`) of all HDR content (HLG, DPX read-back) to this value
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
 - `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)

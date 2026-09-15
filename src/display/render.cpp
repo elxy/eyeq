@@ -1,6 +1,7 @@
 #include "render.hpp"
 
 #include <cstdio>
+#include <cmath>
 #include <vector>
 
 extern "C" {
@@ -100,6 +101,19 @@ std::vector<int> Window::FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &fra
         av_frames_.try_emplace(i, frame, swapchain_->gpu, hw_device_ref_);
       }
       pl_frames_[i] = av_frames_.at(i).GetPLFrame();
+
+      // Apply the target display peak to all HDR content (HLG / DPX read-back),
+      // but only when the user explicitly passed --target-display-nits (opt-in override).
+      struct pl_color_space *csp = &pl_frames_[i]->color;
+      if (target_display_override_enabled_ && pl_color_space_is_hdr(csp)) {
+        if (csp->hdr.max_luma > 0.0f && std::abs(csp->hdr.max_luma - static_cast<float>(target_display_nits_)) > 0.5f &&
+            !target_display_override_logged_) {
+          Logger->info("Video #{}: overriding HDR max_luma {:.0f} → target display {:.0f} nits", i, csp->hdr.max_luma,
+                       target_display_nits_);
+          target_display_override_logged_ = true;
+        }
+        csp->hdr.max_luma = static_cast<float>(target_display_nits_);
+      }
     } catch (const texture_format_error &e) {
       Logger->warn("Video #{}: {}", i, e.what());
       failed_ids.push_back(i);
@@ -340,8 +354,11 @@ void Window::Render(const DisplayState &state) {
     if (!pl_tex_download(swapchain_->gpu, &transfer_params)) {
       Logger->error("Failed to download save texture");
     } else {
+      // Peak luminance of the rendered output. --target-display-nits, when passed, already
+      // overrode the frame's max_luma; otherwise this keeps the source's mastering display peak.
+      float peak = target.color.hdr.max_luma;
       int ret = save_render_frame(pixels.data(), static_cast<int>(w), static_cast<int>(h), target.color.transfer,
-                                  target.color.primaries, target.color.hdr.max_luma,
+                                  target.color.primaries, peak,
                                   target.planes[0].texture->params.format->component_depth[0],
                                   *pending_render_save_);
       if (ret < 0) {
