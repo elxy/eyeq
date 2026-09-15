@@ -165,6 +165,7 @@ After launching, the following keyboard and mouse controls are available:
 - A: Step backward 1 frame
 - D: Step forward 1 frame
 - Ctrl + S: Save the current frame as `<frame_number>.<video_id>.<filename>.png`
+- Ctrl + E: Save the rendered frame (post-tone-mapping display output) as `render_<frame_number>.<video_id>.<filename>.dpx`
 - Mouse wheel: Zoom in/out (centered on the cursor position)
 - Middle mouse button drag: Pan the video
 - I: Toggle OSD display
@@ -205,8 +206,9 @@ After launching, the following keyboard and mouse controls are available:
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
 - `--seek-to <secs>`: Start playback at the specified time (in seconds)
 - `--seek-to-frame <N>`: Start playback from the Nth frame (0-based)
-- `--save-in-source`: Save frames (via `Ctrl + S`) to the source video's directory instead of the current working directory
+- `--save-in-source`: Save frames (via `Ctrl + S` / `Ctrl + E`) to the source video's directory instead of the current working directory
 - `--save-format <format>`: Frame save format (default `png`)
+- `--save-render-format <format>`: Rendered-frame save format (default `dpx`)
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`: Hardware decoder (default `auto`)
 - `--icc-profile <profile>`: ICC color management — `auto` uses the system profile (macOS only); a file path specifies a custom ICC profile; `N:path` specifies a profile for a specific video
 - `--loglevel <level>`: Log level — `debug`, `info`, `warning`, `error`, `critical`, `off` (default `info`)
@@ -247,6 +249,17 @@ After launching, the following keyboard and mouse controls are available:
 4. **Incompatible pixel format (e.g. `pl_map_avframe_ex() failed`)**
 
    Some pixel formats are not supported by libplacebo's Vulkan backend — either the format has incompatible component strides (e.g. `y210le`) or no matching GPU texture format exists (e.g. `bgr8`). EyeQ will automatically append a `format=rgb48le` filter to convert the pixel format via FFmpeg. If you have already specified a `format=` filter manually, EyeQ will not override it — in that case, try `--filter format=rgb48le`.
+
+5. **How do I play back a DPX frame saved via `Ctrl + E`?**
+
+   The DPX header records transfer/primaries with SMPTE ST 268:2014 values (PQ=14, HLG=15, BT.2020=15) that FFmpeg's DPX decoder does not recognize (it maps transfer/colorimetric only up to 12/10), and its reference high quantity (HDR peak) is not read. EyeQ therefore sees an unknown color space and no `max_luma` — add a `setparams` filter to restore the color space, and `--target-display-nits` to supply the peak used for tone mapping:
+
+   ```
+   eyeq --no-colorspace-hint --target-display-nits 1000 \
+     'render_0001.0.foo.mkv.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084'
+   ```
+
+   Use `color_trc=arib-std-b67` for HLG. On an HDR display the PQ output passes through without tone mapping, so `--no-colorspace-hint` and `--target-display-nits` are unnecessary; `--no-colorspace-hint` is required only on non-HDR displays to enable tone mapping.
 
 ## License
 

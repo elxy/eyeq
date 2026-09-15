@@ -163,6 +163,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - A：回退一帧
 - D：前进一帧
 - Ctrl + S：保存视频当前帧，保存在目录`<帧序号>.<视频ID>.<文件名>.png`
+- Ctrl + E：保存渲染后的帧（色调映射后的最终显示画面），保存在目录`render_<帧序号>.<视频ID>.<文件名>.dpx`
 - 鼠标滚轮：缩放视频（以鼠标位置为中心）
 - 按住鼠标中键拖动：平移视频
 - I：显示或隐藏OSD
@@ -203,8 +204,9 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
 - `--seek-to <secs>`：播放起始时间，单位为秒
 - `--seek-to-frame <N>`：从第 N 帧开始播放（从 0 开始计数）
-- `--save-in-source`：设置后，`Ctrl + S`将保存视频当前帧到视频文件所在目录中
+- `--save-in-source`：设置后，`Ctrl + S` / `Ctrl + E` 保存的帧将输出到视频文件所在目录中
 - `--save-format <format>`：帧保存格式，默认为`png`
+- `--save-render-format <format>`：渲染帧保存格式，默认为`dpx`
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`：硬件解码器，默认`auto`
 - `--icc-profile <profile>`：ICC色彩管理。`auto`使用系统配置(仅macOS)，也可指定ICC文件路径，或`N:path`为特定视频指定
 - `--loglevel <level>`：日志级别，包括`debug`、`info`、`warning`、`error`、`critical`、`off`，默认为`info`
@@ -245,6 +247,17 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 4. 不兼容的像素格式（如提示`pl_map_avframe_ex() failed`）
 
    部分像素格式不被libplacebo的Vulkan后端支持——可能是格式的分量步长不兼容（如`y210le`），也可能是GPU没有对应的纹理格式（如`bgr8`）。EyeQ会自动追加`format=rgb48le`滤镜，通过FFmpeg进行格式转换。如果已手动指定了`format=`滤镜，EyeQ不会覆盖，此时请尝试`--filter format=rgb48le`。
+
+5. 如何回看`Ctrl + E`保存的DPX渲染帧？
+
+   DPX 头部用 SMPTE ST 268:2014 的枚举值记录 transfer/primaries（PQ=14、HLG=15、BT.2020=15），而 FFmpeg 的 DPX 解码器不认识这些值（transfer/colorimetric 只映射到 12/10），reference high quantity（HDR 峰值）也不会被读取。因此 EyeQ 拿到的是未知色彩空间、且没有 `max_luma`——需用 `setparams` 滤镜恢复色彩空间，并用 `--target-display-nits` 提供色调映射所需的峰值：
+
+   ```
+   eyeq --no-colorspace-hint --target-display-nits 1000 \
+     'render_0001.0.foo.mkv.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084'
+   ```
+
+   HLG 用 `color_trc=arib-std-b67`。在 HDR 显示器上 PQ 直通、无需色调映射，`--no-colorspace-hint` 与 `--target-display-nits` 可不加；`--no-colorspace-hint` 仅在非 HDR 显示器上需要，用于开启色调映射。
 
 ## 许可证
 
