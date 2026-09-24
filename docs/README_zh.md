@@ -170,8 +170,10 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - Shift + S：seek到鼠标所处位置的相对时间
 - Z：恢复默认缩放和位置（贴紧窗口）
 - X：强制刷新，遇到窗口缩放黑屏时多按几次可恢复
+- F：切换全屏
 - F5：重置所有视频偏移（恢复与主视频帧对齐）
-- Q / Esc：退出
+- Esc：退出全屏（窗口模式下再按一次才退出程序）
+- Q：退出
 
 **单视频操作**（按住数字键N作为修饰键，再按操作键）：
 
@@ -192,7 +194,8 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--display-mode <mode>`：指定显示模式，`fill`即单个窗口显示，按键切换，`slide`即左右滑动显示，`grid`即网格显示。若未指定，则根据视频数量自动选择，2个视频时采用左右滑动显示，其他情况采用单窗口显示
 - `--flicker <secs>`：播放时，按照指定时间间隔交替显示参考视频和对比视频，单位秒
 - `--amplify <ratio>`：缩放与参考视频的像素差别，> 1时放大，< 1时缩小
-- `--window-size <size>`：指定窗口大小，如`--window-size 1920x1080`，`fill`和`slide`模式下默认使用主视频的分辨率，`grid`模式下自适应选择
+- `--window-size <size>`：指定窗口大小，如`--window-size 1920x1080`，`fill`和`slide`模式下默认使用主视频的分辨率，`grid`模式下自适应选择。与`--full-screen`互斥
+- `--full-screen`：启动后直接进入全屏模式。使用桌面分辨率、不切换显示模式（无边框全屏），视频按比例缩放铺满屏幕。与`--window-size`互斥
 - `--grid-size <size>`：指定`grid`显示时的网格大小，如`--grid-size 2x2`，默认自适应选择
 - `--filter <filter>`：指定视频滤镜，作为未单独指定滤镜的视频的默认滤镜，即[FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html)。也可以在视频路径后使用`@`分隔符为单个视频指定滤镜，如`video.mp4@"filter"`
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符

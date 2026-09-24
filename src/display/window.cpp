@@ -24,8 +24,8 @@ using namespace EYEQ;
 extern const std::vector<const char *> optional_device_exts;
 
 Window::Window(const std::string &title, int video_width, int video_height, LoggingLevel log_level,
-               bool colorspace_hint, bool high_dpi, SDL_DisplayID display_id)
-    : colorspace_hint_(colorspace_hint), high_dpi_(high_dpi) {
+               bool colorspace_hint, bool high_dpi, SDL_DisplayID display_id, bool full_screen)
+    : colorspace_hint_(colorspace_hint), high_dpi_(high_dpi), full_screen_(full_screen) {
 
   display_id = display_id ? display_id : Window::CurrentDisplay();
   InitWindow(title, video_width, video_height, display_id);
@@ -131,6 +131,24 @@ void Window::Reset() {
   MoveWindowToCenter(ori_display_id_);
 }
 
+void Window::SetFullscreen(bool enabled) {
+  if (IsFullscreen() == enabled) {
+    return;
+  }
+  if (!SDL_SetWindowFullscreen(window_, enabled)) {
+    Logger->error("Failed to {} fullscreen: {}", enabled ? "enter" : "leave", SDL_GetError());
+    return;
+  }
+  if (!enabled) {
+    // Wait for the fullscreen transition to settle, then restore the original windowed size
+    if (!SDL_SyncWindow(window_)) {
+      Logger->warn("Failed to sync window after leaving fullscreen: {}", SDL_GetError());
+    }
+    Reset();
+  }
+  Logger->debug("Fullscreen {}", enabled ? "enabled" : "disabled");
+}
+
 bool Window::OnResized() {
   int width, height;
   if (!SDL_GetWindowSizeInPixels(window_, &width, &height)) {
@@ -170,6 +188,8 @@ void Window::InitWindow(const std::string &title, int video_width, int video_hei
   uint32_t flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
   if (high_dpi_)
     flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+  if (full_screen_)
+    flags |= SDL_WINDOW_FULLSCREEN;
 
   // Adjust display area based on the display device
   const SDL_DisplayMode *display = SDL_GetCurrentDisplayMode(display_id);
@@ -181,14 +201,20 @@ void Window::InitWindow(const std::string &title, int video_width, int video_hei
 
   int window_width = video_width;
   int window_height = video_height;
-  if (high_dpi_) {
-    window_width = video_width / display->pixel_density;
-    window_height = video_height / display->pixel_density;
-  }
-  if (window_width > display->w || window_height > display->h) {
-    Logger->warn("Window size is too large, scaling down to fit display area");
-    Window::FitResolutionWithAspectRatio(window_width, window_height, static_cast<float>(video_width) / video_height,
-                                         display->w, display->h);
+  if (full_screen_) {
+    // Fullscreen runs at the desktop resolution; SDL ignores the requested size
+    window_width = display->w;
+    window_height = display->h;
+  } else {
+    if (high_dpi_) {
+      window_width = video_width / display->pixel_density;
+      window_height = video_height / display->pixel_density;
+    }
+    if (window_width > display->w || window_height > display->h) {
+      Logger->warn("Window size is too large, scaling down to fit display area");
+      Window::FitResolutionWithAspectRatio(window_width, window_height, static_cast<float>(video_width) / video_height,
+                                           display->w, display->h);
+    }
   }
 
   window_ = SDL_CreateWindow(title.c_str(), window_width, window_height, flags);
@@ -196,7 +222,11 @@ void Window::InitWindow(const std::string &title, int video_width, int video_hei
     throw std::runtime_error(fmt::format("Failed to create window: {}", SDL_GetError()));
   }
 
-  MoveWindowToCenter(display_id);
+  if (full_screen_) {
+    Logger->info("Starting in fullscreen mode on display {}", SDL_GetDisplayName(display_id));
+  } else {
+    MoveWindowToCenter(display_id);
+  }
   SDL_RaiseWindow(window_);
 }
 

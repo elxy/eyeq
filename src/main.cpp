@@ -47,6 +47,7 @@ struct EyeQArgs {
   std::optional<float> amplify;
   int win_w, win_h;
   int grid_w, grid_h;
+  bool full_screen;
 
   bool colorspace_hint;
   HighDpiMode high_dpi_mode;
@@ -123,7 +124,9 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
              "  - Hold middle mouse button and drag: Pan video\n"
              "  - Z: Reset zoom and position, fit to window\n"
              "  - X: Force refresh\n"
-             "  - Q / Esc: Exit");
+             "  - F: Toggle fullscreen\n"
+             "  - Esc: Leave fullscreen (quit when windowed)\n"
+             "  - Q: Quit");
 
   app.add_flag_function("--version", print_version, "Print the version of this program");
   std::vector<std::string> videos;
@@ -147,12 +150,15 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   app.add_option("--amplify", args.amplify, "Amplifies the artefacts of videos relative to reference")
       ->needs(option_ref);
 
-  app.add_option_function<std::string>(
+  auto *option_window_size = app.add_option_function<std::string>(
       "--window-size", [&args](const std::string &s) { parse_size(args.win_w, args.win_h, s); },
       "Specific the resolution of window size, e.g. 1920x1080. Default is auto selected");
   app.add_option_function<std::string>(
       "--grid-size", [&args](const std::string &s) { parse_size(args.grid_w, args.grid_h, s); },
       "Specific the numbers of columns and rows in grid mode, e.g. 3x1. Default is auto selected");
+  auto *option_full_screen =
+      app.add_flag("--full-screen", args.full_screen, "Start in fullscreen (desktop resolution, no mode switch)");
+  option_full_screen->excludes(option_window_size);
 
   app.add_flag("!--no-colorspace-hint", args.colorspace_hint, "Disable colorspace hint to allow tone mapping");
   app.add_option("--sdr-white-on-hdr", args.sdr_white_on_hdr,
@@ -365,6 +371,7 @@ int main(int argc, char **argv) {
       .win_h = 0,
       .grid_w = 0,
       .grid_h = 0,
+      .full_screen = false,
       .colorspace_hint = true,
       .high_dpi_mode = HighDpiMode::Auto,
       .scale_method = ScaleMethod::Nearest,
@@ -506,7 +513,8 @@ int main(int argc, char **argv) {
       args.win_h = player.Height();
     }
   }
-  Window window(title, args.win_w, args.win_h, args.log_level, args.colorspace_hint, high_dpi, display_id);
+  Window window(title, args.win_w, args.win_h, args.log_level, args.colorspace_hint, high_dpi, display_id,
+                args.full_screen);
   window.InitRender(args.display_mode, args.scale_method, args.plane_scale_method);
   window.SetTargetDisplayNits(args.target_display_nits, args.target_display_set);
 
@@ -564,6 +572,11 @@ int main(int argc, char **argv) {
   if (DisplayMode::Slide == args.display_mode) {
     state.slide.left_id = ids[0];
     state.slide.right_id = ids[1];
+  }
+
+  // In fullscreen the window no longer matches the video resolution, so fit the video into it explicitly
+  if (args.full_screen) {
+    fit_to_window(state, player, window, args.display_mode);
   }
 
   std::atomic<bool> need_refresh = false;
@@ -854,7 +867,17 @@ int main(int argc, char **argv) {
     case SDL_EVENT_QUIT:
       goto exit;
     case SDL_EVENT_KEY_UP:
-      if (event.key.key == SDLK_ESCAPE || event.key.key == SDLK_Q) {
+      if (event.key.key == SDLK_ESCAPE) {
+        // mpv-style: Esc leaves fullscreen first, a second press quits
+        if (window.IsFullscreen()) {
+          Logger->debug("esc key released, leave fullscreen");
+          window.SetFullscreen(false);
+          need_refresh = true;
+          break;
+        }
+        goto exit;
+      }
+      if (event.key.key == SDLK_Q) {
         goto exit;
       }
       // Handle digit key release: switch video only if not used as modifier
@@ -920,6 +943,11 @@ int main(int argc, char **argv) {
         break;
       case SDLK_X:
         Logger->debug("x key released, force refresh");
+        need_refresh = true;
+        break;
+      case SDLK_F:
+        Logger->debug("f key released, toggle fullscreen");
+        window.SetFullscreen(!window.IsFullscreen());
         need_refresh = true;
         break;
       case SDLK_Z:

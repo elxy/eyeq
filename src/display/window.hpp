@@ -36,7 +36,7 @@ class Window {
    */
 public:
   Window(const std::string &title, int video_width, int video_height, LoggingLevel log_level,
-         bool colorspace_hint_ = true, bool high_dpi = false, SDL_DisplayID display_id = 0);
+         bool colorspace_hint_ = true, bool high_dpi = false, SDL_DisplayID display_id = 0, bool full_screen = false);
   ~Window();
 
   static SDL_DisplayID CurrentDisplay();
@@ -68,6 +68,15 @@ public:
   }
   void Reset();
   bool OnResized();
+
+  bool IsFullscreen() const { return (SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN) != 0; }
+  /**
+   * @brief Enter or leave fullscreen at runtime
+   *
+   * Leaving fullscreen restores the original windowed size and centers the window on the
+   * display it was initially created on.
+   */
+  void SetFullscreen(bool enabled);
 
   void SetTitle(const std::string &title) { SDL_SetWindowTitle(window_, title.c_str()); }
   void Raise() { SDL_RaiseWindow(window_); }
@@ -151,6 +160,7 @@ protected:
   DisplayMode mode_;
   bool colorspace_hint_;
   bool high_dpi_;
+  bool full_screen_;
 
   SDL_Window *window_;
   int ori_width_;

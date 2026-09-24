@@ -172,8 +172,10 @@ After launching, the following keyboard and mouse controls are available:
 - Shift + S: Seek to the relative time at the cursor position
 - Z: Reset zoom and position (fit to window)
 - X: Force refresh (press multiple times if the window goes black after resizing)
+- F: Toggle fullscreen
 - F5: Reset all video offsets (re-align all videos with the main video)
-- Q / Esc: Quit
+- Esc: Leave fullscreen (quit when windowed; press Esc again to quit)
+- Q: Quit
 
 **Single Video Operations** (hold digit key N as modifier, then press an action key):
 
@@ -194,7 +196,8 @@ After launching, the following keyboard and mouse controls are available:
 - `--display-mode <mode>`: Display mode — `fill` (single window with key switching), `slide` (side-by-side swipe), `grid` (grid layout). If not specified, the mode is chosen automatically: `slide` for 2 videos, `fill` otherwise
 - `--flicker <secs>`: During playback, alternate between the reference video and the test video at the specified interval (in seconds)
 - `--amplify <ratio>`: Scale pixel differences relative to the reference video; > 1 amplifies, < 1 attenuates
-- `--window-size <size>`: Window size, e.g. `--window-size 1920x1080`. In `fill` and `slide` modes, defaults to the main video's resolution; in `grid` mode, chosen automatically
+- `--window-size <size>`: Window size, e.g. `--window-size 1920x1080`. In `fill` and `slide` modes, defaults to the main video's resolution; in `grid` mode, chosen automatically. Mutually exclusive with `--full-screen`
+- `--full-screen`: Start in fullscreen mode. Uses the desktop resolution without switching display mode (borderless fullscreen), so the video is scaled to fit the screen. Mutually exclusive with `--window-size`
 - `--grid-size <size>`: Grid layout size, e.g. `--grid-size 2x2`. Defaults to automatic selection
 - `--filter <filter>`: Default video filter applied to videos without a per-video filter, using [FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html) syntax. Per-video filters can be appended after the video path with `@`, e.g. `video.mp4@"filter"`
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
