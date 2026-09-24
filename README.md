@@ -266,14 +266,14 @@ After launching, the following keyboard and mouse controls are available:
 
 ## DeckLink Output (Work in Progress)
 
-The DeckLink SDI/HDMI output backend is under development and **cannot play video yet**. The implemented part is read-only: it enumerates devices and queries supported output modes. Video output, the GPU packer, frame scheduling and HDR signaling are not implemented, and `eyeq` itself has no DeckLink playback options.
+The DeckLink SDI/HDMI output backend now has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. The `eyeq` player is **not wired to it yet** and there are no DeckLink playback options, so `eyeq` still cannot output video. The GPU packer, renderer/player integration, audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. The native output write path is exercised only against a fake SDK until hardware output is separately authorized.
 
 Optional CMake switches (all default to `OFF`; the normal player build is unaffected):
 
 | Option | Default | Purpose |
 |---|---|---|
-| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests and, with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection tests. No GPU, no device. |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the read-only SDK backend and the `decklink-catalog` tool. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. Video output is still not implemented. |
+| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests and, with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection and output-backend tests. No GPU, no device. |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` tool. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. The player is not wired to it yet, so `eyeq` still does not output video. |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Reserved for GPU packing tests; setting it `ON` fails fast while the packer is declaration-only. |
 | `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); required by `EYEQ_ENABLE_DECKLINK`. Nothing is downloaded or modified. |
 

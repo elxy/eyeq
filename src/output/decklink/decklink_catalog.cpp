@@ -1,6 +1,6 @@
 // SDK-facing implementation of the read-only DeckLink catalog and mode query.
-// All DeckLink COM types are confined to this translation unit; the public header
-// does not include any SDK type.
+// All DeckLink COM types are confined to this translation unit and the internal
+// SDK header; the public header does not include any SDK type.
 #include "output/decklink_backend.hpp"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -14,30 +14,13 @@
 #include <vector>
 
 #include "DeckLinkAPI.h"
+#include "output/decklink/decklink_sdk.hpp"
 
 namespace EYEQ {
 
 namespace {
 
-void SetError(std::string *error, const std::string &message) {
-  if (error != nullptr) {
-    *error = message;
-  }
-}
-
-// A stable, greppable hex rendering of an HRESULT. It never guesses a meaning.
-std::string FormatHresult(HRESULT result) {
-  char buffer[16] = {};
-  std::snprintf(buffer, sizeof(buffer), "0x%08X", static_cast<unsigned int>(result));
-  return buffer;
-}
-
-// FourCC rendering of a BMDDisplayMode for error context.
-std::string FormatDisplayMode(BMDDisplayMode mode) {
-  char buffer[16] = {};
-  std::snprintf(buffer, sizeof(buffer), "0x%08X", static_cast<unsigned int>(mode));
-  return buffer;
-}
+void SetError(std::string *error, const std::string &message) { internal::SetError(error, message); }
 
 std::string CfStringToString(CFStringRef value) {
   if (value == nullptr) {
@@ -68,26 +51,6 @@ std::string QueryApiVersion() {
   }
   information->Release();
   return result;
-}
-
-BMDVideoConnection ToSdkConnection(VideoConnection connection) {
-  switch (connection) {
-  case VideoConnection::SDI:
-    return bmdVideoConnectionSDI;
-  case VideoConnection::HDMI:
-    return bmdVideoConnectionHDMI;
-  }
-  return bmdVideoConnectionUnspecified;
-}
-
-BMDPixelFormat ToSdkPixelFormat(PixelFormat format) {
-  switch (format) {
-  case PixelFormat::R210:
-    return bmdFormat10BitRGB;
-  case PixelFormat::V210:
-    return bmdFormat10BitYUV;
-  }
-  return 0;
 }
 
 // Reads a device's identity and capabilities. Never opens an output.
@@ -137,14 +100,58 @@ DeviceInfo ReadDeviceInfo(IDeckLink *device, int index) {
   return info;
 }
 
-// Finds the device matching a selector and returns its IDeckLinkOutput. The caller
-// owns *out. Read-only: does not enable or reconfigure the output.
-//
-// Frozen DeviceId semantics: a non-empty persistent_id is preferred and matched first;
-// index is only a fallback when persistent_id is empty. Both fields may coexist (that
-// is exactly what Enumerate() returns). A specified persistent id that is not found
-// fails; it never falls back to the index.
-bool ResolveOutput(const DeviceId &selector, IDeckLinkOutput **out, std::string *error) {
+bool SameMode(const MonitorMode &a, const MonitorMode &b) {
+  return a.width == b.width && a.height == b.height && a.frame_duration == b.frame_duration &&
+         a.time_scale == b.time_scale && a.is_progressive == b.is_progressive;
+}
+
+} // namespace
+
+namespace internal {
+
+void SetError(std::string *error, const std::string &message) {
+  if (error != nullptr) {
+    *error = message;
+  }
+}
+
+std::string FormatHresult(HRESULT result) {
+  char buffer[16] = {};
+  std::snprintf(buffer, sizeof(buffer), "0x%08X", static_cast<unsigned int>(result));
+  return buffer;
+}
+
+std::string FormatDisplayMode(BMDDisplayMode mode) {
+  char buffer[16] = {};
+  std::snprintf(buffer, sizeof(buffer), "0x%08X", static_cast<unsigned int>(mode));
+  return buffer;
+}
+
+BMDVideoConnection ToSdkConnection(VideoConnection connection) {
+  switch (connection) {
+  case VideoConnection::SDI:
+    return bmdVideoConnectionSDI;
+  case VideoConnection::HDMI:
+    return bmdVideoConnectionHDMI;
+  }
+  return bmdVideoConnectionUnspecified;
+}
+
+BMDPixelFormat ToSdkPixelFormat(PixelFormat format) {
+  switch (format) {
+  case PixelFormat::R210:
+    return bmdFormat10BitRGB;
+  case PixelFormat::V210:
+    return bmdFormat10BitYUV;
+  }
+  return 0;
+}
+
+// Frozen DeviceId semantics: a non-empty persistent_id is preferred and matched
+// first; index is only a fallback when persistent_id is empty. Both fields may
+// coexist (that is exactly what Enumerate() returns). A specified persistent id
+// that is not found fails; it never falls back to the index.
+bool ResolveDevice(const DeviceId &selector, IDeckLink **out, std::string *error) {
   *out = nullptr;
   if (selector.persistent_id.empty() && selector.index < 0) {
     SetError(error, "no device selector: provide a persistent id or an index");
@@ -200,13 +207,8 @@ bool ResolveOutput(const DeviceId &selector, IDeckLinkOutput **out, std::string 
       continue;
     }
 
-    const HRESULT result = device->QueryInterface(IID_IDeckLinkOutput, reinterpret_cast<void **>(out));
-    device->Release();
     iterator->Release();
-    if (result != S_OK || *out == nullptr) {
-      SetError(error, "device does not expose the IDeckLinkOutput interface (HRESULT " + FormatHresult(result) + ")");
-      return false;
-    }
+    *out = device;
     return true;
   }
 
@@ -219,12 +221,22 @@ bool ResolveOutput(const DeviceId &selector, IDeckLinkOutput **out, std::string 
   return false;
 }
 
-bool SameMode(const MonitorMode &a, const MonitorMode &b) {
-  return a.width == b.width && a.height == b.height && a.frame_duration == b.frame_duration &&
-         a.time_scale == b.time_scale && a.is_progressive == b.is_progressive;
+bool ResolvePlaybackOutput(const DeviceId &selector, IDeckLinkOutput **out, std::string *error) {
+  *out = nullptr;
+  IDeckLink *device = nullptr;
+  if (!ResolveDevice(selector, &device, error)) {
+    return false;
+  }
+  const HRESULT result = device->QueryInterface(IID_IDeckLinkOutput, reinterpret_cast<void **>(out));
+  device->Release();
+  if (result != S_OK || *out == nullptr) {
+    SetError(error, "device does not expose the IDeckLinkOutput interface (HRESULT " + FormatHresult(result) + ")");
+    return false;
+  }
+  return true;
 }
 
-} // namespace
+} // namespace internal
 
 DeviceCatalog DeckLinkOutput::Enumerate() {
   DeviceCatalog catalog;
@@ -254,7 +266,7 @@ DeviceCatalog DeckLinkOutput::Enumerate() {
       iterator->Release();
       catalog.devices.clear();
       catalog.status = DeviceCatalog::Status::InternalError;
-      catalog.error = "IDeckLinkIterator::Next failed (HRESULT " + FormatHresult(next_result) + ") after " +
+      catalog.error = "IDeckLinkIterator::Next failed (HRESULT " + internal::FormatHresult(next_result) + ") after " +
                       std::to_string(index) + " device(s)";
       return catalog;
     }
@@ -281,19 +293,19 @@ bool DeckLinkOutput::ListModes(const DeviceId &device, VideoConnection connectio
   }
   out->clear();
 
-  const BMDVideoConnection sdk_connection = ToSdkConnection(connection);
+  const BMDVideoConnection sdk_connection = internal::ToSdkConnection(connection);
   if (sdk_connection == bmdVideoConnectionUnspecified) {
     SetError(error, "unknown video connection");
     return false;
   }
-  const BMDPixelFormat sdk_format = ToSdkPixelFormat(format);
+  const BMDPixelFormat sdk_format = internal::ToSdkPixelFormat(format);
   if (sdk_format == 0) {
     SetError(error, "unknown pixel format");
     return false;
   }
 
   IDeckLinkOutput *output = nullptr;
-  if (!ResolveOutput(device, &output, error)) {
+  if (!internal::ResolvePlaybackOutput(device, &output, error)) {
     return false;
   }
 
@@ -301,7 +313,7 @@ bool DeckLinkOutput::ListModes(const DeviceId &device, VideoConnection connectio
   const HRESULT iterator_result = output->GetDisplayModeIterator(&mode_iterator);
   if (iterator_result != S_OK || mode_iterator == nullptr) {
     output->Release();
-    SetError(error, "GetDisplayModeIterator failed (HRESULT " + FormatHresult(iterator_result) + ")");
+    SetError(error, "GetDisplayModeIterator failed (HRESULT " + internal::FormatHresult(iterator_result) + ")");
     return false;
   }
 
@@ -319,8 +331,8 @@ bool DeckLinkOutput::ListModes(const DeviceId &device, VideoConnection connectio
     if (next_result != S_OK) {
       // A failure HRESULT is a hard error even when mode is null.
       ok = false;
-      SetError(error, "IDeckLinkDisplayModeIterator::Next failed (HRESULT " + FormatHresult(next_result) + ") after " +
-                          std::to_string(mode_count) + " mode(s)");
+      SetError(error, "IDeckLinkDisplayModeIterator::Next failed (HRESULT " + internal::FormatHresult(next_result) +
+                          ") after " + std::to_string(mode_count) + " mode(s)");
       break;
     }
     if (mode == nullptr) {
@@ -339,8 +351,8 @@ bool DeckLinkOutput::ListModes(const DeviceId &device, VideoConnection connectio
                                      bmdSupportedVideoModeDefault, &actual, &supported);
     if (support_result != S_OK) {
       ok = false;
-      SetError(error, "DoesSupportVideoMode failed (HRESULT " + FormatHresult(support_result) + ") for mode " +
-                          FormatDisplayMode(requested));
+      SetError(error, "DoesSupportVideoMode failed (HRESULT " + internal::FormatHresult(support_result) +
+                          ") for mode " + internal::FormatDisplayMode(requested));
       mode->Release();
       break;
     }
@@ -360,14 +372,14 @@ bool DeckLinkOutput::ListModes(const DeviceId &device, VideoConnection connectio
     mode->Release();
     if (rate_result != S_OK) {
       ok = false;
-      SetError(error, "GetFrameRate failed (HRESULT " + FormatHresult(rate_result) + ") for mode " +
-                          FormatDisplayMode(requested));
+      SetError(error, "GetFrameRate failed (HRESULT " + internal::FormatHresult(rate_result) + ") for mode " +
+                          internal::FormatDisplayMode(requested));
       break;
     }
     if (frame_duration <= 0 || time_scale <= 0) {
       // A non-positive time base is an invalid result; never publish it as a mode.
       ok = false;
-      SetError(error, "GetFrameRate returned an invalid time base for mode " + FormatDisplayMode(requested) +
+      SetError(error, "GetFrameRate returned an invalid time base for mode " + internal::FormatDisplayMode(requested) +
                           " (duration=" + std::to_string(frame_duration) + " scale=" + std::to_string(time_scale) +
                           ")");
       break;

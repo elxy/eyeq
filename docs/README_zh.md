@@ -264,14 +264,14 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ## DeckLink 输出（开发中）
 
-DeckLink SDI/HDMI 输出后端仍在开发中，**尚不能播放视频**。已实现的部分是只读的：枚举设备、查询支持的输出模式。视频输出、GPU 打包器、帧调度与 HDR 信令均未实现，`eyeq` 本身也没有任何 DeckLink 播放选项。
+DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。`eyeq` 播放器**尚未接入**，也没有任何 DeckLink 播放选项，因此 `eyeq` 仍不能输出视频。GPU 打包器、渲染器/播放器接线、音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。在另行授权实机输出前，原生输出写路径只在 fake SDK 上运行。
 
 可选 CMake 开关（默认全部为 `OFF`，不影响普通播放器构建）：
 
 | 开关 | 默认 | 用途 |
 |---|---|---|
-| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试；配合 `EYEQ_ENABLE_DECKLINK` 还会构建确定性的 SDK 故障注入测试。无需 GPU、设备 |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建只读 SDK 后端与 `decklink-catalog` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。视频输出仍未实现 |
+| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试；配合 `EYEQ_ENABLE_DECKLINK` 还会构建确定性的 SDK 故障注入与输出后端测试。无需 GPU、设备 |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。播放器尚未接入，`eyeq` 仍不能输出视频 |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 预留给 GPU 打包测试；打包器仍只有声明，设为 `ON` 会立即报错终止 |
 | `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），`EYEQ_ENABLE_DECKLINK` 必需；不会下载或修改 |
 

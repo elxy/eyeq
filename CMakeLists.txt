@@ -103,6 +103,7 @@ if(EYEQ_ENABLE_DECKLINK)
   add_library(eyeq_decklink_backend STATIC
     "${_decklink_dispatch}"
     ${CMAKE_SOURCE_DIR}/src/output/decklink/decklink_catalog.cpp
+    ${CMAKE_SOURCE_DIR}/src/output/decklink/decklink_output.cpp
     ${CMAKE_SOURCE_DIR}/src/output/decklink/monitor_mode.cpp)
   target_include_directories(eyeq_decklink_backend
     PUBLIC ${CMAKE_SOURCE_DIR}/src

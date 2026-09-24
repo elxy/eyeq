@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -43,11 +44,18 @@ struct DeviceCatalog {
   std::vector<DeviceInfo> devices;
 };
 
-// SDK output backend. Phase 1A-1 implements only the read-only catalog and mode
-// query. The FrameSink output methods are declared but intentionally not implemented
-// yet, so instantiating or calling them fails to link instead of faking success.
+// SDK output backend. Phase 1A-2 implements the real frame pool, CPU copy,
+// scheduling, still frame and shutdown. All DeckLink COM types stay inside the
+// implementation translation unit, so this header includes no SDK type.
 class DeckLinkOutput final : public FrameSink {
 public:
+  DeckLinkOutput();
+  ~DeckLinkOutput() override;
+
+  DeckLinkOutput(const DeckLinkOutput &) = delete;
+  DeckLinkOutput &operator=(const DeckLinkOutput &) = delete;
+  DeckLinkOutput(DeckLinkOutput &&) = delete;
+  DeckLinkOutput &operator=(DeckLinkOutput &&) = delete;
   // Enumerates devices without opening an output or changing device configuration.
   static DeviceCatalog Enumerate();
 
@@ -60,7 +68,10 @@ public:
   static bool ListModes(const DeviceId &device, VideoConnection connection, PixelFormat format,
                         std::vector<MonitorMode> *out, std::string *error);
 
-  // --- Output path: not implemented in phase 1A-1 (no success stub). ---
+  // Opens the selected device, validates the request, creates the SDK frame pool
+  // and still frame, and registers the completion callback. No success stub: any
+  // native failure is reported and rolled back. Must be called before the output
+  // methods below.
   bool Open(const OutputRequest &request, ResolvedOutput *resolved, std::string *error);
   ScheduleOutcome TrySchedule(const PackedFrameView &view, const SubmissionInfo &info, int64_t display_time,
                               int64_t display_duration) override;
@@ -70,6 +81,14 @@ public:
   bool StopScheduled(int64_t stop_at, int64_t *actual_stop, std::string *error) override;
   bool QueryClock(int64_t time_scale, int64_t *stream_time, double *speed, std::string *error) override;
   CloseStatus Close(int drain_timeout_ms) override;
+
+  // Diagnostic: number of pool slots that are not Free (submitted, in flight,
+  // settled-unknown or quarantined). Used by shutdown diagnostics and tests.
+  uint32_t unreconciled_frame_count() const;
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 } // namespace EYEQ

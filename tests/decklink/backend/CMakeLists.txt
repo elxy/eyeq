@@ -51,3 +51,44 @@ set_tests_properties(decklink_catalog_cli_rejects_bare_number PROPERTIES WILL_FA
 add_test(NAME decklink_catalog_cli_rejects_overlarge_index
   COMMAND decklink_catalog_cli_test --device index:4294967296)
 set_tests_properties(decklink_catalog_cli_rejects_overlarge_index PROPERTIES WILL_FAIL TRUE)
+
+# Output backend tests: they compile the real decklink_output.cpp state machine and
+# the read-only catalog helpers, and replace only the two SDK dispatch factories with
+# the fake. DeckLinkAPIDispatch.cpp is deliberately not linked.
+find_package(Threads REQUIRED)
+set(_decklink_output_sources
+  ${CMAKE_SOURCE_DIR}/src/output/decklink/decklink_output.cpp
+  ${CMAKE_SOURCE_DIR}/src/output/decklink/decklink_catalog.cpp
+  ${CMAKE_SOURCE_DIR}/src/output/decklink/monitor_mode.cpp
+  fake_decklink_output.cpp)
+
+add_executable(decklink_output_test decklink_output_test.cpp ${_decklink_output_sources})
+target_include_directories(decklink_output_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  "${_decklink_include}")
+target_link_libraries(decklink_output_test PRIVATE
+  eyeq_output_contract
+  Threads::Threads
+  "-framework CoreFoundation")
+add_test(NAME decklink_output COMMAND decklink_output_test)
+
+add_executable(decklink_output_concurrency_test
+  decklink_output_concurrency_test.cpp ${_decklink_output_sources})
+target_include_directories(decklink_output_concurrency_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  "${_decklink_include}")
+target_link_libraries(decklink_output_concurrency_test PRIVATE
+  eyeq_output_contract
+  Threads::Threads
+  "-framework CoreFoundation")
+add_test(NAME decklink_output_concurrency COMMAND decklink_output_concurrency_test)
+
+add_executable(decklink_output_death_test decklink_output_death_test.cpp ${_decklink_output_sources})
+target_include_directories(decklink_output_death_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  "${_decklink_include}")
+target_link_libraries(decklink_output_death_test PRIVATE
+  eyeq_output_contract
+  Threads::Threads
+  "-framework CoreFoundation")
+add_test(NAME decklink_output_death COMMAND decklink_output_death_test)
