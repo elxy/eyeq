@@ -266,24 +266,38 @@ After launching, the following keyboard and mouse controls are available:
 
 ## DeckLink Output (Work in Progress)
 
-The DeckLink SDI/HDMI output backend is under development and is **not functional yet**. This phase provides only the CPU-side public contract (packed layouts, request validation, sink interface) and its contract tests. The SDK backend, the GPU packer, and device output are not implemented, and there are no DeckLink command-line options.
+The DeckLink SDI/HDMI output backend is under development and **cannot play video yet**. The implemented part is read-only: it enumerates devices and queries supported output modes. Video output, the GPU packer, frame scheduling and HDR signaling are not implemented, and `eyeq` itself has no DeckLink playback options.
 
 Optional CMake switches (all default to `OFF`; the normal player build is unaffected):
 
 | Option | Default | Purpose |
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests. No SDK, no GPU, no device. |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | Reserved for the SDK backend. Setting it `ON` fails fast in this phase. |
-| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Reserved for GPU packing tests. Setting it `ON` fails fast in this phase. |
-| `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); used from the SDK backend phase. |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the read-only SDK backend and the `decklink-catalog` tool. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. Video output is still not implemented. |
+| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Reserved for GPU packing tests; setting it `ON` fails fast while the packer is declaration-only. |
+| `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); required by `EYEQ_ENABLE_DECKLINK`. Nothing is downloaded or modified. |
 
-Running the contract tests:
+Running the CPU/fake contract tests (no SDK required):
 
 ```sh
 cmake -S . -B build -DEYEQ_BUILD_DECKLINK_TESTS=ON
 cmake --build build --target decklink_contract_test
 ctest --test-dir build --output-on-failure
 ```
+
+Building the read-only catalog backend and tool:
+
+```sh
+cmake -S . -B build-sdk -DEYEQ_ENABLE_DECKLINK=ON \
+  -DDECKLINK_SDK_ROOT="/path/to/Blackmagic DeckLink SDK 16.0"
+cmake --build build-sdk --target decklink-catalog
+# List devices:
+./build-sdk/bin/decklink-catalog
+# List output modes for a device (read-only):
+./build-sdk/bin/decklink-catalog --device 0 --connection sdi --pixel-format v210
+```
+
+The tool only queries the device; it never enables an output, schedules frames or changes device configuration.
 
 ## License
 

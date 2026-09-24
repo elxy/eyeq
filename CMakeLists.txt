@@ -62,15 +62,10 @@ find_package(Libplacebo REQUIRED)
 find_package(SDL3_ttf REQUIRED)
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avfilter avformat avutil swscale)
 
-# Phase 0.5 guard: do not pretend an unavailable backend is built.
-if(EYEQ_ENABLE_DECKLINK)
-  message(FATAL_ERROR
-    "EYEQ_ENABLE_DECKLINK=ON is not available in phase 0.5: the SDK output backend is not implemented yet. "
-    "Only the CPU contract library and CPU/fake tests exist. Leave EYEQ_ENABLE_DECKLINK=OFF.")
-endif()
+# Phase 1A-1 guard: the GPU packer is still declaration-only.
 if(EYEQ_BUILD_DECKLINK_GPU_TESTS)
   message(FATAL_ERROR
-    "EYEQ_BUILD_DECKLINK_GPU_TESTS=ON is not available in phase 0.5: the GPU packer is declaration-only. "
+    "EYEQ_BUILD_DECKLINK_GPU_TESTS=ON is not available yet: the GPU packer is declaration-only. "
     "Leave EYEQ_BUILD_DECKLINK_GPU_TESTS=OFF.")
 endif()
 
@@ -82,6 +77,46 @@ add_library(eyeq_output_contract STATIC
   ${CMAKE_SOURCE_DIR}/src/output/output_profile.cpp)
 target_include_directories(eyeq_output_contract PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(eyeq_output_contract PUBLIC Libplacebo::Libplacebo)
+
+# Optional DeckLink SDK backend. Phase 1A-1 builds only the read-only catalog and
+# mode query; it never enables video output. The SDK is an external, read-only tree
+# referenced by DECKLINK_SDK_ROOT; nothing is downloaded or modified.
+if(EYEQ_ENABLE_DECKLINK)
+  if(NOT APPLE)
+    message(FATAL_ERROR "EYEQ_ENABLE_DECKLINK currently requires macOS")
+  endif()
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    message(FATAL_ERROR "EYEQ_ENABLE_DECKLINK currently supports Apple Silicon (arm64) only")
+  endif()
+  if(NOT DECKLINK_SDK_ROOT)
+    message(FATAL_ERROR "EYEQ_ENABLE_DECKLINK=ON requires -DDECKLINK_SDK_ROOT=<path-to-SDK>")
+  endif()
+  set(_decklink_include "${DECKLINK_SDK_ROOT}/Mac/include")
+  set(_decklink_dispatch "${_decklink_include}/DeckLinkAPIDispatch.cpp")
+  set(_decklink_api "${_decklink_include}/DeckLinkAPI.h")
+  if(NOT EXISTS "${_decklink_api}" OR NOT EXISTS "${_decklink_dispatch}")
+    message(FATAL_ERROR
+      "DECKLINK_SDK_ROOT='${DECKLINK_SDK_ROOT}' does not contain "
+      "Mac/include/DeckLinkAPI.h and Mac/include/DeckLinkAPIDispatch.cpp")
+  endif()
+
+  add_library(eyeq_decklink_backend STATIC
+    "${_decklink_dispatch}"
+    ${CMAKE_SOURCE_DIR}/src/output/decklink/decklink_catalog.cpp
+    ${CMAKE_SOURCE_DIR}/src/output/decklink/monitor_mode.cpp)
+  target_include_directories(eyeq_decklink_backend
+    PUBLIC ${CMAKE_SOURCE_DIR}/src
+    PRIVATE "${_decklink_include}")
+  target_link_libraries(eyeq_decklink_backend
+    PUBLIC eyeq_output_contract
+    PRIVATE "-framework CoreFoundation")
+  # The vendored SDK predates some modern warnings; keep its diagnostics quiet
+  # without relaxing the contract library.
+  target_compile_options(eyeq_decklink_backend PRIVATE -Wno-deprecated-declarations)
+
+  add_executable(decklink-catalog tools/decklink-catalog/main.cpp)
+  target_link_libraries(decklink-catalog PRIVATE eyeq_decklink_backend)
+endif()
 
 # Collect source files
 file(GLOB_RECURSE C_SOURCES "${CMAKE_SOURCE_DIR}/src/*.c")
@@ -149,4 +184,12 @@ if(EYEQ_BUILD_DECKLINK_TESTS)
   endif()
   enable_testing()
   add_subdirectory(tests/decklink)
+
+  # A-owned backend tests additionally need the SDK build.
+  if(EYEQ_ENABLE_DECKLINK)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/decklink/backend/CMakeLists.txt")
+      message(FATAL_ERROR "EYEQ_ENABLE_DECKLINK and EYEQ_BUILD_DECKLINK_TESTS are ON but tests/decklink/backend/CMakeLists.txt is missing")
+    endif()
+    add_subdirectory(tests/decklink/backend)
+  endif()
 endif()

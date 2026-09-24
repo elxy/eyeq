@@ -264,24 +264,38 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ## DeckLink 输出（开发中）
 
-DeckLink SDI/HDMI 输出后端仍在开发中，**当前不可用**。本阶段只提供 CPU 侧公共契约（打包布局、请求校验、sink 接口）及其契约测试；SDK 后端、GPU 打包器和设备输出均未实现，也没有任何 DeckLink 命令行选项。
+DeckLink SDI/HDMI 输出后端仍在开发中，**尚不能播放视频**。已实现的部分是只读的：枚举设备、查询支持的输出模式。视频输出、GPU 打包器、帧调度与 HDR 信令均未实现，`eyeq` 本身也没有任何 DeckLink 播放选项。
 
 可选 CMake 开关（默认全部为 `OFF`，不影响普通播放器构建）：
 
 | 开关 | 默认 | 用途 |
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试，无需 SDK、GPU、设备 |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | 预留给 SDK 后端；本阶段设为 `ON` 会立即报错终止 |
-| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 预留给 GPU 打包测试；本阶段设为 `ON` 会立即报错终止 |
-| `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），从 SDK 后端阶段开始使用 |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建只读 SDK 后端与 `decklink-catalog` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。视频输出仍未实现 |
+| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 预留给 GPU 打包测试；打包器仍只有声明，设为 `ON` 会立即报错终止 |
+| `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），`EYEQ_ENABLE_DECKLINK` 必需；不会下载或修改 |
 
-运行契约测试：
+运行 CPU/fake 契约测试（无需 SDK）：
 
 ```sh
 cmake -S . -B build -DEYEQ_BUILD_DECKLINK_TESTS=ON
 cmake --build build --target decklink_contract_test
 ctest --test-dir build --output-on-failure
 ```
+
+构建只读设备/模式查询后端与工具：
+
+```sh
+cmake -S . -B build-sdk -DEYEQ_ENABLE_DECKLINK=ON \
+  -DDECKLINK_SDK_ROOT="/path/to/Blackmagic DeckLink SDK 16.0"
+cmake --build build-sdk --target decklink-catalog
+# 列出设备：
+./build-sdk/bin/decklink-catalog
+# 只读查询某设备的输出模式：
+./build-sdk/bin/decklink-catalog --device 0 --connection sdi --pixel-format v210
+```
+
+该工具只做查询，不会启用输出、调度帧或修改设备配置。
 
 ## 许可证
 
