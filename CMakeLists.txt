@@ -14,6 +14,12 @@ if(NOT GIT_VERSION)
 endif()
 message(STATUS "EyeQ version: ${GIT_VERSION}")
 
+# Optional DeckLink output backend (not part of the default player build).
+option(EYEQ_ENABLE_DECKLINK "Enable the DeckLink SDK output backend (not implemented in phase 0.5)" OFF)
+option(EYEQ_BUILD_DECKLINK_TESTS "Build the DeckLink CPU/fake contract tests (no SDK, no GPU)" OFF)
+option(EYEQ_BUILD_DECKLINK_GPU_TESTS "Build the DeckLink GPU packing tests (not implemented in phase 0.5)" OFF)
+set(DECKLINK_SDK_ROOT "" CACHE PATH "Path to the Blackmagic DeckLink SDK root (read-only; used from phase 1-A)")
+
 # macOS requires Objective-C++ support (ICC profile auto-detection)
 if(APPLE)
   enable_language(OBJCXX)
@@ -56,9 +62,32 @@ find_package(Libplacebo REQUIRED)
 find_package(SDL3_ttf REQUIRED)
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avfilter avformat avutil swscale)
 
+# Phase 0.5 guard: do not pretend an unavailable backend is built.
+if(EYEQ_ENABLE_DECKLINK)
+  message(FATAL_ERROR
+    "EYEQ_ENABLE_DECKLINK=ON is not available in phase 0.5: the SDK output backend is not implemented yet. "
+    "Only the CPU contract library and CPU/fake tests exist. Leave EYEQ_ENABLE_DECKLINK=OFF.")
+endif()
+if(EYEQ_BUILD_DECKLINK_GPU_TESTS)
+  message(FATAL_ERROR
+    "EYEQ_BUILD_DECKLINK_GPU_TESTS=ON is not available in phase 0.5: the GPU packer is declaration-only. "
+    "Leave EYEQ_BUILD_DECKLINK_GPU_TESTS=OFF.")
+endif()
+
+# CPU-only output contract library: public headers plus pure helpers. It has no SDK
+# dependency and does not use the GPU; libplacebo is linked PUBLIC only because
+# frame_packer.hpp declares pl_tex/pl_gpu parameters.
+add_library(eyeq_output_contract STATIC
+  ${CMAKE_SOURCE_DIR}/src/output/pixel_format.cpp
+  ${CMAKE_SOURCE_DIR}/src/output/output_profile.cpp)
+target_include_directories(eyeq_output_contract PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(eyeq_output_contract PUBLIC Libplacebo::Libplacebo)
+
 # Collect source files
 file(GLOB_RECURSE C_SOURCES "${CMAKE_SOURCE_DIR}/src/*.c")
 file(GLOB_RECURSE CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/*.cpp")
+# src/output/ is built by its own library targets; never compile it into the player.
+list(FILTER CXX_SOURCES EXCLUDE REGEX "/src/output/")
 
 # Platform-specific source files
 if(APPLE)
@@ -112,3 +141,12 @@ install(
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+# DeckLink CPU/fake contract tests. No SDK, no GPU, no device.
+if(EYEQ_BUILD_DECKLINK_TESTS)
+  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/decklink/CMakeLists.txt")
+    message(FATAL_ERROR "EYEQ_BUILD_DECKLINK_TESTS=ON but tests/decklink/CMakeLists.txt is missing")
+  endif()
+  enable_testing()
+  add_subdirectory(tests/decklink)
+endif()

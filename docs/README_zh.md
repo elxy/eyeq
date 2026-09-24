@@ -262,6 +262,27 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
    HLG 用 `color_trc=arib-std-b67`。在 HDR 显示器上 PQ 直通、无需色调映射，`--no-colorspace-hint` 与 `--target-display-nits` 可不加；`--no-colorspace-hint` 仅在非 HDR 显示器上需要，用于开启色调映射。
 
+## DeckLink 输出（开发中）
+
+DeckLink SDI/HDMI 输出后端仍在开发中，**当前不可用**。本阶段只提供 CPU 侧公共契约（打包布局、请求校验、sink 接口）及其契约测试；SDK 后端、GPU 打包器和设备输出均未实现，也没有任何 DeckLink 命令行选项。
+
+可选 CMake 开关（默认全部为 `OFF`，不影响普通播放器构建）：
+
+| 开关 | 默认 | 用途 |
+|---|---|---|
+| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试，无需 SDK、GPU、设备 |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | 预留给 SDK 后端；本阶段设为 `ON` 会立即报错终止 |
+| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 预留给 GPU 打包测试；本阶段设为 `ON` 会立即报错终止 |
+| `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），从 SDK 后端阶段开始使用 |
+
+运行契约测试：
+
+```sh
+cmake -S . -B build -DEYEQ_BUILD_DECKLINK_TESTS=ON
+cmake --build build --target decklink_contract_test
+ctest --test-dir build --output-on-failure
+```
+
 ## 许可证
 
 本软件基于 GNU 宽通用公共许可证 (LGPL) 2.1 或更高版本发布。详见 [LICENSE.md](../LICENSE.md)。

@@ -264,6 +264,27 @@ After launching, the following keyboard and mouse controls are available:
 
    Use `color_trc=arib-std-b67` for HLG. On an HDR display the PQ output passes through without tone mapping, so `--no-colorspace-hint` and `--target-display-nits` are unnecessary; `--no-colorspace-hint` is required only on non-HDR displays to enable tone mapping.
 
+## DeckLink Output (Work in Progress)
+
+The DeckLink SDI/HDMI output backend is under development and is **not functional yet**. This phase provides only the CPU-side public contract (packed layouts, request validation, sink interface) and its contract tests. The SDK backend, the GPU packer, and device output are not implemented, and there are no DeckLink command-line options.
+
+Optional CMake switches (all default to `OFF`; the normal player build is unaffected):
+
+| Option | Default | Purpose |
+|---|---|---|
+| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests. No SDK, no GPU, no device. |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | Reserved for the SDK backend. Setting it `ON` fails fast in this phase. |
+| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Reserved for GPU packing tests. Setting it `ON` fails fast in this phase. |
+| `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); used from the SDK backend phase. |
+
+Running the contract tests:
+
+```sh
+cmake -S . -B build -DEYEQ_BUILD_DECKLINK_TESTS=ON
+cmake --build build --target decklink_contract_test
+ctest --test-dir build --output-on-failure
+```
+
 ## License
 
 This software is licensed under the GNU Lesser General Public License (LGPL) version 2.1 or later. See [LICENSE.md](./LICENSE.md) for details.
