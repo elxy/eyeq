@@ -273,6 +273,7 @@ DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试；配合 `EYEQ_ENABLE_DECKLINK` 还会构建确定性的 SDK 故障注入与输出后端测试。无需 GPU、设备 |
 | `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog`、`decklink-test-signal` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。播放器尚未接入，`eyeq` 仍不能输出视频 |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 构建 GPU 打包测试：CPU oracle、真实 GPU 对比/读回测试、生命周期故障注入测试。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK，也不需要 DeckLink 设备 |
+| `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | 构建离屏显示/渲染测试：在无窗口的 headless Vulkan 设备上运行真实 `RenderContext`/`FrameRenderer`，覆盖 Fill/Slide/Grid、双实例交错、HDR override、ICC 隔离与 OSD 开关。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK、窗口或 DeckLink 设备 |
 | `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），`EYEQ_ENABLE_DECKLINK` 必需；不会下载或修改 |
 
 运行 CPU/fake 契约测试（无需 SDK）：
@@ -333,6 +334,47 @@ cmake -S . -B build-gpu -DEYEQ_BUILD_DECKLINK_GPU_TESTS=ON
 cmake --build build-gpu
 ctest --test-dir build-gpu --output-on-failure
 ```
+
+### 离屏显示/渲染测试
+
+`RenderContext` 拥有共享的 GPU 生命周期（log、Vulkan instance/device、FFmpeg Vulkan
+hw_device 与 queue-lock 回调），`FrameRenderer` 拥有每个目标独立的渲染资源，因此可以在
+同一个 context 上渲染多个目标。离屏测试不需要窗口，也不需要 DeckLink SDK：
+
+```sh
+cmake -S . -B build-display -DEYEQ_BUILD_DISPLAY_GPU_TESTS=ON
+cmake --build build-display --target display_renderer_gpu_test
+ctest --test-dir build-display -R display_renderer_gpu --output-on-failure
+```
+
+测试把 Fill/Slide/Grid（含参考/差异放大）渲染到不同的 full-range RGB 浮点目标，并对像素与
+几何做可失败断言；在同一 GPU 上把两个不同尺寸、不同色彩目标的 renderer 交错调用，检查一个
+renderer 的输出不受另一个影响、且另一个被销毁后仍可继续；还覆盖失败帧更新（有效→无效→有效）、
+目标局部 HDR nits override、ICC 隔离与 OSD 开关。它不验证窗口 present 路径、桌面视觉输出或任何
+硬件映射，这些仍属于人工/环境受限项。
+
+### 静帧监看组合层
+
+`src/output/monitor_output.hpp` 把真实的 `FrameRenderer`、`FramePacker` 与 `FrameSink`
+接缝组合成一个可复用的静帧专用组合层：独立拥有监看 renderer、固定尺寸的离屏 full-range RGB
+目标与 packer，把一份帧集合渲染进该目标、打包后交给 `FrameSink::DisplayStill`。同一时刻只允许
+一个在途请求，由调用方在同一线程用 `Pump()` 推进；在途时新请求返回 Busy，不会被读取或映射。
+`Close()` 在同一个总 deadline 内排空 packer 并关闭借用的 sink。`eyeq` 播放器**尚未接入**：没有
+monitor CLI、没有 worker 线程、没有连续调度，也不会输出到 DeckLink 设备。
+
+组合测试在无窗口的 headless Vulkan 设备上运行真实组合层，配合可真正返回 Still
+Busy/DeviceError/Closed 的 scripted fake sink：
+
+```sh
+cmake -S . -B build-monitor -DEYEQ_BUILD_DISPLAY_GPU_TESTS=ON
+cmake --build build-monitor --target monitor_output_gpu_test monitor_output_fault_test
+ctest --test-dir build-monitor -R monitor_output --output-on-failure
+```
+
+覆盖 SDR/PQ 与 r210/v210（含非紧凑 `row_bytes` 补齐）、已知黑场/色块/PQ 100nit 锚点、CPU
+打包 oracle、Fill/Slide/Grid/差异放大、Busy/取消/关闭与终态 sink 故障，以及一次注入真实读回失败的
+故障测试。`monitor_output_fault_test` 链接的是带故障注入 hook 的真实 `frame_packer.cpp`，确保注入
+确实命中。这些测试不验证窗口、真实硬件帧或 DeckLink 设备。
 
 纯 CPU 的已知答案与比较器突变测试属于 CPU 测试集，不需要 GPU：
 

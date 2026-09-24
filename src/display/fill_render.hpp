@@ -50,8 +50,12 @@ protected:
 
   void RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *swap_frame,
                    const struct pl_frame *src, const DisplayState &state, int video_id);
+  // @p params overrides the instance render params for this call (used by Grid
+  // to vary the border without mutating shared state); null means use the
+  // instance params.
   void RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *swap_frame,
-                   const struct pl_frame *src, const pl_rect2df &dst_crop, int video_id);
+                   const struct pl_frame *src, const struct pl_rect2df &dst_crop, int video_id,
+                   const struct pl_render_params *params = nullptr);
 
   void AmplifyFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *dis,
                     const struct pl_frame *ref, const DisplayState &state);

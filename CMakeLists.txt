@@ -18,6 +18,7 @@ message(STATUS "EyeQ version: ${GIT_VERSION}")
 option(EYEQ_ENABLE_DECKLINK "Enable the DeckLink SDK backend (read-only catalog plus scheduled output) and its tools" OFF)
 option(EYEQ_BUILD_DECKLINK_TESTS "Build the DeckLink CPU/fake contract and backend tests (no GPU, no device)" OFF)
 option(EYEQ_BUILD_DECKLINK_GPU_TESTS "Build the GPU packing tests (needs libplacebo and a real Vulkan device at runtime; no SDK)" OFF)
+option(EYEQ_BUILD_DISPLAY_GPU_TESTS "Build the offscreen display/rendering tests (needs libplacebo and a real Vulkan device at runtime; no SDK, no window)" OFF)
 set(DECKLINK_SDK_ROOT "" CACHE PATH "Path to the Blackmagic DeckLink SDK root (read-only; used from phase 1-A)")
 
 # macOS requires Objective-C++ support (ICC profile auto-detection)
@@ -80,6 +81,22 @@ add_library(eyeq_frame_packer STATIC EXCLUDE_FROM_ALL
   ${CMAKE_SOURCE_DIR}/src/output/frame_packer.cpp)
 target_include_directories(eyeq_frame_packer PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(eyeq_frame_packer PUBLIC eyeq_output_contract Libplacebo::Libplacebo)
+
+# Still-only monitor composition layer: FrameRenderer -> FramePacker ->
+# FrameSink::DisplayStill. EXCLUDE_FROM_ALL keeps it out of the default player
+# build. It intentionally does NOT link eyeq_frame_packer so a test can substitute
+# the fault-injection build of frame_packer.cpp; the final linkable must provide the
+# FramePacker symbols.
+add_library(eyeq_monitor_output STATIC EXCLUDE_FROM_ALL
+  ${CMAKE_SOURCE_DIR}/src/output/monitor_output.cpp)
+target_include_directories(eyeq_monitor_output PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(eyeq_monitor_output PUBLIC
+  eyeq_output_contract
+  Libplacebo::Libplacebo
+  SDL3::SDL3
+  SDL3_ttf::SDL3_ttf
+  FFmpeg::avutil
+  spdlog::spdlog)
 
 # Optional DeckLink SDK backend. Phase 1A-1 builds only the read-only catalog and
 # mode query; it never enables video output. The SDK is an external, read-only tree
@@ -217,4 +234,20 @@ if(EYEQ_BUILD_DECKLINK_GPU_TESTS)
   endif()
   enable_testing()
   add_subdirectory(tests/decklink/packer)
+endif()
+
+# Offscreen display/rendering tests. They need libplacebo and a real Vulkan
+# device at runtime but never the DeckLink SDK or a window, so they can build
+# and run with the SDK disabled and DECKLINK_SDK_ROOT unset. A missing/unsuitable
+# GPU is reported as a test failure, not silently skipped.
+if(EYEQ_BUILD_DISPLAY_GPU_TESTS)
+  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/display/CMakeLists.txt")
+    message(FATAL_ERROR "EYEQ_BUILD_DISPLAY_GPU_TESTS=ON but tests/display/CMakeLists.txt is missing")
+  endif()
+  enable_testing()
+  add_subdirectory(tests/display)
+  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/output/CMakeLists.txt")
+    message(FATAL_ERROR "EYEQ_BUILD_DISPLAY_GPU_TESTS=ON but tests/output/CMakeLists.txt is missing")
+  endif()
+  add_subdirectory(tests/output)
 endif()

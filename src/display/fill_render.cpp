@@ -101,7 +101,8 @@ void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], co
 }
 
 void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *swap_frame,
-                             const struct pl_frame *src, const pl_rect2df &dst_crop, int video_id) {
+                             const struct pl_frame *src, const pl_rect2df &dst_crop, int video_id,
+                             const struct pl_render_params *params) {
   // Render the original frame through the normal pipeline
   struct pl_tex_params tex_params = {
       .w = swap_frame->planes[0].texture->params.w,
@@ -139,7 +140,7 @@ void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], co
       dst.icc = icc;
   }
 
-  if (!pl_render_image(renderer_, src, &dst, render_params_)) {
+  if (!pl_render_image(renderer_, src, &dst, params ? params : render_params_)) {
     throw std::runtime_error("pl_render_image failed.");
   }
 }
@@ -198,10 +199,13 @@ void FillRender::AmplifyFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], c
               },
       },
   };
+  // Pass a real float: pl_var_float reads its data as float, so pointing it at
+  // a std::optional<float> would depend on that type's internal layout.
+  float amplify = state.amplify.value();
   struct pl_shader_var vars[] = {
       {
           .var = pl_var_float("amplify"),
-          .data = &state.amplify,
+          .data = &amplify,
       },
   };
   struct pl_custom_shader params = {

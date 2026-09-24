@@ -1,29 +1,29 @@
 #pragma once
 
 #include <filesystem>
-#include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
 
 extern "C" {
+#include <libavutil/frame.h>
 #include <libavutil/hwcontext_vulkan.h>
 }
 #include <SDL3/SDL_vulkan.h>
 #include <libplacebo/vulkan.h>
 #include <libplacebo/dispatch.h>
 #include <libplacebo/renderer.h>
+#include <libplacebo/swapchain.h>
 
 #include <libplacebo/colorspace.h>
 #include <libplacebo/shaders/icc.h>
 
+#include "frame_renderer.hpp"
 #include "log.hpp"
 #include "render.hpp"
-#include "fill_render.hpp"
-#include "osd.hpp"
-#include "video_frame.hpp"
+#include "render_context.hpp"
 
 namespace EYEQ {
 
@@ -33,6 +33,12 @@ class Window {
   /*
    * Renders frames according to DisplayMode, also supports:
    *   video frame rendering, panning, zooming, reference video switching, and text display
+   *
+   * The window owns the SDL window, its Vulkan surface and the swapchain and
+   * drives presentation; the shared GPU context (RenderContext) and the
+   * target-related rendering resources (FrameRenderer) are delegated. It also
+   * keeps the desktop-only concerns: swapchain colorspace hints, ICC
+   * auto-discovery from the system display and the Ctrl+E screenshot path.
    */
 public:
   Window(const std::string &title, int video_width, int video_height, LoggingLevel log_level,
@@ -82,8 +88,8 @@ public:
   void Raise() { SDL_RaiseWindow(window_); }
   bool HasInputFocus() const { return SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS; }
 
-  void SetMainSource(int id) { main_id_ = id; }
-  void SetSdrWhiteOnHdr(float nits) { sdr_white_on_hdr_ = nits; }
+  void SetMainSource(int id) { frame_renderer_->SetMainSource(id); }
+  void SetSdrWhiteOnHdr(float nits) { frame_renderer_->SetSdrWhiteOnHdr(nits); }
 
   /**
    * @brief Request saving the next rendered frame (final display image) to the given path
@@ -101,8 +107,7 @@ public:
    *        (opt-in, i.e. only when the user explicitly passes --target-display-nits)
    */
   void SetTargetDisplayNits(double nits, bool override_enabled) {
-    target_display_nits_ = nits;
-    target_display_override_enabled_ = override_enabled;
+    frame_renderer_->SetTargetDisplayNits(nits, override_enabled);
   }
 
   /**
@@ -114,21 +119,6 @@ public:
   void LoadICCProfile(const std::string &path, std::optional<int> video_id = std::nullopt);
 
   /**
-   * @brief Dynamically recalibrate ICC parameters based on target color space
-   *
-   * Similar to libplacebo plplay's approach: per frame, compute max_luma from
-   * the swapchain's final target color space, then call pl_icc_update to recalibrate the LUT.
-   * Processes both global and per-video ICC objects.
-   */
-  void RecalibrateICCParams(const struct pl_color_space *target_color);
-
-  /**
-   * @brief Get the ICC object for a specific video
-   *
-   * Returns per-video ICC first, then global ICC; returns nullptr if none
-   */
-  pl_icc_object GetICCObjectForVideo(int video_id) const;
-  /**
    * @brief Feed frames to the renderer for rendering
    *
    * @param frames Video frames
@@ -136,8 +126,6 @@ public:
    */
   std::vector<int> FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames);
   void Render(const DisplayState &state);
-
-  OsdManager &GetOsdManager() { return *osd_manager_; }
 
   /**
    * @brief Calculate scaled dimensions while maintaining image aspect ratio within the display area
@@ -151,80 +139,48 @@ public:
   static void FitResolutionWithAspectRatio(int &resize_width, int &resize_height, float pic_ratio, int display_width,
                                            int display_height);
 
-  void PlaceboLockQueue(uint32_t queue_family, uint32_t index) { vulkan_->lock_queue(vulkan_, queue_family, index); }
-  void PlaceboUnlockQueue(uint32_t queue_family, uint32_t index) {
-    vulkan_->unlock_queue(vulkan_, queue_family, index);
-  }
-
 protected:
-  DisplayMode mode_;
   bool colorspace_hint_;
   bool high_dpi_;
   bool full_screen_;
+  LoggingLevel log_level_;
 
-  SDL_Window *window_;
-  int ori_width_;
-  int ori_height_;
-  SDL_DisplayID ori_display_id_;
+  SDL_Window *window_ = nullptr;
+  int ori_width_ = 0;
+  int ori_height_ = 0;
+  SDL_DisplayID ori_display_id_ = 0;
 
-  AVBufferRef *hw_device_ref_;
+  VkSurfaceKHR vk_surface_ = VK_NULL_HANDLE;
+  pl_swapchain swapchain_ = nullptr;
 
-  PFN_vkGetInstanceProcAddr get_proc_addr_;
-  VkInstance vk_inst_;
-  VkSurfaceKHR vk_surface_;
+  // Shared GPU/context lifetime. Declared before frame_renderer_ so that the
+  // renderer (and its frame mappings) is destroyed first.
+  std::unique_ptr<RenderContext> context_;
+  std::unique_ptr<FrameRenderer> frame_renderer_;
 
-  pl_log log_;
-  pl_vk_inst pl_inst_;
-  pl_vulkan vulkan_;
-  pl_swapchain swapchain_;
-
-  struct pl_render_params render_params_;
-  std::unique_ptr<FillRender> display_render_;
-  std::unique_ptr<OsdManager> osd_manager_;
-
-  // Rendering result save (rendered frame -> DPX)
+  // Rendering result save (rendered frame -> DPX). Desktop-only debug path; the
+  // actual frame is rendered by frame_renderer_ into this intermediate target.
   std::optional<std::filesystem::path> pending_render_save_;
-  pl_tex render_save_tex_ = nullptr;  // host-readable RGBA32F intermediate target
+  pl_tex render_save_tex_ = nullptr;     // host-readable RGBA32F intermediate target
   pl_dispatch render_save_dp_ = nullptr; // pass-through shader to blit intermediate -> swapchain
 
-  int main_id_;
-  float sdr_white_on_hdr_ = 0; // SDR white level override (nits) for HDR rendering
-
-  double target_display_nits_ = 1000.0;
-  bool target_display_override_enabled_ = false; // opt-in max_luma override (explicit --target-display-nits)
-  bool target_display_override_logged_ = false;  // one-time log for max_luma override
-
-  std::map<int, VideoFrame> av_frames_;
-  std::map<int, struct pl_frame *> pl_frames_;
+  // Serializes FeedFrames (decode thread) against Render (main thread) on the
+  // frame_renderer_, including the colorspace-hint callback invoked from
+  // FeedFrames. Configuration methods (InitRender, setter/LoadICCProfile) are
+  // used during startup before frame feeding begins and are not covered by it.
   std::mutex render_mutex_;
-
-  // ICC profile data storage
-  std::vector<uint8_t> global_icc_data_;
-  pl_icc_object global_icc_object_ = nullptr;
-  std::map<int, std::vector<uint8_t>> per_video_icc_data_;
-  std::map<int, pl_icc_object> per_video_icc_objects_;
-  float last_icc_target_luma_ = -1.0f; // Last calibrated target_luma, used for deduplication
 
   void InitWindow(const std::string &title, int video_width, int video_height, SDL_DisplayID display_id);
   void MoveWindowToCenter(SDL_DisplayID display_id);
   void CreateVulkanContext();
+  void DestroyGraphics();
 
   /**
    * @brief Inform the swapchain using the frame's color space information
    *
    * @param frame Frame
    */
-  void ColorspaceHint(struct pl_color_space *colorspace);
-
-private:
-  static void HWCallbackLockQueue(struct AVHWDeviceContext *dev_ctx, uint32_t queue_family, uint32_t index) {
-    Window *self = static_cast<Window *>(dev_ctx->user_opaque);
-    self->PlaceboLockQueue(queue_family, index);
-  }
-  static void HWCallbackUnlockQueue(struct AVHWDeviceContext *dev_ctx, uint32_t queue_family, uint32_t index) {
-    Window *self = static_cast<Window *>(dev_ctx->user_opaque);
-    self->PlaceboUnlockQueue(queue_family, index);
-  }
+  void ColorspaceHint(const struct pl_color_space *colorspace);
 };
 
 }; // namespace EYEQ

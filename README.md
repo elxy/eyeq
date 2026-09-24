@@ -275,6 +275,7 @@ Optional CMake switches (all default to `OFF`; the normal player build is unaffe
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests and, with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection and output-backend tests. No GPU, no device. |
 | `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` and `decklink-test-signal` tools. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. The player is not wired to it yet, so `eyeq` still does not output video. |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Build the GPU packing tests: a CPU oracle, a real-GPU comparison/readback test and a lifecycle fault-injection test. Needs libplacebo and a working Vulkan device at runtime; no SDK and no DeckLink device. |
+| `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | Build the offscreen display/rendering tests: the real `RenderContext`/`FrameRenderer` on a headless Vulkan device, covering Fill/Slide/Grid, two-instance interleaving, HDR override, ICC isolation and OSD switches. Needs libplacebo and a working Vulkan device at runtime; no SDK, no window and no DeckLink device. |
 | `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); required by `EYEQ_ENABLE_DECKLINK`. Nothing is downloaded or modified. |
 
 Running the CPU/fake contract tests (no SDK required):
@@ -358,6 +359,57 @@ cmake -S . -B build-gpu -DEYEQ_BUILD_DECKLINK_GPU_TESTS=ON
 cmake --build build-gpu
 ctest --test-dir build-gpu --output-on-failure
 ```
+
+### Offscreen display/rendering tests
+
+`RenderContext` owns the shared GPU lifetime (log, Vulkan instance/device, FFmpeg
+Vulkan hw_device and the queue-lock callbacks) while `FrameRenderer` owns the
+per-target rendering resources, so several targets can be rendered from one context.
+The offscreen tests exercise the real classes without a window and without the
+DeckLink SDK:
+
+```sh
+cmake -S . -B build-display -DEYEQ_BUILD_DISPLAY_GPU_TESTS=ON
+cmake --build build-display --target display_renderer_gpu_test
+ctest --test-dir build-display -R display_renderer_gpu --output-on-failure
+```
+
+They render Fill/Slide/Grid (including reference/difference amplification) into
+distinct full-range RGB float targets, assert pixel and geometry results, run two
+renderers with different sizes and color targets on the same GPU interleaved, check
+that one renderer's output is unchanged by the other and survives its destruction,
+and cover a failed frame update (valid-invalid-valid), the target-local HDR nits
+override, ICC isolation and the OSD enable/disable switch. They do not verify the
+window present path, desktop visual output or any hardware mapping; those remain
+manual/environment-limited.
+
+### Still monitor composition layer
+
+`src/output/monitor_output.hpp` combines the real `FrameRenderer`, `FramePacker` and
+`FrameSink` seams into one reusable still-only composition layer. It owns a dedicated
+monitor renderer, a fixed offscreen full-range RGB target and the packer, draws a
+frame set into that target, packs it and hands the bytes to
+`FrameSink::DisplayStill`. At most one request is in flight and the caller advances it
+on the same thread with `Pump()`; a new request while one is in flight is reported as
+Busy and is not read or mapped. `Close()` drains the packer and closes the borrowed
+sink within one total deadline. The `eyeq` player is **not wired to it**: there is no
+monitor CLI, no worker thread, no scheduled playback and no DeckLink device output.
+
+The composition tests exercise the real layer against a headless Vulkan device and a
+scripted fake sink (which can really return Still Busy/DeviceError/Closed):
+
+```sh
+cmake -S . -B build-monitor -DEYEQ_BUILD_DISPLAY_GPU_TESTS=ON
+cmake --build build-monitor --target monitor_output_gpu_test monitor_output_fault_test
+ctest --test-dir build-monitor -R monitor_output --output-on-failure
+```
+
+They cover SDR/PQ with r210/v210 (including non-tight `row_bytes` padding), known
+black/colour/PQ-100-nit anchors, the CPU packing oracle, Fill/Slide/Grid/difference
+amplification, Busy/priority/cancel/close and terminal sink failures, and a
+fault-injected real readback failure. `monitor_output_fault_test` links a
+fault-injection build of the real `frame_packer.cpp`, so the injection cannot silently
+miss. These tests do not verify a window, real hardware frames or a DeckLink device.
 
 The CPU-only known-answer and comparator-mutation tests belong to the CPU test suite
 and need no GPU:

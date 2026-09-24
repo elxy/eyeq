@@ -55,6 +55,27 @@ static const char *font_search_paths[] = {
 
 OsdManager::OsdManager(pl_gpu gpu, float pixel_density) : gpu_(gpu), pixel_density_(pixel_density) { InitFont(); }
 
+bool OsdManager::FontAvailable() {
+  if (!TTF_Init()) {
+    // Initialization failed, so nothing was acquired; do not touch any
+    // pre-existing caller initialization.
+    return false;
+  }
+  bool found = false;
+  for (int i = 0; font_search_paths[i] != nullptr; i++) {
+    TTF_Font *font = TTF_OpenFont(font_search_paths[i], 24.0f);
+    if (font) {
+      TTF_CloseFont(font);
+      found = true;
+      break;
+    }
+  }
+  // TTF_Init is reference-counted, so return exactly the reference acquired
+  // above and leave any caller-owned reference intact.
+  TTF_Quit();
+  return found;
+}
+
 OsdManager::~OsdManager() {
   if (overlay_tex_) {
     pl_tex_destroy(gpu_, &overlay_tex_);

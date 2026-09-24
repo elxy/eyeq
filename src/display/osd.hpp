@@ -21,6 +21,14 @@ public:
   ~OsdManager();
 
   /**
+   * @brief Whether a usable system font can be loaded
+   *
+   * Explicit environment precondition for callers that want to decide whether
+   * to create an OSD at all, instead of catching construction failures.
+   */
+  static bool FontAvailable();
+
+  /**
    * @brief Compose complete OSD overlay (same size as window, transparent background)
    *        Includes text info and progress bar
    *

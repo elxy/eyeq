@@ -125,26 +125,29 @@ void GridRender::RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], con
         out_crop.y0 = out_crop.y1 - line_width;
       }
 
-      pl_rect2df tmp_crop = frame->crop;
-      frame->crop = in_crop;
+      // Use a local frame view and local render params: the shared source
+      // pl_frame and the shared render params must not be modified, even
+      // transiently, and the ICC pointer must not leak from one cell to the next.
+      struct pl_frame src_frame = *frame;
+      src_frame.crop = in_crop;
+      struct pl_render_params params = *render_params_;
       if (0 == index) {
-        render_params_->border = PL_CLEAR_COLOR;
-        RenderFrame(dst, tex, swap_frame, frame, out_crop, id);
+        params.border = PL_CLEAR_COLOR;
+        RenderFrame(dst, tex, swap_frame, &src_frame, out_crop, id, &params);
       } else {
-        render_params_->border = PL_CLEAR_SKIP;
+        params.border = PL_CLEAR_SKIP;
         dst.crop = out_crop;
+        dst.icc = nullptr;
         // Apply ICC profile to target frame
         if (icc_query_) {
           pl_icc_object icc = icc_query_(id);
           if (icc)
             dst.icc = icc;
         }
-        if (!pl_render_image(renderer_, frame, &dst, render_params_)) {
+        if (!pl_render_image(renderer_, &src_frame, &dst, &params)) {
           throw std::runtime_error("pl_render_image failed.");
         }
       }
-      render_params_->border = PL_CLEAR_COLOR;
-      frame->crop = tmp_crop;
     }
   }
 }
