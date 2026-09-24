@@ -68,8 +68,11 @@ public:
   virtual ScheduleOutcome TrySchedule(const PackedFrameView &view, const SubmissionInfo &info, int64_t display_time,
                                       int64_t display_duration) = 0;
 
-  // Still frame. Same Busy semantics. Displayed means the bytes were copied into a
-  // device still frame; the caller may release its staging frame.
+  // Still frame. Only valid while scheduled playback is NOT running (the SDK
+  // forbids DisplayVideoFrameSync during scheduled playback). Same Busy semantics.
+  // Displayed means the bytes were copied into a dedicated device still frame and
+  // the caller may release its staging frame; it does not consume video frame pool
+  // budget and produces no scheduled completion event.
   virtual StillOutcome DisplayStill(const PackedFrameView &view, const SubmissionInfo &info) = 0;
 
   // Non-blocking; drains one event. Completion/flushed events are the only point at

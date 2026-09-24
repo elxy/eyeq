@@ -18,9 +18,14 @@ int MinimalRowBytes(PixelFormat fmt, int width) {
   case PixelFormat::V210:
     bytes = ((w + 5) / 6) * 16; // six pixels per four 32-bit words
     break;
+  default:
+    return 0; // unknown PixelFormat: not valid
   }
   constexpr int64_t kMax = std::numeric_limits<int>::max();
-  return static_cast<int>(bytes > kMax ? kMax : bytes);
+  if (bytes <= 0 || bytes > kMax) {
+    return 0; // out of int range: report invalid instead of saturating
+  }
+  return static_cast<int>(bytes);
 }
 
 bool ValidateLayout(const BufferLayout &layout, std::size_t sdk_capacity, std::string *error) {
@@ -34,7 +39,14 @@ bool ValidateLayout(const BufferLayout &layout, std::size_t sdk_capacity, std::s
   if (layout.width <= 0 || layout.height <= 0) {
     return fail("layout dimensions must be positive");
   }
-  if (layout.row_bytes < MinimalRowBytes(layout.pixel_format, layout.width)) {
+  // A valid format and width always yield a positive minimum. MinimalRowBytes
+  // returns 0 for an unknown PixelFormat or an out-of-range stride, so this also
+  // rejects those cases before any byte arithmetic.
+  const int minimum = MinimalRowBytes(layout.pixel_format, layout.width);
+  if (minimum <= 0) {
+    return fail("unknown pixel format or row stride out of range");
+  }
+  if (layout.row_bytes < minimum) {
     return fail("row_bytes is below the format minimum");
   }
   if (layout.row_bytes % 4 != 0) {

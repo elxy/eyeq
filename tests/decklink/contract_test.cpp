@@ -82,6 +82,14 @@ void TestMinimalRowBytes() {
   CHECK(MinimalRowBytes(PixelFormat::V210, 7) == 32);
   CHECK(MinimalRowBytes(PixelFormat::V210, 0) == 0);
   CHECK(MinimalRowBytes(PixelFormat::R210, -1) == 0);
+  // Unknown pixel format is invalid (0), never a silently accepted zero stride.
+  CHECK(MinimalRowBytes(static_cast<PixelFormat>(999), 3840) == 0);
+  // Out-of-int-range minima report invalid (0) instead of saturating to INT_MAX.
+  CHECK(MinimalRowBytes(PixelFormat::R210, std::numeric_limits<int>::max()) == 0);
+  CHECK(MinimalRowBytes(PixelFormat::V210, std::numeric_limits<int>::max()) == 0);
+  // A large but representable width still returns a positive, word-aligned minimum.
+  const int large = MinimalRowBytes(PixelFormat::R210, 100000000);
+  CHECK(large > 0 && large % 4 == 0);
 }
 
 void TestValidateLayout() {
@@ -120,6 +128,17 @@ void TestValidateLayout() {
   BufferLayout zero_height = v210;
   zero_height.height = 0;
   CHECK(!ValidateLayout(zero_height, v210.image_bytes, &error));
+
+  // Unknown pixel format with zero stride must be rejected even with zero capacity.
+  BufferLayout unknown{3840, 2160, static_cast<PixelFormat>(999), 0, 0};
+  CHECK(!ValidateLayout(unknown, 0, &error));
+  CHECK(error.find("unknown pixel format") != std::string::npos);
+
+  // Zero stride with a known format is below the minimum and rejected.
+  BufferLayout zero_stride = v210;
+  zero_stride.row_bytes = 0;
+  zero_stride.image_bytes = 0;
+  CHECK(!ValidateLayout(zero_stride, 0, &error));
 }
 
 void TestCheckedMultiplyOverflow() {
@@ -127,10 +146,14 @@ void TestCheckedMultiplyOverflow() {
   // With int row_bytes and int height, row_bytes * height cannot exceed 64-bit
   // size_t on this platform, so the overflow guard is only reachable where
   // size_t is 32-bit. This branch is reported as such; it is not a silent skip of
-  // a reachable case.
+  // a reachable case. The stride is word-aligned so the overflow check, not the
+  // alignment check, is what rejects it.
   if (sizeof(std::size_t) < 8) {
-    BufferLayout huge{6, 3, PixelFormat::V210, std::numeric_limits<int>::max(), 0};
+    const int aligned_max = (std::numeric_limits<int>::max() / 4) * 4;
+    BufferLayout huge{6, 3, PixelFormat::V210, aligned_max, 0};
+    CHECK(aligned_max % 4 == 0 && aligned_max >= MinimalRowBytes(PixelFormat::V210, 6));
     CHECK(!ValidateLayout(huge, std::numeric_limits<std::size_t>::max(), &error));
+    CHECK(error.find("overflow") != std::string::npos);
   }
   // A large but representable layout must still pass the multiply and capacity check.
   BufferLayout big{6, 2, PixelFormat::V210, 1 << 30, static_cast<std::size_t>(1 << 30) * 2};
@@ -221,6 +244,41 @@ void TestValidateRequest() {
     request.hdr.cll.max_cll = 1000.0;
     request.hdr.cll.max_fall = 400.0;
     CHECK(ValidateRequest(request, &error));
+  }
+  // Unknown enum values are rejected, not treated as a supported mode.
+  {
+    OutputRequest request = BaseRequest();
+    request.pixel_format = static_cast<PixelFormat>(999);
+    CHECK(!ValidateRequest(request, &error));
+  }
+  {
+    OutputRequest request = BaseRequest();
+    request.connection = static_cast<VideoConnection>(999);
+    CHECK(!ValidateRequest(request, &error));
+  }
+  // Non-finite colour fields are rejected.
+  {
+    OutputRequest request = BaseRequest();
+    request.color.target_nits = std::numeric_limits<double>::quiet_NaN();
+    CHECK(!ValidateRequest(request, &error));
+  }
+  {
+    OutputRequest request = BaseRequest();
+    request.color.target_nits = std::numeric_limits<double>::infinity();
+    CHECK(!ValidateRequest(request, &error));
+  }
+  {
+    OutputRequest request = PqRequest();
+    request.hdr.mastering.has_primaries = true;
+    request.hdr.mastering.red_x = std::numeric_limits<double>::quiet_NaN();
+    CHECK(!ValidateRequest(request, &error));
+  }
+  {
+    OutputRequest request = PqRequest();
+    request.hdr.cll.has_values = true;
+    request.hdr.cll.max_cll = std::numeric_limits<double>::infinity();
+    request.hdr.cll.max_fall = 0.0;
+    CHECK(!ValidateRequest(request, &error));
   }
 }
 
@@ -315,7 +373,8 @@ void TestFixtureCloseDrain() {
   CHECK(api.TrySchedule(View(slot2), info2, 1000, 1000) == ScheduleOutcome::Closed);
   CHECK(sink.free_slots() == free_before);
   CHECK(!sink.has_copy(info2.submit_id));
-  CHECK(!slot2.ready ? true : true); // slot2 was never handed to the sink; caller keeps it
+  // The caller still owns its staging slot: it was never handed to the sink.
+  CHECK(slot2.ready && slot2.reap_count == 0);
   CHECK(api.DisplayStill(View(slot2), info2) == StillOutcome::Closed);
   CHECK(!api.StartScheduled(0, &error));
 
@@ -372,6 +431,73 @@ void TestByteOwnershipAndFailure() {
   }
 }
 
+// Still-frame contract: only valid while scheduled playback is stopped.
+void TestDisplayStill() {
+  // Stopped: an independent copy is retained, no pool budget is consumed, and no
+  // scheduled completion event is produced.
+  {
+    test::FakeFrameSink sink(/*pool_slots=*/1);
+    FrameSink &api = sink;
+    StagingSlot slot;
+    slot.bytes = {7, 8, 9};
+    slot.ready = true;
+    const SubmissionInfo info{40, 1, 1, 0, 7};
+
+    CHECK(api.DisplayStill(View(slot), info) == StillOutcome::Displayed);
+    CHECK(sink.still_display_count() == 1);
+    CHECK(sink.free_slots() == sink.pool_slots()); // no video frame budget consumed
+    const std::vector<uint8_t> *copy = sink.copy(info.submit_id);
+    CHECK(copy != nullptr && copy->size() == 3);
+    const uint8_t first = (*copy)[0];
+    slot.bytes[0] = 0xFF; // overwrite staging after the still copy
+    CHECK((*sink.copy(info.submit_id))[0] == first);
+
+    OutputEvent event{};
+    CHECK(!api.PollEvent(&event)); // still frames do not produce completion events
+    CHECK(sink.state() == test::FakeFrameSink::State::Running);
+    CHECK(api.Close(1000) == CloseStatus::Closed);
+  }
+
+  // Scheduled playback running: the still call must be refused.
+  {
+    test::FakeFrameSink sink(/*pool_slots=*/1);
+    FrameSink &api = sink;
+    std::string error;
+    CHECK(api.StartScheduled(0, &error));
+    StagingSlot slot;
+    slot.bytes = {1, 2, 3};
+    slot.ready = true;
+    const SubmissionInfo info{41, 1, 1, 0, 8};
+    CHECK(api.DisplayStill(View(slot), info) == StillOutcome::DeviceError);
+    CHECK(!sink.has_copy(info.submit_id));
+    CHECK(sink.still_display_count() == 0);
+  }
+
+  // Draining / Closed: refused and no bytes copied.
+  {
+    test::FakeFrameSink sink(/*pool_slots=*/1);
+    FrameSink &api = sink;
+    StagingSlot slot;
+    slot.bytes = {1, 2, 3};
+    slot.ready = true;
+    const SubmissionInfo info{42, 1, 1, 0, 9};
+    // Keep one device frame outstanding so Close enters Draining.
+    StagingSlot scheduled;
+    scheduled.bytes.assign(16, 0x55);
+    scheduled.ready = true;
+    CHECK(SubmitWithRetry(api, scheduled, SubmissionInfo{43, 1, 1, 0, 10}, 0, 1000) == ScheduleOutcome::Accepted);
+    CHECK(api.Close(1000) == CloseStatus::DrainTimeout);
+    CHECK(api.DisplayStill(View(slot), info) == StillOutcome::Closed);
+    CHECK(!sink.has_copy(info.submit_id));
+
+    OutputEvent event{};
+    CHECK(api.PollEvent(&event));
+    CHECK(api.Close(1000) == CloseStatus::Closed);
+    CHECK(api.DisplayStill(View(slot), info) == StillOutcome::Closed);
+    CHECK(!sink.has_copy(info.submit_id));
+  }
+}
+
 } // namespace
 
 int main() {
@@ -383,6 +509,7 @@ int main() {
   TestFixtureBusyRetry();
   TestFixtureCloseDrain();
   TestByteOwnershipAndFailure();
+  TestDisplayStill();
   std::printf("decklink-contract-test: OK\n");
   return 0;
 }

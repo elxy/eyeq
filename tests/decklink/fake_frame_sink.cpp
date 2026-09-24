@@ -45,14 +45,22 @@ ScheduleOutcome FakeFrameSink::TrySchedule(const PackedFrameView &view, const Su
 }
 
 StillOutcome FakeFrameSink::DisplayStill(const PackedFrameView &view, const SubmissionInfo &info) {
-  (void)info;
+  // Draining and Closed reject without consuming.
   if (state_ != State::Running) {
     return StillOutcome::Closed;
+  }
+  // Scheduled playback must not be running: the SDK forbids DisplayVideoFrameSync
+  // while scheduled playback is active. Surface the contract violation.
+  if (running_) {
+    return StillOutcome::DeviceError;
   }
   if (view.data == nullptr || view.size == 0) {
     return StillOutcome::DeviceError;
   }
-  // The still path uses a dedicated frame, so it consumes no pool budget.
+  // Dedicated still frame: take an independent copy, consume no pool budget, and
+  // produce no scheduled completion event.
+  copies_[info.submit_id].assign(view.data, view.data + view.size);
+  ++still_display_count_;
   return StillOutcome::Displayed;
 }
 

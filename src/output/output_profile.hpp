@@ -48,8 +48,9 @@ struct StaticHdrMetadata {
   ContentLightLevel cll;      // never fabricated
 };
 
-// Requested output configuration. The default-constructed request is a valid SDR
-// request; a PQ request must fill color.encoding and hdr coherently.
+// Requested output configuration. The default color and HDR fields form a coherent
+// SDR pair, but the request is incomplete until device and mode are filled in. A PQ
+// request must additionally fill color.encoding and hdr coherently.
 struct OutputRequest {
   DeviceId device;
   MonitorMode mode;

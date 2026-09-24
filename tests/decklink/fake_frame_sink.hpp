@@ -37,6 +37,7 @@ public:
   int free_slots() const { return free_slots_; }
   int busy_count() const { return busy_count_; }
   int accepted_count() const { return accepted_count_; }
+  int still_display_count() const { return still_display_count_; }
   int return_count(uint64_t submit_id) const;
   bool has_copy(uint64_t submit_id) const;
   const std::vector<uint8_t> *copy(uint64_t submit_id) const;
@@ -52,6 +53,7 @@ private:
   int64_t clock_ = 0;
   int busy_count_ = 0;
   int accepted_count_ = 0;
+  int still_display_count_ = 0;
   SubmissionInfo last_info_{};
   std::deque<OutputEvent> events_;
   std::map<uint64_t, std::vector<uint8_t>> copies_;

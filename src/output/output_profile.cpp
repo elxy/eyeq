@@ -28,6 +28,15 @@ bool ValidateRequest(const OutputRequest &request, std::string *error) {
   }
 
   const ColorEncoding &encoding = request.color.encoding;
+
+  // Reject unknown enum values before interpreting them as a supported mode.
+  if (request.pixel_format != PixelFormat::V210 && request.pixel_format != PixelFormat::R210) {
+    return Fail(error, "unknown pixel format");
+  }
+  if (request.connection != VideoConnection::SDI && request.connection != VideoConnection::HDMI) {
+    return Fail(error, "unknown video connection");
+  }
+
   const bool is_sdr = encoding.primaries == ColorPrimaries::BT709 && encoding.transfer == ColorTransfer::SDR_BT1886;
   const bool is_hdr = encoding.primaries == ColorPrimaries::BT2020 && encoding.transfer == ColorTransfer::PQ;
   if (!is_sdr && !is_hdr) {

@@ -46,14 +46,17 @@ struct PackConfig {
 
 // Word-aligned minimum row stride for the format. r210 = width * 4 (one pixel per
 // 32-bit word); v210 = ceil(width / 6) * 16 (six pixels per four 32-bit words).
-// Returns 0 for width <= 0. This is a lower bound for validation only; the SDK's
+// Returns 0 when the input is invalid: width <= 0, an unknown PixelFormat, or a
+// minimum that does not fit in int (no saturation). A valid format with a valid
+// width always returns > 0. This is a lower bound for validation only; the SDK's
 // RowBytesForPixelFormat result is the authority.
 int MinimalRowBytes(PixelFormat fmt, int width);
 
 // Validates a resolved layout against the SDK-reported buffer capacity.
-// Rejects non-positive dimensions, undersized/misaligned stride, checked-multiply
-// overflow, an inconsistent image_bytes, and a capacity smaller than image_bytes.
-// A capacity larger than image_bytes is valid. Returns false and sets *error.
+// Rejects unknown pixel formats, non-positive dimensions, zero or undersized or
+// misaligned stride, checked-multiply overflow, an inconsistent image_bytes, and a
+// capacity smaller than image_bytes. A capacity larger than image_bytes is valid.
+// Returns false and sets *error.
 bool ValidateLayout(const BufferLayout &layout, std::size_t sdk_capacity, std::string *error);
 
 const char *ToString(PixelFormat fmt);
