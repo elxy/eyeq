@@ -13,22 +13,29 @@ namespace EYEQ {
 struct DeviceInfo {
   DeviceId id; // id.persistent_id is empty when has_persistent_id is false
   bool has_persistent_id = false;
-  int index = 0;                             // enumeration index; always valid
-  std::string display_name;                  // IDeckLink::GetDisplayName (may be empty)
-  std::string model_name;                    // IDeckLink::GetModelName (may be empty)
-  bool profile_attributes_available = false; // false -> identity/capability fields below are unknown
+  int index = 0;            // enumeration index; always valid
+  std::string display_name; // IDeckLink::GetDisplayName (may be empty)
+  std::string model_name;   // IDeckLink::GetModelName (may be empty)
+  // false -> no IDeckLinkProfileAttributes interface, so all capability fields below
+  // are unknown regardless of their known flags.
+  bool profile_attributes_available = false;
+  // Capability fields are valid only when their *_known flag is true. A failed
+  // attribute read leaves the value at its default and the known flag false; it is
+  // never reported as a definite yes/no.
   bool supports_playback = false;
+  bool supports_playback_known = false;
   bool supports_capture = false;
-  bool active = true; // false when the sub-device has no active connectors
+  bool supports_capture_known = false;
+  bool active = false; // false when the sub-device has no active connectors
+  bool active_known = false;
 };
 
 // Result of a read-only device enumeration.
 struct DeviceCatalog {
   enum class Status {
     Ok,
-    DriverUnavailable,   // DeckLink framework / driver not loadable
-    IteratorUnavailable, // iterator could not be created (API or interface version)
-    InternalError,
+    IteratorUnavailable, // iterator could not be created (framework/driver missing or API unavailable)
+    InternalError,       // a query failed partway; devices must not be treated as complete
   };
   Status status = Status::Ok;
   std::string error;       // human-readable when status != Ok

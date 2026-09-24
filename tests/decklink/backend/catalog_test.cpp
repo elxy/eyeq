@@ -36,6 +36,12 @@ int main() {
     if (catalog.devices[i].profile_attributes_available && catalog.devices[i].has_persistent_id) {
       CHECK(!catalog.devices[i].id.persistent_id.empty());
     }
+    // Without the attributes interface no capability may be reported as known.
+    if (!catalog.devices[i].profile_attributes_available) {
+      CHECK(!catalog.devices[i].supports_playback_known);
+      CHECK(!catalog.devices[i].supports_capture_known);
+      CHECK(!catalog.devices[i].active_known);
+    }
   }
 
   std::vector<MonitorMode> modes;
@@ -70,7 +76,9 @@ int main() {
   // Real devices: report what the query returns. If it succeeds the list may be
   // empty; we never assert a hardware mode result.
   for (const DeviceInfo &device : catalog.devices) {
-    if (!device.supports_playback) {
+    // Skip only when playback is known to be unsupported; an unknown capability is
+    // still worth probing.
+    if (device.supports_playback_known && !device.supports_playback) {
       continue;
     }
     for (VideoConnection connection : {VideoConnection::SDI, VideoConnection::HDMI}) {

@@ -15,9 +15,9 @@ endif()
 message(STATUS "EyeQ version: ${GIT_VERSION}")
 
 # Optional DeckLink output backend (not part of the default player build).
-option(EYEQ_ENABLE_DECKLINK "Enable the DeckLink SDK output backend (not implemented in phase 0.5)" OFF)
-option(EYEQ_BUILD_DECKLINK_TESTS "Build the DeckLink CPU/fake contract tests (no SDK, no GPU)" OFF)
-option(EYEQ_BUILD_DECKLINK_GPU_TESTS "Build the DeckLink GPU packing tests (not implemented in phase 0.5)" OFF)
+option(EYEQ_ENABLE_DECKLINK "Enable the read-only DeckLink SDK backend and catalog tool (video output not implemented)" OFF)
+option(EYEQ_BUILD_DECKLINK_TESTS "Build the DeckLink CPU/fake contract and backend tests (no GPU, no device)" OFF)
+option(EYEQ_BUILD_DECKLINK_GPU_TESTS "Build the DeckLink GPU packing tests (not implemented yet)" OFF)
 set(DECKLINK_SDK_ROOT "" CACHE PATH "Path to the Blackmagic DeckLink SDK root (read-only; used from phase 1-A)")
 
 # macOS requires Objective-C++ support (ICC profile auto-detection)
@@ -110,9 +110,9 @@ if(EYEQ_ENABLE_DECKLINK)
   target_link_libraries(eyeq_decklink_backend
     PUBLIC eyeq_output_contract
     PRIVATE "-framework CoreFoundation")
-  # The vendored SDK predates some modern warnings; keep its diagnostics quiet
-  # without relaxing the contract library.
-  target_compile_options(eyeq_decklink_backend PRIVATE -Wno-deprecated-declarations)
+  # The vendored SDK predates some modern warnings; keep the suppression scoped to the
+  # SDK dispatch source instead of relaxing diagnostics for our own backend code.
+  set_source_files_properties("${_decklink_dispatch}" PROPERTIES COMPILE_OPTIONS "-Wno-deprecated-declarations")
 
   add_executable(decklink-catalog tools/decklink-catalog/main.cpp)
   target_link_libraries(decklink-catalog PRIVATE eyeq_decklink_backend)

@@ -4,11 +4,10 @@
 // output, enabling video, scheduling frames, or modifying device configuration.
 // Video output is not implemented yet, so this tool cannot play anything.
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <string>
 #include <vector>
 
+#include "device_selector.hpp"
 #include "output/decklink/monitor_mode.hpp"
 #include "output/decklink_backend.hpp"
 
@@ -21,7 +20,9 @@ void PrintUsage(const char *program) {
               "--device is given. Does not open an output or modify device settings.\n"
               "\n"
               "Options:\n"
-              "  --device <index|persistent-id>  Select a device for the mode query\n"
+              "  --device <selector>             Select a device and query its modes; without it,\n"
+              "                                  only devices are listed. The selector is explicit:\n"
+              "                                  index:<n> or id:<persistent-id>\n"
               "  --connection <sdi|hdmi>         Output connection (default: sdi)\n"
               "  --pixel-format <r210|v210>      Pixel format (default: v210)\n"
               "  -h, --help                      Show this help\n"
@@ -60,6 +61,9 @@ const char *ConnectionLabel(EYEQ::VideoConnection connection) {
 
 const char *PixelFormatLabel(EYEQ::PixelFormat format) { return format == EYEQ::PixelFormat::R210 ? "r210" : "v210"; }
 
+// Renders a capability that may be unknown instead of forcing it to yes/no.
+const char *KnownBool(bool known, bool value) { return !known ? "unknown" : (value ? "yes" : "no"); }
+
 void PrintDevices(const EYEQ::DeviceCatalog &catalog) {
   std::printf("DeckLink API version: %s\n", catalog.api_version.empty() ? "(unknown)" : catalog.api_version.c_str());
   std::printf("Devices: %zu\n", catalog.devices.size());
@@ -71,11 +75,13 @@ void PrintDevices(const EYEQ::DeviceCatalog &catalog) {
     } else {
       std::printf("      persistent_id=(none; select by index)\n");
     }
-    if (device.profile_attributes_available) {
-      std::printf("      playback=%s capture=%s active=%s\n", device.supports_playback ? "yes" : "no",
-                  device.supports_capture ? "yes" : "no", device.active ? "yes" : "no");
+    if (!device.profile_attributes_available) {
+      std::printf("      playback=unknown capture=unknown active=unknown (profile attributes unavailable)\n");
     } else {
-      std::printf("      profile attributes unavailable\n");
+      std::printf("      playback=%s capture=%s active=%s\n",
+                  KnownBool(device.supports_playback_known, device.supports_playback),
+                  KnownBool(device.supports_capture_known, device.supports_capture),
+                  KnownBool(device.active_known, device.active));
     }
   }
 }
@@ -99,16 +105,14 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "--device requires a value\n");
         return 1;
       }
-      const std::string value = argv[i];
-      // A decimal number is treated as an enumeration index; anything else as a
-      // persistent id.
-      const bool numeric = !value.empty() && value.find_first_not_of("0123456789") == std::string::npos;
-      if (numeric) {
-        selector.index = std::atoi(value.c_str());
-        selector.persistent_id.clear();
-      } else {
-        selector.persistent_id = value;
-        selector.index = -1;
+      if (has_selector) {
+        std::fprintf(stderr, "--device may be given only once\n");
+        return 1;
+      }
+      std::string selector_error;
+      if (!EYEQ::ParseDeviceSelector(argv[i], &selector, &selector_error)) {
+        std::fprintf(stderr, "--device: %s\n", selector_error.c_str());
+        return 1;
       }
       has_selector = true;
       continue;

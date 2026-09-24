@@ -272,7 +272,7 @@ Optional CMake switches (all default to `OFF`; the normal player build is unaffe
 
 | Option | Default | Purpose |
 |---|---|---|
-| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests. No SDK, no GPU, no device. |
+| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests and, with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection tests. No GPU, no device. |
 | `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the read-only SDK backend and the `decklink-catalog` tool. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. Video output is still not implemented. |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Reserved for GPU packing tests; setting it `ON` fails fast while the packer is declaration-only. |
 | `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); required by `EYEQ_ENABLE_DECKLINK`. Nothing is downloaded or modified. |
@@ -293,8 +293,10 @@ cmake -S . -B build-sdk -DEYEQ_ENABLE_DECKLINK=ON \
 cmake --build build-sdk --target decklink-catalog
 # List devices:
 ./build-sdk/bin/decklink-catalog
-# List output modes for a device (read-only):
-./build-sdk/bin/decklink-catalog --device 0 --connection sdi --pixel-format v210
+# List output modes for a device (read-only). The selector is explicit: index:<n> or
+# id:<persistent-id>, and a bare number is rejected instead of being guessed.
+./build-sdk/bin/decklink-catalog --device index:0 --connection sdi --pixel-format v210
+./build-sdk/bin/decklink-catalog --device id:2697367084
 ```
 
 The tool only queries the device; it never enables an output, schedules frames or changes device configuration.

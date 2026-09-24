@@ -37,6 +37,32 @@ int main() {
   CHECK(!MonitorModeIs(p2997, 1920, 1080, 30, 1));
   CHECK(!MonitorModeIs(p50, 3840, 2160, 0, 1)); // invalid rational never matches
 
+  // F4: the comparison must not overflow signed int64 for large, legal rationals.
+  // duration=2^32, scale=2^33 is 2 fps; 2^33/2^33 is 1 fps. Cross-multiplication
+  // overflows both sides and used to report a false match.
+  const MonitorMode big{3840, 2160, int64_t{1} << 32, int64_t{1} << 33, true};
+  CHECK(!MonitorModeIs(big, 3840, 2160, int64_t{1} << 33, int64_t{1} << 33));
+  CHECK(MonitorModeIs(big, 3840, 2160, 2, 1));
+  CHECK(MonitorModeIs(big, 3840, 2160, int64_t{1} << 30, int64_t{1} << 29));
+  CHECK(!MonitorModeIs(big, 3840, 2160, 3, 1));
+
+  // INT64_MAX bounds: unreduced huge rationals are still compared exactly.
+  const MonitorMode max_rate{3840, 2160, INT64_MAX, INT64_MAX, true};
+  CHECK(MonitorModeIs(max_rate, 3840, 2160, 1, 1));
+  CHECK(MonitorModeIs(max_rate, 3840, 2160, INT64_MAX, INT64_MAX));
+  CHECK(!MonitorModeIs(max_rate, 3840, 2160, INT64_MAX, 1));
+  CHECK(!MonitorModeIs(max_rate, 3840, 2160, 2, 1));
+  const MonitorMode max_scale{3840, 2160, 1, INT64_MAX, true};
+  CHECK(MonitorModeIs(max_scale, 3840, 2160, INT64_MAX, 1));
+  CHECK(!MonitorModeIs(max_scale, 3840, 2160, 1, 1));
+
+  // Zero and negative rationals never match, and a broken mode never matches.
+  CHECK(!MonitorModeIs(p50, 3840, 2160, -50, 1));
+  CHECK(!MonitorModeIs(p50, 3840, 2160, 50, -1));
+  CHECK(!MonitorModeIs(p50, 3840, 2160, 50, 0));
+  CHECK(!MonitorModeIs(MonitorMode{3840, 2160, -1000, 50000, true}, 3840, 2160, 50, 1));
+  CHECK(!MonitorModeIs(MonitorMode{3840, 2160, 1000, -50000, true}, 3840, 2160, 50, 1));
+
   std::printf("decklink monitor mode test: OK\n");
   return 0;
 }

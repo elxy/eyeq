@@ -270,7 +270,7 @@ DeckLink SDI/HDMI 输出后端仍在开发中，**尚不能播放视频**。已�
 
 | 开关 | 默认 | 用途 |
 |---|---|---|
-| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试，无需 SDK、GPU、设备 |
+| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试；配合 `EYEQ_ENABLE_DECKLINK` 还会构建确定性的 SDK 故障注入测试。无需 GPU、设备 |
 | `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建只读 SDK 后端与 `decklink-catalog` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。视频输出仍未实现 |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 预留给 GPU 打包测试；打包器仍只有声明，设为 `ON` 会立即报错终止 |
 | `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），`EYEQ_ENABLE_DECKLINK` 必需；不会下载或修改 |
@@ -291,8 +291,10 @@ cmake -S . -B build-sdk -DEYEQ_ENABLE_DECKLINK=ON \
 cmake --build build-sdk --target decklink-catalog
 # 列出设备：
 ./build-sdk/bin/decklink-catalog
-# 只读查询某设备的输出模式：
-./build-sdk/bin/decklink-catalog --device 0 --connection sdi --pixel-format v210
+# 只读查询某设备的输出模式。选择器必须显式写成 index:<n> 或 id:<persistent-id>，
+# 裸数字会被拒绝，不会被猜测成索引。
+./build-sdk/bin/decklink-catalog --device index:0 --connection sdi --pixel-format v210
+./build-sdk/bin/decklink-catalog --device id:2697367084
 ```
 
 该工具只做查询，不会启用输出、调度帧或修改设备配置。

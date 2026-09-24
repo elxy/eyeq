@@ -10,3 +10,10 @@ target_include_directories(decklink_contract_test PRIVATE ${CMAKE_CURRENT_SOURCE
 target_link_libraries(decklink_contract_test PRIVATE eyeq_output_contract)
 
 add_test(NAME decklink_contract COMMAND decklink_contract_test)
+
+# Strict CLI selector parsing. No SDK, no GPU, no device.
+add_executable(decklink_device_selector_test device_selector_test.cpp)
+target_include_directories(decklink_device_selector_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/tools/decklink-catalog)
+target_link_libraries(decklink_device_selector_test PRIVATE eyeq_output_contract)
+add_test(NAME decklink_device_selector COMMAND decklink_device_selector_test)
