@@ -983,6 +983,29 @@ bool DeckLinkOutput::Open(const OutputRequest &request, ResolvedOutput *resolved
   layout.row_bytes = row_bytes;
   layout.image_bytes = static_cast<std::size_t>(row_bytes) * static_cast<std::size_t>(actual_mode.height);
 
+  // Read-only occupancy snapshot before enabling anything. This is not a device lock
+  // or lease: it refuses to take over a device that reports itself busy right now, but
+  // it cannot rule out a concurrent grab after the query. A missing status interface
+  // or a failed query also refuses, rather than probing with Enable/Disable.
+  {
+    IDeckLinkStatus *status = nullptr;
+    const HRESULT qi = impl.device->QueryInterface(IID_IDeckLinkStatus, reinterpret_cast<void **>(&status));
+    if (qi != S_OK || status == nullptr) {
+      return impl.AbortOpen(error, "device does not expose IDeckLinkStatus; refusing to enable output");
+    }
+    int64_t busy = 0;
+    const HRESULT query = status->GetInt(bmdDeckLinkStatusBusy, &busy);
+    status->Release();
+    if (query != S_OK) {
+      return impl.AbortOpen(error, "bmdDeckLinkStatusBusy query failed; refusing to enable output (HRESULT " +
+                                       internal::FormatHresult(query) + ")");
+    }
+    if (busy != 0) {
+      return impl.AbortOpen(error, "device is busy (bmdDeckLinkStatusBusy=" + std::to_string(busy) +
+                                       "); refusing to preempt another application");
+    }
+  }
+
   const HRESULT enable = impl.output->EnableVideoOutput(sdk_mode, bmdVideoOutputFlagDefault);
   if (enable != S_OK) {
     return impl.AbortOpen(error, "EnableVideoOutput failed (HRESULT " + internal::FormatHresult(enable) + ")");

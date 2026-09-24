@@ -92,3 +92,40 @@ target_link_libraries(decklink_output_death_test PRIVATE
   Threads::Threads
   "-framework CoreFoundation")
 add_test(NAME decklink_output_death COMMAND decklink_output_death_test)
+
+# Test-signal session test: the real backend state machine plus the real session and
+# pattern sources, driven against the fake SDK.
+set(_decklink_test_signal_sources
+  ${CMAKE_SOURCE_DIR}/tools/decklink-test-signal/test_pattern.cpp
+  ${CMAKE_SOURCE_DIR}/tools/decklink-test-signal/test_signal_session.cpp)
+
+add_executable(decklink_test_signal_test
+  decklink_test_signal_test.cpp
+  ${_decklink_test_signal_sources}
+  ${_decklink_output_sources})
+target_include_directories(decklink_test_signal_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tools/decklink-test-signal
+  "${_decklink_include}")
+target_link_libraries(decklink_test_signal_test PRIVATE
+  eyeq_output_contract
+  Threads::Threads
+  "-framework CoreFoundation")
+add_test(NAME decklink_test_signal COMMAND decklink_test_signal_test)
+
+# CLI regression: main.cpp is compiled into the test (renamed) and the fake SDK
+# provides the device/mode list. No output dispatch is linked.
+add_executable(decklink_test_signal_cli_test
+  decklink_test_signal_cli_test.cpp
+  ${_decklink_test_signal_sources}
+  ${_decklink_output_sources})
+target_include_directories(decklink_test_signal_cli_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tools/decklink-catalog
+  ${CMAKE_SOURCE_DIR}/tools/decklink-test-signal
+  "${_decklink_include}")
+target_link_libraries(decklink_test_signal_cli_test PRIVATE
+  eyeq_output_contract
+  Threads::Threads
+  "-framework CoreFoundation")
+add_test(NAME decklink_test_signal_cli COMMAND decklink_test_signal_cli_test)

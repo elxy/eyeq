@@ -266,14 +266,14 @@ After launching, the following keyboard and mouse controls are available:
 
 ## DeckLink Output (Work in Progress)
 
-The DeckLink SDI/HDMI output backend now has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. The `eyeq` player is **not wired to it yet** and there are no DeckLink playback options, so `eyeq` still cannot output video. The GPU packer, renderer/player integration, audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. The native output write path is exercised only against a fake SDK until hardware output is separately authorized.
+The DeckLink SDI/HDMI output backend now has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. The `eyeq` player is **not wired to it yet** and there are no DeckLink playback options, so `eyeq` still cannot output video. The GPU packer, renderer/player integration, audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. A standalone `decklink-test-signal` tool renders a deterministic CPU pattern through the same backend and enables real hardware output when run. Automated validation exercises the native write path only against a fake SDK; that is the current verification status, not a runtime restriction.
 
 Optional CMake switches (all default to `OFF`; the normal player build is unaffected):
 
 | Option | Default | Purpose |
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests and, with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection and output-backend tests. No GPU, no device. |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` tool. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. The player is not wired to it yet, so `eyeq` still does not output video. |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` and `decklink-test-signal` tools. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. The player is not wired to it yet, so `eyeq` still does not output video. |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Reserved for GPU packing tests; setting it `ON` fails fast while the packer is declaration-only. |
 | `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); required by `EYEQ_ENABLE_DECKLINK`. Nothing is downloaded or modified. |
 
@@ -300,6 +300,45 @@ cmake --build build-sdk --target decklink-catalog
 ```
 
 The tool only queries the device; it never enables an output, schedules frames or changes device configuration.
+
+### Test-signal generator
+
+`decklink-test-signal` renders a deterministic CPU pattern and sends it through the
+same output backend, without the `eyeq` player and without the GPU packer. It is
+intended for on-hardware checks of SDI/HDMI links, mode timing, range and motion
+order, and it enables real hardware output when run.
+
+Current automated validation runs the tool and the backend only against the fake
+SDK. That is a verification status, not a runtime behavior: the executable does
+enable hardware output. SDI is the planned first hardware run; HDMI and PQ are wired
+but have not been hardware-verified.
+
+```sh
+cmake --build build-sdk --target decklink-test-signal
+# 10 seconds at the mode's rational rate, SDI, v210, SDR:
+./build-sdk/bin/decklink-test-signal --device index:0 --connection sdi \
+  --pixel-format v210 --mode auto --seconds 10
+```
+
+Options: `--device index:<n>|id:<id>` (required, same explicit selector as
+`decklink-catalog`), `--connection sdi|hdmi`, `--pixel-format r210|v210`, `--mode
+WxH@fps|auto` (auto prefers 3840x2160 50p; an explicit mode must be in the device's
+native list), `--hdr` (BT2020/PQ), `--frames N` or `--seconds S` (mutually exclusive,
+default 5 seconds), `--preroll N` (default 4, capped to the frame count; if the device
+pool fills first, playback starts early instead of waiting for pre-Start completions),
+`--drain-timeout-ms N` (default 5000, a no-progress timeout rather than a whole-run
+deadline), `--still` (display one still frame; no start and no scheduling) and
+`-h|--help`. Exit codes: 0 success, 1 usage/request/run error, 2 DeckLink driver
+unavailable.
+
+Before enabling the output the tool reads `bmdDeckLinkStatusBusy` on the selected
+device and refuses if the device reports busy, if `IDeckLinkStatus` is unavailable or
+if the query fails; it never probes with Enable/Disable and never terminates or
+preempts another application such as DaVinci Resolve. That check is a one-shot
+snapshot, not a device lock, so it cannot guarantee against a concurrent grab.
+Ctrl-C/SIGTERM only sets a flag that the consumer thread observes: it stops
+submitting new frames, then closes the output and consumes the retained events
+before exiting.
 
 ## License
 

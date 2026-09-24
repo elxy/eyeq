@@ -399,6 +399,7 @@ public:
     }
     *actual = requested;
     *supported = g_state.fault != OutputFault::SupportFalse;
+    g_state.stats.support_connection = static_cast<int>(connection);
     return S_OK;
   }
   HRESULT GetDisplayMode(BMDDisplayMode, IDeckLinkDisplayMode **result) override {
@@ -676,6 +677,49 @@ public:
   HRESULT WriteConfigurationToPreferences(void) override { std::abort(); }
 };
 
+// Read-only occupancy report used by the pre-enable busy check. Busy is a bitmask;
+// any non-zero value means the device reports itself in use.
+class FakeStatus final : public RefCounted<FakeStatus>, public IDeckLinkStatus {
+public:
+  FAKE_COM_REFCOUNT(FakeStatus)
+  HRESULT QueryInterface(REFIID iid, void **out) override {
+    if (out == nullptr) {
+      return E_POINTER;
+    }
+    if (memcmp(&iid, &IID_IDeckLinkStatus, sizeof(iid)) == 0) {
+      AddRef();
+      *out = static_cast<IDeckLinkStatus *>(this);
+      return S_OK;
+    }
+    *out = nullptr;
+    return E_NOINTERFACE;
+  }
+  HRESULT GetFlag(BMDDeckLinkStatusID, bool *) override { return E_INVALIDARG; }
+  HRESULT GetInt(BMDDeckLinkStatusID id, int64_t *value) override {
+    if (value == nullptr) {
+      return E_POINTER;
+    }
+    if (id != bmdDeckLinkStatusBusy) {
+      return E_INVALIDARG;
+    }
+    ++g_state.stats.status_calls;
+    if (g_state.fault == OutputFault::StatusQueryFails) {
+      return E_FAIL;
+    }
+    *value = g_state.fault == OutputFault::Busy ? bmdDevicePlaybackBusy : 0;
+    return S_OK;
+  }
+  HRESULT GetFloat(BMDDeckLinkStatusID, double *) override { return E_INVALIDARG; }
+  HRESULT GetString(BMDDeckLinkStatusID, CFStringRef *) override { return E_INVALIDARG; }
+  HRESULT GetBytes(BMDDeckLinkStatusID, void *, uint32_t *) override { return E_INVALIDARG; }
+  HRESULT GetInterface(BMDDeckLinkStatusID, void **) override { return E_INVALIDARG; }
+  HRESULT GetFlagWithParam(BMDDeckLinkStatusID, uint64_t, bool *) override { return E_INVALIDARG; }
+  HRESULT GetIntWithParam(BMDDeckLinkStatusID, uint64_t, int64_t *) override { return E_INVALIDARG; }
+  HRESULT GetFloatWithParam(BMDDeckLinkStatusID, uint64_t, double *) override { return E_INVALIDARG; }
+  HRESULT GetStringWithParam(BMDDeckLinkStatusID, uint64_t, CFStringRef *) override { return E_INVALIDARG; }
+  HRESULT GetBytesWithParam(BMDDeckLinkStatusID, uint64_t, void *, uint32_t *) override { return E_INVALIDARG; }
+};
+
 class FakeDevice final : public RefCounted<FakeDevice>, public IDeckLink {
 public:
   FAKE_COM_REFCOUNT(FakeDevice)
@@ -693,6 +737,14 @@ public:
     }
     if (memcmp(&iid, &IID_IDeckLinkConfiguration, sizeof(iid)) == 0) {
       *out = static_cast<IDeckLinkConfiguration *>(new FakeConfiguration);
+      return S_OK;
+    }
+    if (memcmp(&iid, &IID_IDeckLinkStatus, sizeof(iid)) == 0) {
+      if (g_state.fault == OutputFault::StatusMissing) {
+        *out = nullptr;
+        return E_NOINTERFACE;
+      }
+      *out = static_cast<IDeckLinkStatus *>(new FakeStatus);
       return S_OK;
     }
     *out = nullptr;

@@ -117,6 +117,15 @@ if(EYEQ_ENABLE_DECKLINK)
 
   add_executable(decklink-catalog tools/decklink-catalog/main.cpp)
   target_link_libraries(decklink-catalog PRIVATE eyeq_decklink_backend)
+
+  # Standalone deterministic test-signal generator. It drives the backend through the
+  # FrameSink seam and does not include the player or the GPU packer.
+  add_executable(decklink-test-signal
+    tools/decklink-test-signal/main.cpp
+    tools/decklink-test-signal/test_pattern.cpp
+    tools/decklink-test-signal/test_signal_session.cpp)
+  target_include_directories(decklink-test-signal PRIVATE tools/decklink-catalog)
+  target_link_libraries(decklink-test-signal PRIVATE eyeq_decklink_backend)
 endif()
 
 # Collect source files

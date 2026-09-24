@@ -38,6 +38,9 @@ enum class OutputFault {
   StopFails,
   IsRunningFails,
   DisableFails,
+  Busy,             // bmdDeckLinkStatusBusy GetInt returns S_OK with a non-zero busy state
+  StatusMissing,    // IDeckLinkStatus is not exposed by the device
+  StatusQueryFails, // bmdDeckLinkStatusBusy GetInt returns E_FAIL
 };
 
 struct FakeOutputStats {
@@ -56,6 +59,8 @@ struct FakeOutputStats {
   int set_flags_calls = 0;
   int metadata_set_calls = 0;
   int stream_time_calls = 0;
+  int status_calls = 0;
+  int support_connection = 0; // last connection passed to DoesSupportVideoMode
 };
 
 // Resets all fake state (registered callback, created frames, counters, faults).

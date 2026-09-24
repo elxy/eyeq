@@ -264,14 +264,14 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ## DeckLink 输出（开发中）
 
-DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。`eyeq` 播放器**尚未接入**，也没有任何 DeckLink 播放选项，因此 `eyeq` 仍不能输出视频。GPU 打包器、渲染器/播放器接线、音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。在另行授权实机输出前，原生输出写路径只在 fake SDK 上运行。
+DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。`eyeq` 播放器**尚未接入**，也没有任何 DeckLink 播放选项，因此 `eyeq` 仍不能输出视频。GPU 打包器、渲染器/播放器接线、音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。另有独立工具 `decklink-test-signal`，通过同一后端输出确定性 CPU 测试画面，运行时**会启用真实硬件输出**。自动化验证目前只在 fake SDK 上跑通原生写路径，这是验证状态，不是运行行为限制。
 
 可选 CMake 开关（默认全部为 `OFF`，不影响普通播放器构建）：
 
 | 开关 | 默认 | 用途 |
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试；配合 `EYEQ_ENABLE_DECKLINK` 还会构建确定性的 SDK 故障注入与输出后端测试。无需 GPU、设备 |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。播放器尚未接入，`eyeq` 仍不能输出视频 |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog`、`decklink-test-signal` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。播放器尚未接入，`eyeq` 仍不能输出视频 |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 预留给 GPU 打包测试；打包器仍只有声明，设为 `ON` 会立即报错终止 |
 | `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），`EYEQ_ENABLE_DECKLINK` 必需；不会下载或修改 |
 
@@ -298,6 +298,23 @@ cmake --build build-sdk --target decklink-catalog
 ```
 
 该工具只做查询，不会启用输出、调度帧或修改设备配置。
+
+### 测试信号发生器
+
+`decklink-test-signal` 生成确定性的 CPU 测试画面，并通过同一输出后端发送，不经 `eyeq` 播放器、不依赖 GPU 打包器。它用于实机验证 SDI/HDMI 链路、模式时基、range 与运动顺序，运行时**会启用真实硬件输出**。
+
+当前自动化验证只在 fake SDK 上运行该工具与后端；这是验证状态而非运行行为：可执行文件确实会启用硬件输出。首轮计划先跑 SDI；HDMI 与 PQ 已接线但未经实机验收。
+
+```sh
+cmake --build build-sdk --target decklink-test-signal
+# 按模式的准确有理帧率输出 10 秒，SDI、v210、SDR：
+./build-sdk/bin/decklink-test-signal --device index:0 --connection sdi \
+  --pixel-format v210 --mode auto --seconds 10
+```
+
+选项：`--device index:<n>|id:<id>`（必填，选择器与 `decklink-catalog` 相同）、`--connection sdi|hdmi`、`--pixel-format r210|v210`、`--mode WxH@fps|auto`（auto 优先 3840x2160 50p；显式模式必须存在于设备原生列表）、`--hdr`（BT2020/PQ）、`--frames N` 与 `--seconds S`（互斥，默认 5 秒）、`--preroll N`（默认 4，上限为帧数；若设备帧池先满则提前开始播放，不等 Start 前不可能出现的完成事件）、`--drain-timeout-ms N`（默认 5000，是无进展超时而非整次运行死线）、`--still`（显示一次静帧，不 Start、不调度）与 `-h|--help`。退出码：0 成功，1 用法/请求/运行错误，2 DeckLink 驱动不可用。
+
+启用输出前，工具会在选定设备上只读查询 `bmdDeckLinkStatusBusy`；若设备报告忙、`IDeckLinkStatus` 缺失或查询失败则拒绝，且不会用 Enable/Disable 试探，也不会终止/抢占 DaVinci Resolve 等其他应用。该检查是瞬时快照而非设备锁，不能保证绝对排除并发占用。Ctrl-C/SIGTERM 只设置标志，由消费线程观察：停止提交新帧，随后关闭输出并消费已保留事件再退出。
 
 ## 许可证
 
