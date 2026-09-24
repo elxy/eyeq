@@ -26,3 +26,12 @@ target_include_directories(decklink_test_signal_pattern_test PRIVATE
   ${CMAKE_SOURCE_DIR}/tools/decklink-test-signal)
 target_link_libraries(decklink_test_signal_pattern_test PRIVATE eyeq_output_contract)
 add_test(NAME decklink_test_signal_pattern COMMAND decklink_test_signal_pattern_test)
+
+# CPU-only known-answer tests for the independent r210/v210 packing reference and the
+# byte-level comparator. No GPU, no SDK, no packer link.
+add_executable(decklink_frame_packer_oracle_test
+  packer/frame_packer_oracle_test.cpp)
+target_include_directories(decklink_frame_packer_oracle_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/packer)
+target_link_libraries(decklink_frame_packer_oracle_test PRIVATE eyeq_output_contract)
+add_test(NAME decklink_frame_packer_oracle COMMAND decklink_frame_packer_oracle_test)

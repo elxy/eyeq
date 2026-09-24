@@ -15,9 +15,9 @@ endif()
 message(STATUS "EyeQ version: ${GIT_VERSION}")
 
 # Optional DeckLink output backend (not part of the default player build).
-option(EYEQ_ENABLE_DECKLINK "Enable the read-only DeckLink SDK backend and catalog tool (video output not implemented)" OFF)
+option(EYEQ_ENABLE_DECKLINK "Enable the DeckLink SDK backend (read-only catalog plus scheduled output) and its tools" OFF)
 option(EYEQ_BUILD_DECKLINK_TESTS "Build the DeckLink CPU/fake contract and backend tests (no GPU, no device)" OFF)
-option(EYEQ_BUILD_DECKLINK_GPU_TESTS "Build the DeckLink GPU packing tests (not implemented yet)" OFF)
+option(EYEQ_BUILD_DECKLINK_GPU_TESTS "Build the GPU packing tests (needs libplacebo and a real Vulkan device at runtime; no SDK)" OFF)
 set(DECKLINK_SDK_ROOT "" CACHE PATH "Path to the Blackmagic DeckLink SDK root (read-only; used from phase 1-A)")
 
 # macOS requires Objective-C++ support (ICC profile auto-detection)
@@ -62,13 +62,6 @@ find_package(Libplacebo REQUIRED)
 find_package(SDL3_ttf REQUIRED)
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avfilter avformat avutil swscale)
 
-# Phase 1A-1 guard: the GPU packer is still declaration-only.
-if(EYEQ_BUILD_DECKLINK_GPU_TESTS)
-  message(FATAL_ERROR
-    "EYEQ_BUILD_DECKLINK_GPU_TESTS=ON is not available yet: the GPU packer is declaration-only. "
-    "Leave EYEQ_BUILD_DECKLINK_GPU_TESTS=OFF.")
-endif()
-
 # CPU-only output contract library: public headers plus pure helpers. It has no SDK
 # dependency and does not use the GPU; libplacebo is linked PUBLIC only because
 # frame_packer.hpp declares pl_tex/pl_gpu parameters.
@@ -77,6 +70,16 @@ add_library(eyeq_output_contract STATIC
   ${CMAKE_SOURCE_DIR}/src/output/output_profile.cpp)
 target_include_directories(eyeq_output_contract PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(eyeq_output_contract PUBLIC Libplacebo::Libplacebo)
+
+# GPU frame packer: nonlinear full-range float RGB -> r210/v210 Video-range bytes,
+# with a fixed staging ring and asynchronous pl_tex_download + pl_buf_poll readback.
+# It only needs libplacebo and a caller-provided pl_gpu; the player is not wired to
+# it yet and the DeckLink SDK is not a dependency. EXCLUDE_FROM_ALL keeps the default
+# player build unaffected; the GPU tests pull it in when they are enabled.
+add_library(eyeq_frame_packer STATIC EXCLUDE_FROM_ALL
+  ${CMAKE_SOURCE_DIR}/src/output/frame_packer.cpp)
+target_include_directories(eyeq_frame_packer PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(eyeq_frame_packer PUBLIC eyeq_output_contract Libplacebo::Libplacebo)
 
 # Optional DeckLink SDK backend. Phase 1A-1 builds only the read-only catalog and
 # mode query; it never enables video output. The SDK is an external, read-only tree
@@ -202,4 +205,16 @@ if(EYEQ_BUILD_DECKLINK_TESTS)
     endif()
     add_subdirectory(tests/decklink/backend)
   endif()
+endif()
+
+# GPU packing tests plus their CPU oracle. They need libplacebo and a real Vulkan
+# device at runtime, but never the DeckLink SDK, so they can build and run with the
+# SDK disabled and DECKLINK_SDK_ROOT unset. A missing/unsuitable GPU is reported as
+# a test failure, not silently skipped.
+if(EYEQ_BUILD_DECKLINK_GPU_TESTS)
+  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/decklink/packer/CMakeLists.txt")
+    message(FATAL_ERROR "EYEQ_BUILD_DECKLINK_GPU_TESTS=ON but tests/decklink/packer/CMakeLists.txt is missing")
+  endif()
+  enable_testing()
+  add_subdirectory(tests/decklink/packer)
 endif()

@@ -266,7 +266,7 @@ After launching, the following keyboard and mouse controls are available:
 
 ## DeckLink Output (Work in Progress)
 
-The DeckLink SDI/HDMI output backend now has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. The `eyeq` player is **not wired to it yet** and there are no DeckLink playback options, so `eyeq` still cannot output video. The GPU packer, renderer/player integration, audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. A standalone `decklink-test-signal` tool renders a deterministic CPU pattern through the same backend and enables real hardware output when run. Automated validation exercises the native write path only against a fake SDK; that is the current verification status, not a runtime restriction.
+The DeckLink SDI/HDMI output backend now has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. A GPU frame packer (`src/output/frame_packer.hpp` / `.cpp`) converts nonlinear full-range float RGB into Video-range r210/v210 through an asynchronous readback ring, but the `eyeq` player is **not wired to it yet** and there are no DeckLink playback options, so `eyeq` still cannot output video. Renderer/player integration, audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. A standalone `decklink-test-signal` tool renders a deterministic CPU pattern through the same backend and enables real hardware output when run. Automated validation exercises the native write path only against a fake SDK and the packer against a local GPU; that is the current verification status, not a runtime restriction.
 
 Optional CMake switches (all default to `OFF`; the normal player build is unaffected):
 
@@ -274,7 +274,7 @@ Optional CMake switches (all default to `OFF`; the normal player build is unaffe
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests and, with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection and output-backend tests. No GPU, no device. |
 | `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` and `decklink-test-signal` tools. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. The player is not wired to it yet, so `eyeq` still does not output video. |
-| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Reserved for GPU packing tests; setting it `ON` fails fast while the packer is declaration-only. |
+| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Build the GPU packing tests: a CPU oracle, a real-GPU comparison/readback test and a lifecycle fault-injection test. Needs libplacebo and a working Vulkan device at runtime; no SDK and no DeckLink device. |
 | `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); required by `EYEQ_ENABLE_DECKLINK`. Nothing is downloaded or modified. |
 
 Running the CPU/fake contract tests (no SDK required):
@@ -339,6 +339,51 @@ snapshot, not a device lock, so it cannot guarantee against a concurrent grab.
 Ctrl-C/SIGTERM only sets a flag that the consumer thread observes: it stops
 submitting new frames, then closes the output and consumes the retained events
 before exiting.
+
+### GPU frame packer
+
+`eyeq_frame_packer` implements the `FramePacker` seam. It takes a sampleable,
+nonlinear full-range float RGB texture (`RGBA16F`, `RGBA32F` or any float format with
+at least 16-bit components) on the same `pl_gpu`, applies the frozen first-version
+policy (BT709/SDR-BT1886 or BT2020/PQ, Video range, Left chroma, no transfer/tonemap/
+ICC processing) and produces r210 (big-endian) or v210 (little-endian) bytes in a
+fixed four-slot ring backed by persistent mapped host buffers and asynchronous
+`pl_tex_download` + `pl_buf_poll`. The `eyeq` player is not wired to it yet.
+
+Running the GPU tests (no SDK, no DeckLink device; a real Vulkan GPU is required and a
+missing GPU fails the test instead of being skipped):
+
+```sh
+cmake -S . -B build-gpu -DEYEQ_BUILD_DECKLINK_GPU_TESTS=ON
+cmake --build build-gpu
+ctest --test-dir build-gpu --output-on-failure
+```
+
+The CPU-only known-answer and comparator-mutation tests belong to the CPU test suite
+and need no GPU:
+
+```sh
+cmake -S . -B build-cpu -DEYEQ_BUILD_DECKLINK_TESTS=ON
+cmake --build build-cpu
+ctest --test-dir build-cpu --output-on-failure
+```
+
+- `decklink_frame_packer_oracle` (CPU) checks the independent reference and the
+  byte-level comparator against hand-derived known answers (primaries/complements,
+  chroma filter weights, phase, padding) and against intentional corruption.
+- `frame_packer_gpu` compares real GPU read-back against that reference across widths
+  around the format boundaries, extra strides, both precisions and encodings, finite
+  clamping, grayscale/code-step anchors and chroma-phase impulses, plus a full-frame
+  UHD check.
+- `frame_packer_fault` injects transfer, readback, GPU-failure and allocation-failure
+  conditions through test-only hooks that exist only in that test target.
+
+Local UHD four-slot short measurement (offscreen, not an end-to-end 4K50 result):
+roughly 1.0-1.1 ms/frame amortized, submit-to-Ready `p50` about 3-4 ms, and about
+33 MB (r210) or 22 MB (v210) of per-frame packed bytes; the test prints the current
+numbers, reporting the mapped host buffers and the logical carrier payload separately
+rather than claiming driver physical residency. HDMI and PQ output remain wired but
+have not been hardware-verified.
 
 ## License
 
