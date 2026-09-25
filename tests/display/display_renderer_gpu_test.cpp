@@ -216,6 +216,56 @@ std::vector<float> DownloadTarget(pl_gpu gpu, const OffscreenTarget &target) {
   return pixels;
 }
 
+float HalfToFloat(uint16_t v) {
+  const uint32_t sign = (v >> 15) & 1u;
+  const uint32_t exponent = (v >> 10) & 0x1Fu;
+  const uint32_t mantissa = v & 0x3FFu;
+  uint32_t bits = 0;
+  if (exponent == 0) {
+    bits = (sign << 31) | ((mantissa == 0) ? 0u : (static_cast<uint32_t>(127 - 15 + 1) << 23)) | (mantissa << 13);
+  } else if (exponent == 0x1Fu) {
+    bits = (sign << 31) | 0x7F800000u | (mantissa << 13);
+  } else {
+    bits = (sign << 31) | ((exponent - 15 + 127) << 23) | (mantissa << 13);
+  }
+  float result;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+// Downloads the display-linear composition (16F or 32F) of the last Render().
+std::vector<float> DownloadLinearResult(pl_gpu gpu, EYEQ::FrameRenderer &renderer, int &width, int &height) {
+  pl_tex tex = renderer.GetLinearResultTexture();
+  width = tex->params.w;
+  height = tex->params.h;
+  const bool half = tex->params.format->component_depth[0] == 16;
+  std::vector<float> pixels(static_cast<std::size_t>(width) * height * 4);
+  if (half) {
+    std::vector<uint16_t> raw(static_cast<std::size_t>(width) * height * 4);
+    struct pl_tex_transfer_params transfer = {
+        .tex = tex,
+        .row_pitch = static_cast<std::size_t>(width) * 4 * sizeof(uint16_t),
+        .ptr = raw.data(),
+    };
+    if (!pl_tex_download(gpu, &transfer)) {
+      throw std::runtime_error("linear result download failed");
+    }
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+      pixels[i] = HalfToFloat(raw[i]);
+    }
+  } else {
+    struct pl_tex_transfer_params transfer = {
+        .tex = tex,
+        .row_pitch = static_cast<std::size_t>(width) * 4 * sizeof(float),
+        .ptr = pixels.data(),
+    };
+    if (!pl_tex_download(gpu, &transfer)) {
+      throw std::runtime_error("linear result download failed");
+    }
+  }
+  return pixels;
+}
+
 Color At(const std::vector<float> &pixels, int width, int x, int y) {
   const float *p = pixels.data() + (static_cast<std::size_t>(y) * width + x) * 4;
   return {p[0], p[1], p[2]};
@@ -308,6 +358,12 @@ void TestComparators() {
 std::string ColorString(const Color &c) {
   char buf[64];
   std::snprintf(buf, sizeof(buf), "(%.4f, %.4f, %.4f)", c[0], c[1], c[2]);
+  return buf;
+}
+
+std::string Fmt(float v) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%.6f", v);
   return buf;
 }
 
@@ -526,6 +582,10 @@ int main() {
 
     // ---------------------------------------------------------- Fill amplify
     {
+      // Difference amplification is defined in the display-linear domain:
+      // ref + gain * (test - ref), hard-clipped to the target range. The old
+      // gamma/PQ-domain expectation (0.6 code at gain 2) is deliberately not
+      // reproduced (V2.1 D1).
       auto dis = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.4f, 0.4f, 0.4f}; });
       auto ref = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.2f, 0.2f, 0.2f}; });
       EYEQ::FrameRenderer renderer(context, fill_config);
@@ -537,13 +597,39 @@ int main() {
       auto target = CreateTarget(gpu, 64, 64, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
       auto state = MakeBaseState({0, 1}, 0);
       state.scale = 2.0f;
-      state.ref_id = 1;
-      state.amplify = 2.0f;
-      renderer.Render(target.frame, state);
+
+      // Map the test source alone, then the reference alone, then amplify. The
+      // linear values come from the same renderer, so the assertion is
+      // independent of the exact transfer/tone-mapping details.
+      int lw = 0, lh = 0;
+      auto linear_center = [&](const EYEQ::DisplayState &s) {
+        renderer.Render(target.frame, s);
+        std::vector<float> linear = DownloadLinearResult(gpu, renderer, lw, lh);
+        return At(linear, lw, lw / 2, lh / 2);
+      };
+      Color dis_linear = linear_center(state);
+      auto ref_state = state;
+      ref_state.show_ref = true;
+      ref_state.ref_id = 1;
+      Color ref_linear = linear_center(ref_state);
+      auto amp_state = state;
+      amp_state.ref_id = 1;
+      amp_state.amplify = 2.0f;
+      Color amp_linear = linear_center(amp_state);
+
+      Color expected{ref_linear[0] + 2.0f * (dis_linear[0] - ref_linear[0]),
+                     ref_linear[1] + 2.0f * (dis_linear[1] - ref_linear[1]),
+                     ref_linear[2] + 2.0f * (dis_linear[2] - ref_linear[2])};
+      Check(Close(amp_linear, expected, 0.01f), "Fill amplify = ref + gain*(test-ref) in display linear: got " +
+                                                    ColorString(amp_linear) + " expected " + ColorString(expected));
+      Check(amp_linear[0] > dis_linear[0] && dis_linear[0] > ref_linear[0],
+            "linear amplify of a brighter test raises the value above the test");
+
+      renderer.Render(target.frame, amp_state);
       std::vector<float> pixels = DownloadTarget(gpu, target);
       Color center = At(pixels, target.width, target.width / 2, target.height / 2);
-      Check(Close(center, Color{0.6f, 0.6f, 0.6f}, 0.03f),
-            "Fill: difference amplification gives ref+(dis-ref)*amp, got " + ColorString(center));
+      Check(!Close(center, Color{0.6f, 0.6f, 0.6f}, 0.02f),
+            "the gamma-domain amplification result is not produced, got " + ColorString(center));
       Check(DestroyTarget(gpu, target), "amplify target texture destroyed");
     }
 
@@ -799,6 +885,14 @@ int main() {
       pq_source->color_trc = AVCOL_TRC_SMPTE2084;
 
       EYEQ::FrameRenderer renderer(context, fill_config);
+      // Give the mapping target the PQ source's own nominal peak so this anchor
+      // isolates the mapping+encode round trip with no tone-map compression.
+      EYEQ::MappingTarget mapping_target;
+      mapping_target.primaries = PL_COLOR_PRIM_BT_2020;
+      mapping_target.peak_nits = 10000.0f;
+      mapping_target.black_nits = 0.0f;
+      mapping_target.sdr_white_nits = 203.0f;
+      renderer.SetMappingTarget(mapping_target, EYEQ::WorkPrecision::F32);
       std::map<int, std::shared_ptr<AVFrame>> frames;
       frames[0] = pq_source;
       renderer.SetMainSource(0);
@@ -941,6 +1035,223 @@ int main() {
       }
       Check(DestroyTarget(gpu, target), "OSD target destroyed");
     }
+    // ------------------------------- SDR/HDR mixed comparison
+    {
+      // One SDR and one HDR source are mapped to the same display target and
+      // composed. The SDR half must be identical to its SDR-only mapping (no
+      // cross-contamination), and the HDR half must be finite.
+      auto sdr = MakeFrame(owner.stream, 32, 16, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
+      const float pq_100 = PqCodeForNits(100.0f);
+      auto hdr = MakeFrame(owner.stream, 32, 16, [&](int, int) { return Color{pq_100, pq_100, pq_100}; });
+      hdr->color_primaries = AVCOL_PRI_BT2020;
+      hdr->color_trc = AVCOL_TRC_SMPTE2084;
+
+      EYEQ::FrameRenderer::Config config = fill_config;
+      config.mode = EYEQ::DisplayMode::Slide;
+      EYEQ::FrameRenderer renderer(context, config);
+      std::map<int, std::shared_ptr<AVFrame>> frames;
+      frames[0] = sdr;
+      frames[1] = hdr;
+      renderer.FeedFrames(frames);
+
+      auto target = CreateTarget(gpu, 96, 48, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+      auto mixed = MakeBaseState({0, 1}, 0);
+      mixed.scale = 3.0f;
+      renderer.Render(target.frame, mixed);
+      int mw = 0, mh = 0;
+      std::vector<float> mixed_linear = DownloadLinearResult(gpu, renderer, mw, mh);
+      Color sdr_half = At(mixed_linear, mw, mw / 4, mh / 2);
+      Color hdr_half = At(mixed_linear, mw, mw * 3 / 4, mh / 2);
+
+      // SDR-only mapping through the same renderer and target.
+      EYEQ::FrameRenderer sdr_only(context, config);
+      std::map<int, std::shared_ptr<AVFrame>> sdr_frames;
+      sdr_frames[0] = sdr;
+      sdr_only.FeedFrames(sdr_frames);
+      auto sdr_only_state = MakeBaseState({0}, 0);
+      sdr_only_state.scale = 3.0f;
+      sdr_only_state.fill.id = 0;
+      sdr_only.Render(target.frame, sdr_only_state);
+      int sw = 0, sh = 0;
+      std::vector<float> sdr_linear = DownloadLinearResult(gpu, sdr_only, sw, sh);
+      // Sample away from the centre so the comparison split line is not read.
+      Color sdr_reference = At(sdr_linear, sw, sw / 4, sh / 2);
+
+      Check(Close(sdr_half, sdr_reference, 0.01f), "the SDR half of an SDR/HDR mix equals its SDR-only mapping: got " +
+                                                       ColorString(sdr_half) + " expected " +
+                                                       ColorString(sdr_reference));
+      Check(std::isfinite(hdr_half[0]) && std::isfinite(hdr_half[1]) && std::isfinite(hdr_half[2]),
+            "the HDR half of the mix maps to a finite display-linear value");
+      Check(DestroyTarget(gpu, target), "SDR/HDR mix target destroyed");
+    }
+
+    // ------------------------------- display-linear precision pair (16F/32F)
+    {
+      // The same scene is rendered with the same mapping target but a different
+      // work precision. The 32F reference is the correctness baseline; the 16F
+      // candidate must stay within an explicit linear error bound.
+      auto source = MakeFrame(owner.stream, 64, 48, [](int x, int) {
+        const float base = static_cast<float>(x) / 63.0f;
+        return Color{base * 0.02f, base * 0.5f, 2.0f + (x == 32 ? 1e-4f : 0.0f)};
+      });
+      auto target = CreateTarget(gpu, 128, 96, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
+      auto state = MakeBaseState({0}, 0);
+      state.scale = 2.0f;
+
+      EYEQ::MappingTarget mt;
+      mt.primaries = PL_COLOR_PRIM_BT_709;
+      mt.peak_nits = 1000.0f;
+      mt.black_nits = 0.0f;
+      mt.sdr_white_nits = 203.0f;
+
+      auto render_at = [&](EYEQ::WorkPrecision precision) {
+        EYEQ::FrameRenderer renderer(context, fill_config);
+        renderer.SetMappingTarget(mt, precision);
+        std::map<int, std::shared_ptr<AVFrame>> frames;
+        frames[0] = source;
+        renderer.FeedFrames(frames);
+        renderer.Render(target.frame, state);
+        int w = 0, h = 0;
+        return DownloadLinearResult(gpu, renderer, w, h);
+      };
+      std::vector<float> ref32 = render_at(EYEQ::WorkPrecision::F32);
+      std::vector<float> cand16 = render_at(EYEQ::WorkPrecision::F16);
+      float max_err = 0.0f;
+      for (std::size_t i = 0; i < ref32.size(); ++i) {
+        max_err = std::max(max_err, std::fabs(ref32[i] - cand16[i]));
+      }
+      std::fprintf(stdout, "  linear work 32F vs 16F max |diff| = %s\n", Fmt(max_err).c_str());
+      Check(max_err <= 0.01f, "16F work texture stays within 1e-2 of the 32F reference (max=" + Fmt(max_err) + ")");
+      bool finite = true;
+      for (float value : ref32) {
+        if (!std::isfinite(value)) {
+          finite = false;
+          break;
+        }
+      }
+      Check(finite, "the 32F linear reference is finite");
+
+      // Performance data, reported separately from correctness. This is the
+      // host-side wall clock of the Render() submit path (dispatch + submit),
+      // NOT GPU execution time: no GPU timer is used, so queue/execute time is
+      // not separated here. Memory is the one target-sized RGBA work texture.
+      auto host_submit_ms = [&](EYEQ::WorkPrecision precision, int iterations) {
+        EYEQ::FrameRenderer renderer(context, fill_config);
+        renderer.SetMappingTarget(mt, precision);
+        std::map<int, std::shared_ptr<AVFrame>> frames;
+        frames[0] = source;
+        renderer.FeedFrames(frames);
+        renderer.Render(target.frame, state);
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < iterations; ++i) {
+          renderer.Render(target.frame, state);
+        }
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+        return static_cast<double>(elapsed) / iterations / 1000.0;
+      };
+      const double submit_ms_16 = host_submit_ms(EYEQ::WorkPrecision::F16, 20);
+      const double submit_ms_32 = host_submit_ms(EYEQ::WorkPrecision::F32, 20);
+      const std::size_t texels = static_cast<std::size_t>(target.width) * target.height;
+      std::fprintf(stdout, "  host Render() submit ms/iter: 16F=%.3f 32F=%.3f; work tex bytes: 16F=%zu 32F=%zu\n",
+                   submit_ms_16, submit_ms_32, texels * 8, texels * 16);
+
+      Check(DestroyTarget(gpu, target), "precision-pair target destroyed");
+    }
+
+    // --------------------------- public result excludes the text OSD
+    {
+      if (!EYEQ::OsdManager::FontAvailable()) {
+        Skip("public-result OSD exclusion: no usable system font");
+      } else {
+        EYEQ::FrameRenderer::Config config = fill_config;
+        config.enable_osd = true;
+        EYEQ::FrameRenderer renderer(context, config);
+        auto source = MakeFrame(owner.stream, 64, 48, [](int, int) { return Color{0.3f, 0.4f, 0.5f}; });
+        std::map<int, std::shared_ptr<AVFrame>> frames;
+        frames[0] = source;
+        renderer.FeedFrames(frames);
+        auto target = CreateTarget(gpu, 128, 96, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
+        auto state = MakeBaseState({0}, 0);
+        EYEQ::OsdInfo info;
+        info.filename = "clip.mkv";
+        info.video_id = 0;
+        info.pict_type = 'I';
+        info.current_time_s = 1.0f;
+        info.frame_serial = 10;
+        info.total_frames = 100;
+        state.osd_infos[0] = info;
+        state.total_duration_s = 10.0f;
+
+        int off_w = 0, off_h = 0;
+        state.show_osd = false;
+        renderer.Render(target.frame, state);
+        std::vector<float> linear_off = DownloadLinearResult(gpu, renderer, off_w, off_h);
+        std::vector<float> target_off = DownloadTarget(gpu, target);
+
+        int on_w = 0, on_h = 0;
+        state.show_osd = true;
+        renderer.Render(target.frame, state);
+        std::vector<float> linear_on = DownloadLinearResult(gpu, renderer, on_w, on_h);
+        std::vector<float> target_on = DownloadTarget(gpu, target);
+
+        Check(off_w == on_w && off_h == on_h && AllClose(linear_off, linear_on, 0.0f),
+              "the display-linear public result is identical with and without the text OSD");
+        Check(!AllClose(target_off, target_on, 1e-5f), "the desktop target does change when the text OSD is shown");
+        Check(DestroyTarget(gpu, target), "OSD-exclusion target destroyed");
+      }
+    }
+
+    // -------------------- linear amplify: 100/110 nits x10 -> 200 nits
+    {
+      const float pq_100 = PqCodeForNits(100.0f);
+      const float pq_110 = PqCodeForNits(110.0f);
+      auto dis = MakeFrame(owner.stream, 32, 32, [&](int, int) { return Color{pq_110, pq_110, pq_110}; });
+      auto ref = MakeFrame(owner.stream, 32, 32, [&](int, int) { return Color{pq_100, pq_100, pq_100}; });
+      dis->color_primaries = AVCOL_PRI_BT2020;
+      dis->color_trc = AVCOL_TRC_SMPTE2084;
+      ref->color_primaries = AVCOL_PRI_BT2020;
+      ref->color_trc = AVCOL_TRC_SMPTE2084;
+
+      EYEQ::FrameRenderer renderer(context, fill_config);
+      EYEQ::MappingTarget mt;
+      mt.primaries = PL_COLOR_PRIM_BT_2020;
+      mt.peak_nits = 10000.0f;
+      mt.black_nits = 0.0f;
+      mt.sdr_white_nits = 203.0f;
+      renderer.SetMappingTarget(mt, EYEQ::WorkPrecision::F32);
+      std::map<int, std::shared_ptr<AVFrame>> frames;
+      frames[0] = dis;
+      frames[1] = ref;
+      renderer.FeedFrames(frames);
+
+      auto target = CreateTarget(gpu, 64, 64, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+      auto state = MakeBaseState({0, 1}, 0);
+      state.scale = 2.0f;
+      state.ref_id = 1;
+      state.amplify = 10.0f;
+      renderer.Render(target.frame, state);
+      int w = 0, h = 0;
+      std::vector<float> linear = DownloadLinearResult(gpu, renderer, w, h);
+      const Color center = At(linear, w, w / 2, h / 2);
+      const float expected_norm = 200.0f / 203.0f;
+      std::fprintf(stdout, "  100/110 nits x10 linear center = %s (expected norm %s)\n", ColorString(center).c_str(),
+                   Fmt(expected_norm).c_str());
+      Check(Close(center, Color{expected_norm, expected_norm, expected_norm}, 0.01f),
+            "100/110 nits x10 amplifies to the 200-nit display-linear value");
+      Check(renderer.GetDisPrecision() == EYEQ::WorkPrecision::F32 &&
+                renderer.GetRefPrecision() == EYEQ::WorkPrecision::F32,
+            "the amplify source/reference work textures are 32F before the subtraction");
+
+      // The old PQ-domain amplification would give ~253.5 nits; the linear path
+      // differs by design (V2.1 D1) and the two must not be conflated.
+      const float pq_domain_nits = EYEQ::PqDecodeNits(pq_100 + 10.0f * (pq_110 - pq_100));
+      std::fprintf(stdout, "  PQ-domain equivalent = %s nits\n", Fmt(pq_domain_nits).c_str());
+      Check(std::fabs(pq_domain_nits - 253.5f) < 3.0f, "the old PQ-domain amplification gives ~253.5 nits");
+      Check(std::fabs(200.0f - pq_domain_nits) > 40.0f, "linear and PQ-domain amplification differ as expected");
+      Check(DestroyTarget(gpu, target), "100/110-nit target destroyed");
+    }
+
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FATAL: %s\n", e.what());
     ++g_failures;

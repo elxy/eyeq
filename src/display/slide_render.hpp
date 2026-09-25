@@ -10,8 +10,8 @@ public:
               ICCQueryFunc icc_query = nullptr);
   ~SlideRender() override;
 
-  void Render(struct pl_frame &swap_frame, const std::map<int, struct pl_frame *> &frames,
-              const DisplayState &state) override;
+  void RenderLinear(int width, int height, const std::map<int, struct pl_frame *> &frames,
+                    const DisplayState &state) override;
 
 protected:
   pl_dispatch split_dp_;
@@ -21,9 +21,16 @@ protected:
   struct pl_frame right_frame_;
   pl_tex right_tex_[PL_MAX_PLANES];
 
+  // Final linear result carrying the comparison split line (kept separate from
+  // the split composite so the line can be drawn after amplification without a
+  // read/write feedback loop).
+  struct pl_frame line_frame_;
+  pl_tex line_tex_[PL_MAX_PLANES];
+
   void SplitFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *left,
-                  const struct pl_frame *right, const float split_position);
-  void PlotOSD(struct pl_frame &swap_frame, const struct pl_frame *src, const float split_position);
+                  const struct pl_frame *right, float split_position, WorkPrecision precision);
+  void DrawSplitLine(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *src, float split_position,
+                     WorkPrecision precision);
 };
 
 }; // namespace EYEQ

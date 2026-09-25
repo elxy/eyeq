@@ -12,6 +12,9 @@
 
 using namespace EYEQ;
 
+// Linear-light brightness of the comparison split line (PL_HDR_NORM units).
+static constexpr float kComparisonLineLightNorm = 0.5f;
+
 SlideRender::SlideRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density,
                          ICCQueryFunc icc_query)
     : FillRender(log, gpu, render_params, pixel_density, std::move(icc_query)) {
@@ -21,6 +24,7 @@ SlideRender::SlideRender(pl_log log, pl_gpu gpu, struct pl_render_params *render
   for (int i = 0; i < PL_MAX_PLANES; i++) {
     left_tex_[i] = nullptr;
     right_tex_[i] = nullptr;
+    line_tex_[i] = nullptr;
   }
 }
 
@@ -32,6 +36,9 @@ SlideRender::~SlideRender() {
     if (right_tex_[i]) {
       pl_tex_destroy(gpu_, &(right_tex_[i]));
     }
+    if (line_tex_[i]) {
+      pl_tex_destroy(gpu_, &(line_tex_[i]));
+    }
   }
 
   if (split_dp_) {
@@ -39,61 +46,44 @@ SlideRender::~SlideRender() {
   }
 }
 
-void SlideRender::Render(struct pl_frame &swap_frame, const std::map<int, struct pl_frame *> &frames,
-                         const DisplayState &state) {
+void SlideRender::RenderLinear(int width, int height, const std::map<int, struct pl_frame *> &frames,
+                               const DisplayState &state) {
+  const bool amplify = !state.show_ref && state.amplify.has_value() && state.ref_id.has_value();
+  const WorkPrecision precision = amplify ? WorkPrecision::F32 : default_precision_;
+
   if (state.show_ref) {
-    struct pl_frame *ref = frames.at(state.ref_id.value());
-    RenderFrame(render_frame_, render_tex_, &swap_frame, ref, state, state.ref_id.value());
-  } else {
-    // First render scaled frames in swap_frame's format
-    struct pl_frame *left = frames.at(state.slide.left_id);
-    struct pl_frame *right = frames.at(state.slide.right_id);
-    RenderFrame(left_frame_, left_tex_, &swap_frame, left, state, state.slide.left_id);
-    RenderFrame(right_frame_, right_tex_, &swap_frame, right, state, state.slide.right_id);
-
-    // Then split left and right frames based on the divider position
-    SplitFrame(render_frame_, render_tex_, &left_frame_, &right_frame_, state.slide.split_pos);
-
-    if (state.amplify.has_value() && state.ref_id.has_value()) {
-      struct pl_frame *ref = frames.at(state.ref_id.value());
-      RenderFrame(ref_frame_, ref_tex_, &swap_frame, ref, state, state.ref_id.value());
-
-      AmplifyFrame(amplify_frame_, amplify_tex_, &render_frame_, &ref_frame_, state);
-      PlotOSD(swap_frame, &amplify_frame_, state.slide.split_pos);
-      return;
-    }
+    const struct pl_frame *ref = frames.at(state.ref_id.value());
+    RenderFrame(render_frame_, render_tex_, width, height, ref, state, state.ref_id.value(), precision);
+    SetResult(render_frame_, render_tex_[0], precision);
+    return;
   }
 
-  // Finally draw slider, text, and info overlays
-  PlotOSD(swap_frame, &render_frame_, state.slide.split_pos);
+  dis_precision_ = precision;
+  ref_precision_ = precision;
+  const struct pl_frame *left = frames.at(state.slide.left_id);
+  const struct pl_frame *right = frames.at(state.slide.right_id);
+  RenderFrame(left_frame_, left_tex_, width, height, left, state, state.slide.left_id, precision);
+  RenderFrame(right_frame_, right_tex_, width, height, right, state, state.slide.right_id, precision);
+  SplitFrame(render_frame_, render_tex_, &left_frame_, &right_frame_, state.slide.split_pos, precision);
+
+  if (amplify) {
+    const struct pl_frame *ref = frames.at(state.ref_id.value());
+    ref_precision_ = WorkPrecision::F32;
+    RenderFrame(ref_frame_, ref_tex_, width, height, ref, state, state.ref_id.value(), WorkPrecision::F32);
+    AmplifyFrame(amplify_frame_, amplify_tex_, &render_frame_, &ref_frame_, state, WorkPrecision::F32);
+    // The split line belongs to the comparison image, not to the amplified
+    // difference; draw it after amplification so it cannot be amplified itself.
+    DrawSplitLine(line_frame_, line_tex_, &amplify_frame_, state.slide.split_pos, WorkPrecision::F32);
+    SetResult(line_frame_, line_tex_[0], WorkPrecision::F32);
+  } else {
+    DrawSplitLine(line_frame_, line_tex_, &render_frame_, state.slide.split_pos, precision);
+    SetResult(line_frame_, line_tex_[0], precision);
+  }
 }
 
 void SlideRender::SplitFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *left,
-                             const struct pl_frame *right, float split_pos) {
-  struct pl_tex_params tex_params = {
-      .w = left->planes[0].texture->params.w,
-      .h = left->planes[0].texture->params.h,
-      .format = left->planes[0].texture->params.format,
-      .sampleable = true,
-      .renderable = true,
-  };
-  if (!pl_tex_recreate(gpu_, &(tex[0]), &tex_params)) {
-    throw std::runtime_error("Failed to create texture");
-  }
-
-  dst = {
-      .num_planes = 1,
-      .planes =
-          {
-              {
-                  .texture = tex[0],
-                  .components = 4,
-                  .component_mapping = {0, 1, 2, 3},
-              },
-          },
-      .repr = left->repr,
-      .color = left->color,
-  };
+                             const struct pl_frame *right, float split_position, WorkPrecision precision) {
+  PrepareLinearFrame(dst, tex, left->planes[0].texture->params.w, left->planes[0].texture->params.h, precision);
 
   pl_shader shader = pl_dispatch_begin(split_dp_);
   struct pl_shader_desc desc[] = {
@@ -125,19 +115,16 @@ void SlideRender::SplitFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], co
   struct pl_shader_var vars[] = {
       {
           .var = pl_var_float("split_pos"),
-          .data = &split_pos,
+          .data = &split_position,
       },
   };
   struct pl_custom_shader params = {
       .body = "vec2 tex_size = vec2(textureSize(left_tex, 0));\n"
               "vec2 pos = gl_FragCoord.xy / tex_size;\n"
               "\n"
-              "// Output color\n"
               "if (pos.x <= split_pos) {\n"
-              "    // Left side shows video A\n"
               "    color = texture(left_tex, pos);\n"
               "} else {\n"
-              "    // Right side shows video B\n"
               "    color = texture(right_tex, pos);\n"
               "}\n",
       .output = PL_SHADER_SIG_COLOR,
@@ -154,17 +141,17 @@ void SlideRender::SplitFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], co
   }
 }
 
-void SlideRender::PlotOSD(struct pl_frame &swap_frame, const struct pl_frame *src, const float split_pos) {
-  pl_shader shader = pl_dispatch_begin(osd_dp_);
+void SlideRender::DrawSplitLine(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *src,
+                                float split_position, WorkPrecision precision) {
+  PrepareLinearFrame(dst, tex, src->planes[0].texture->params.w, src->planes[0].texture->params.h, precision);
 
-  bool has_osd = (osd_overlay_ != nullptr);
-
-  struct pl_shader_desc desc[2];
-  int num_desc = 1;
-  desc[0] = {
+  float line_width = kLineWidth * pixel_density_;
+  float light = kComparisonLineLightNorm;
+  pl_shader shader = pl_dispatch_begin(split_dp_);
+  struct pl_shader_desc desc = {
       .desc =
           {
-              .name = "tex",
+              .name = "src_tex",
               .type = PL_DESC_SAMPLED_TEX,
           },
       .binding =
@@ -173,76 +160,29 @@ void SlideRender::PlotOSD(struct pl_frame &swap_frame, const struct pl_frame *sr
               .sample_mode = PL_TEX_SAMPLE_NEAREST,
           },
   };
-
-  if (has_osd) {
-    desc[1] = {
-        .desc =
-            {
-                .name = "osd_tex",
-                .type = PL_DESC_SAMPLED_TEX,
-            },
-        .binding =
-            {
-                .object = osd_overlay_,
-                .sample_mode = PL_TEX_SAMPLE_NEAREST,
-            },
-    };
-    num_desc = 2;
-  }
-
-  float line_width = kLineWidth * pixel_density_;
-  float ref_white = reference_white(swap_frame.color.transfer);
-  float light = 0.8 * ref_white;
   struct pl_shader_var vars[] = {
-      {
-          .var = pl_var_float("split_pos"),
-          .data = &split_pos,
-      },
-      {
-          .var = pl_var_float("line_width"),
-          .data = &line_width,
-      },
-      {
-          .var = pl_var_float("light"),
-          .data = &light,
-      },
-      {
-          .var = pl_var_float("ref_white"),
-          .data = &ref_white,
-      },
+      {.var = pl_var_float("split_pos"), .data = &split_position},
+      {.var = pl_var_float("line_width"), .data = &line_width},
+      {.var = pl_var_float("light"), .data = &light},
   };
-
-  const char *body_no_osd = "vec2 tex_size = vec2(textureSize(tex, 0));\n"
-                            "vec2 pos = gl_FragCoord.xy / tex_size;\n"
-                            "color = texture(tex, pos);\n"
-                            "float line_width_x = line_width / tex_size.x;\n"
-                            "if (abs(pos.x - split_pos) < (line_width_x / 2)) {\n"
-                            "    color = vec4(light, light, light, 1.0);\n"
-                            "}\n";
-
-  const char *body_with_osd = "vec2 tex_size = vec2(textureSize(tex, 0));\n"
-                              "vec2 pos = gl_FragCoord.xy / tex_size;\n"
-                              "color = texture(tex, pos);\n"
-                              "float line_width_x = line_width / tex_size.x;\n"
-                              "if (abs(pos.x - split_pos) < (line_width_x / 2)) {\n"
-                              "    color = vec4(light, light, light, 1.0);\n"
-                              "}\n"
-                              "vec4 osd_color = texture(osd_tex, pos);\n"
-                              "osd_color.rgb *= ref_white;\n"
-                              "color.rgb = mix(color.rgb, osd_color.rgb, osd_color.a);\n";
-
   struct pl_custom_shader params = {
-      .body = has_osd ? body_with_osd : body_no_osd,
+      .body = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
+              "vec2 pos = gl_FragCoord.xy / tex_size;\n"
+              "color = texture(src_tex, pos);\n"
+              "float line_width_x = line_width / tex_size.x;\n"
+              "if (abs(pos.x - split_pos) < (line_width_x / 2)) {\n"
+              "    color = vec4(light, light, light, 1.0);\n"
+              "}\n",
       .output = PL_SHADER_SIG_COLOR,
-      .descriptors = desc,
-      .num_descriptors = num_desc,
+      .descriptors = &desc,
+      .num_descriptors = 1,
       .variables = vars,
-      .num_variables = 4,
+      .num_variables = 3,
   };
   pl_shader_custom(shader, &params);
 
-  struct pl_dispatch_params dp_params = {.shader = &shader, .target = swap_frame.planes[0].texture};
-  if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
+  struct pl_dispatch_params dp_params = {.shader = &shader, .target = dst.planes[0].texture};
+  if (!pl_dispatch_finish(split_dp_, &dp_params)) {
     throw std::runtime_error("pl_dispatch_finish failed.");
   }
 }

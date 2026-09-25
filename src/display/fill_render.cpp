@@ -23,6 +23,14 @@ FillRender::FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_p
   amp_dp_ = pl_dispatch_create(log, gpu_);
   osd_dp_ = pl_dispatch_create(log, gpu_);
 
+  present_color_map_ = pl_color_map_default_params;
+  present_color_map_.tone_mapping_function = &pl_tone_map_clip;
+  present_color_map_.gamut_mapping = &pl_gamut_map_clip;
+  present_params_ = *render_params_;
+  present_params_.color_map_params = &present_color_map_;
+  present_params_.dither_params = nullptr;
+  present_params_.peak_detect_params = nullptr;
+
   for (int i = 0; i < PL_MAX_PLANES; i++) {
     render_tex_[i] = nullptr;
     ref_tex_[i] = nullptr;
@@ -43,6 +51,10 @@ FillRender::~FillRender() {
     }
   }
 
+  if (osd_scratch_) {
+    pl_tex_destroy(gpu_, &osd_scratch_);
+  }
+
   if (amp_dp_) {
     pl_dispatch_destroy(&amp_dp_);
   }
@@ -55,122 +67,142 @@ FillRender::~FillRender() {
   }
 }
 
+void FillRender::SetMappingTarget(const MappingTarget &target, WorkPrecision precision) {
+  ValidateMappingTarget(target);
+  mapping_target_ = target;
+  default_precision_ = precision;
+  mapping_target_set_ = true;
+}
+
 void FillRender::UpdateMainFrame(const struct pl_frame *main) {
   main_w_ = main->planes[0].texture->params.w;
   main_h_ = main->planes[0].texture->params.h;
 }
 
-void FillRender::Render(struct pl_frame &swap_frame, const std::map<int, struct pl_frame *> &frames,
-                        const DisplayState &state) {
-  struct pl_frame *frame;
+const struct pl_frame &FillRender::LinearResult() const {
+  if (!result_frame_) {
+    throw std::logic_error("FillRender::LinearResult called before RenderLinear");
+  }
+  return *result_frame_;
+}
 
-  if (state.show_ref) {
-    frame = frames.at(state.ref_id.value());
-  } else {
-    frame = frames.at(state.fill.id);
+pl_tex FillRender::LinearResultTexture() const {
+  if (!result_texture_) {
+    throw std::logic_error("FillRender::LinearResultTexture called before RenderLinear");
+  }
+  return result_texture_;
+}
+
+void FillRender::SetResult(struct pl_frame &frame, pl_tex texture, WorkPrecision precision) {
+  result_frame_ = &frame;
+  result_texture_ = texture;
+  result_precision_ = precision;
+}
+
+void FillRender::PrepareLinearFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], int width, int height,
+                                    WorkPrecision precision) {
+  if (!mapping_target_set_) {
+    throw std::logic_error("FillRender: mapping target not set before rendering");
+  }
+  pl_fmt format = FindLinearWorkFormat(gpu_, precision);
+  struct pl_tex_params tex_params = {
+      .w = width,
+      .h = height,
+      .format = format,
+      .sampleable = true,
+      .renderable = true,
+      .blit_dst = true,
+      // Host-readable so tests/diagnostics can measure the display-linear
+      // error budget (16F vs 32F) without a separate readback path.
+      .host_readable = true,
+  };
+  if (!pl_tex_recreate(gpu_, &(tex[0]), &tex_params)) {
+    throw std::runtime_error("Failed to create display-linear work texture");
   }
 
-  int current_id = state.show_ref ? state.ref_id.value() : state.fill.id;
+  dst = {};
+  dst.num_planes = 1;
+  dst.planes[0].texture = tex[0];
+  dst.planes[0].components = 4;
+  dst.planes[0].component_mapping[0] = 0;
+  dst.planes[0].component_mapping[1] = 1;
+  dst.planes[0].component_mapping[2] = 2;
+  dst.planes[0].component_mapping[3] = 3;
+  // The work texture is always full-range RGB; its transfer is the display
+  // mapping target (LINEAR), independent of the final swapchain/encode format.
+  dst.repr = pl_color_repr_rgb;
+  dst.repr.sys = PL_COLOR_SYSTEM_RGB;
+  dst.repr.levels = PL_COLOR_LEVELS_FULL;
+  dst.color = mapping_target_.DisplayLinearColorSpace();
+}
 
-  // First render the scaled frame in swap_frame's format
-  RenderFrame(render_frame_, render_tex_, &swap_frame, frame, state, current_id);
+void FillRender::RenderLinear(int width, int height, const std::map<int, struct pl_frame *> &frames,
+                              const DisplayState &state) {
+  const bool amplify = !state.show_ref && state.amplify.has_value() && state.ref_id.has_value();
+  const WorkPrecision precision = amplify ? WorkPrecision::F32 : default_precision_;
 
-  if (!state.show_ref && state.amplify.has_value() && state.ref_id.has_value()) {
-    // Render reference frame
-    frame = frames.at(state.ref_id.value());
-    RenderFrame(ref_frame_, ref_tex_, &swap_frame, frame, state, state.ref_id.value());
+  const int current_id = state.show_ref ? state.ref_id.value() : state.fill.id;
+  const struct pl_frame *frame = frames.at(current_id);
 
-    AmplifyFrame(amplify_frame_, amplify_tex_, &render_frame_, &ref_frame_, state);
+  // Map the source to the display-linear work texture.
+  dis_precision_ = precision;
+  ref_precision_ = precision;
+  RenderFrame(render_frame_, render_tex_, width, height, frame, state, current_id, precision);
 
-    // Finally draw text and info overlays
-    PlotOSD(swap_frame, &amplify_frame_);
+  if (amplify) {
+    const struct pl_frame *ref = frames.at(state.ref_id.value());
+    // The reference and the amplification result are F32 as well: the whole
+    // subtraction path must stay high precision, not just the last texture.
+    ref_precision_ = WorkPrecision::F32;
+    RenderFrame(ref_frame_, ref_tex_, width, height, ref, state, state.ref_id.value(), WorkPrecision::F32);
+    AmplifyFrame(amplify_frame_, amplify_tex_, &render_frame_, &ref_frame_, state, WorkPrecision::F32);
+    SetResult(amplify_frame_, amplify_tex_[0], WorkPrecision::F32);
   } else {
-    // Finally draw text and info overlays
-    PlotOSD(swap_frame, &render_frame_);
+    SetResult(render_frame_, render_tex_[0], precision);
   }
 }
 
-void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *swap_frame,
-                             const struct pl_frame *src, const DisplayState &state, int video_id) {
+void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], int width, int height,
+                             const struct pl_frame *src, const DisplayState &state, int video_id,
+                             WorkPrecision precision) {
   pl_rect2df crop;
   crop.x0 = static_cast<float>(state.offset_x);
   crop.y0 = static_cast<float>(state.offset_y);
   crop.x1 = static_cast<float>(state.offset_x + main_w_ * state.scale);
   crop.y1 = static_cast<float>(state.offset_y + main_h_ * state.scale);
-  RenderFrame(dst, tex, swap_frame, src, crop, video_id);
+  RenderFrame(dst, tex, width, height, src, crop, video_id, precision);
 }
 
-void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *swap_frame,
-                             const struct pl_frame *src, const pl_rect2df &dst_crop, int video_id,
-                             const struct pl_render_params *params) {
-  // Render the original frame through the normal pipeline
-  struct pl_tex_params tex_params = {
-      .w = swap_frame->planes[0].texture->params.w,
-      .h = swap_frame->planes[0].texture->params.h,
-      .format = swap_frame->planes[0].texture->params.format,
-      .sampleable = true,
-      .renderable = true,
-      .blit_dst = true,
-  };
-  if (!pl_tex_recreate(gpu_, &(tex[0]), &tex_params)) {
-    throw std::runtime_error("Failed to create texture");
-  }
-
-  dst = {
-      .num_planes = 1,
-      .planes =
-          {
-              {
-                  .texture = tex[0],
-                  .components = 4,
-                  .component_mapping = {0, 1, 2, 3},
-              },
-          },
-      // pl_render_image() maps src color space to dst color space
-      .repr = swap_frame->repr,
-      .color = swap_frame->color,
-  };
+void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], int width, int height,
+                             const struct pl_frame *src, const struct pl_rect2df &dst_crop, int video_id,
+                             WorkPrecision precision, const struct pl_render_params *params) {
+  PrepareLinearFrame(dst, tex, width, height, precision);
   dst.crop = dst_crop;
   Logger->trace("dst.crop is ({}, {}, {}, {})", dst_crop.x0, dst_crop.y0, dst_crop.x1, dst_crop.y1);
 
-  // Apply ICC profile to target frame
+  // Per-video ICC is intentionally kept on the source mapping in V2-1: the
+  // application ICC is a desktop presentation concern, and moving it after the
+  // shared comparison would lose the per-video profile selection (V2.1 4.3).
+  // In monitoring mode every application ICC is disabled (V2-2), which is what
+  // makes the public result ICC-free.
   if (icc_query_) {
     pl_icc_object icc = icc_query_(video_id);
-    if (icc)
+    if (icc) {
       dst.icc = icc;
+    }
   }
 
+  // pl_render_image() performs the source interpretation and the HDR/gamut
+  // mapping to the display-linear target. This is the "mapping completed"
+  // point of the pipeline.
   if (!pl_render_image(renderer_, src, &dst, params ? params : render_params_)) {
     throw std::runtime_error("pl_render_image failed.");
   }
 }
 
 void FillRender::AmplifyFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *dis,
-                              const struct pl_frame *ref, const DisplayState &state) {
-  struct pl_tex_params tex_params = {
-      .w = dis->planes[0].texture->params.w,
-      .h = dis->planes[0].texture->params.h,
-      .format = dis->planes[0].texture->params.format,
-      .sampleable = true,
-      .renderable = true,
-  };
-  if (!pl_tex_recreate(gpu_, &(tex[0]), &tex_params)) {
-    throw std::runtime_error("Failed to create texture");
-  }
-
-  dst = {
-      .num_planes = 1,
-      .planes =
-          {
-              {
-                  .texture = tex[0],
-                  .components = 4,
-                  .component_mapping = {0, 1, 2, 3},
-              },
-          },
-      .repr = dis->repr,
-      .color = dis->color,
-  };
+                              const struct pl_frame *ref, const DisplayState &state, WorkPrecision precision) {
+  PrepareLinearFrame(dst, tex, dis->planes[0].texture->params.w, dis->planes[0].texture->params.h, precision);
 
   pl_shader shader = pl_dispatch_begin(amp_dp_);
   struct pl_shader_desc desc[] = {
@@ -202,26 +234,35 @@ void FillRender::AmplifyFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], c
   // Pass a real float: pl_var_float reads its data as float, so pointing it at
   // a std::optional<float> would depend on that type's internal layout.
   float amplify = state.amplify.value();
+  // Hard clip bound of the mapped display range, in PL_HDR_NORM units. It is
+  // computed from the physical target peak, not fixed at 1.0.
+  float peak_norm = mapping_target_.PeakNorm();
   struct pl_shader_var vars[] = {
       {
           .var = pl_var_float("amplify"),
           .data = &amplify,
       },
+      {
+          .var = pl_var_float("peak_norm"),
+          .data = &peak_norm,
+      },
   };
+  // reference + gain * (test - reference) in the display-linear domain, then a
+  // per-channel hard clip to the target range. There is deliberately no tone
+  // mapping / gamut compression of the difference.
   struct pl_custom_shader params = {
       .body = "vec2 tex_size = vec2(textureSize(dis_tex, 0));\n"
               "vec2 pos = gl_FragCoord.xy / tex_size;\n"
               "\n"
-              "vec4 dis_color = texture(dis_tex, pos);\n"
-              "vec4 ref_color = texture(ref_tex, pos);\n"
-              "color = ref_color + (dis_color - ref_color) * amplify;\n"
-              "color = clamp(color, 0.0, 1.0);\n"
-              "color.a = 1.0;\n",
+              "vec3 dis_color = texture(dis_tex, pos).rgb;\n"
+              "vec3 ref_color = texture(ref_tex, pos).rgb;\n"
+              "vec3 amplified = ref_color + (dis_color - ref_color) * amplify;\n"
+              "color = vec4(clamp(amplified, vec3(0.0), vec3(peak_norm)), 1.0);\n",
       .output = PL_SHADER_SIG_COLOR,
       .descriptors = desc,
       .num_descriptors = 2,
       .variables = vars,
-      .num_variables = 1,
+      .num_variables = 2,
   };
   pl_shader_custom(shader, &params);
 
@@ -231,43 +272,29 @@ void FillRender::AmplifyFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], c
   }
 }
 
-void FillRender::PlotOSD(struct pl_frame &swap_frame, const struct pl_frame *src) {
-  pl_shader shader = pl_dispatch_begin(osd_dp_);
-
-  bool has_osd = (osd_overlay_ != nullptr);
-
-  struct pl_shader_desc desc[2];
-  int num_desc = 1;
-  desc[0] = {
-      .desc =
-          {
-              .name = "src_tex",
-              .type = PL_DESC_SAMPLED_TEX,
-          },
-      .binding =
-          {
-              .object = src->planes[0].texture,
-              .sample_mode = PL_TEX_SAMPLE_NEAREST,
-          },
-  };
-
-  if (has_osd) {
-    desc[1] = {
-        .desc =
-            {
-                .name = "osd_tex",
-                .type = PL_DESC_SAMPLED_TEX,
-            },
-        .binding =
-            {
-                .object = osd_overlay_,
-                .sample_mode = PL_TEX_SAMPLE_NEAREST,
-            },
-    };
-    num_desc = 2;
+void FillRender::PlotOsdText(pl_tex target, enum pl_color_transfer target_trc) {
+  if (!osd_overlay_ || !target) {
+    return;
   }
 
-  float ref_white = reference_white(swap_frame.color.transfer);
+  // Blend the text overlay into a scratch texture, then copy the scratch to the
+  // target: the target is also the blend source, and sampling plus writing one
+  // texture in a single pass is a feedback hazard.
+  struct pl_tex_params scratch_params = {
+      .w = target->params.w,
+      .h = target->params.h,
+      .format = target->params.format,
+      .sampleable = true,
+      .renderable = true,
+  };
+  if (!pl_tex_recreate(gpu_, &osd_scratch_, &scratch_params)) {
+    throw std::runtime_error("Failed to create the OSD blend scratch texture");
+  }
+
+  // The text is blended in the *encoded* target domain (it is a desktop-only
+  // overlay drawn after the encode), so its white level uses the wire transfer
+  // reference white.
+  float ref_white = reference_white(target_trc);
   struct pl_shader_var vars[] = {
       {
           .var = pl_var_float("ref_white"),
@@ -275,29 +302,63 @@ void FillRender::PlotOSD(struct pl_frame &swap_frame, const struct pl_frame *src
       },
   };
 
-  const char *body_no_osd = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
-                            "vec2 pos = gl_FragCoord.xy / tex_size;\n"
-                            "color = texture(src_tex, pos);\n";
+  {
+    pl_shader shader = pl_dispatch_begin(osd_dp_);
+    struct pl_shader_desc desc[2];
+    desc[0] = {
+        .desc = {.name = "src_tex", .type = PL_DESC_SAMPLED_TEX},
+        .binding = {.object = target, .sample_mode = PL_TEX_SAMPLE_NEAREST},
+    };
+    desc[1] = {
+        .desc = {.name = "osd_tex", .type = PL_DESC_SAMPLED_TEX},
+        .binding = {.object = osd_overlay_, .sample_mode = PL_TEX_SAMPLE_NEAREST},
+    };
+    struct pl_custom_shader params = {
+        .body = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
+                "vec2 pos = gl_FragCoord.xy / tex_size;\n"
+                "color = texture(src_tex, pos);\n"
+                "vec4 osd_color = texture(osd_tex, pos);\n"
+                "osd_color.rgb *= ref_white;\n"
+                "color.rgb = mix(color.rgb, osd_color.rgb, osd_color.a);\n",
+        .output = PL_SHADER_SIG_COLOR,
+        .descriptors = desc,
+        .num_descriptors = 2,
+        .variables = vars,
+        .num_variables = 1,
+    };
+    pl_shader_custom(shader, &params);
+    struct pl_dispatch_params dp_params = {.shader = &shader, .target = osd_scratch_};
+    if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
+      throw std::runtime_error("pl_dispatch_finish failed (OSD text blend).");
+    }
+  }
 
-  const char *body_with_osd = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
-                              "vec2 pos = gl_FragCoord.xy / tex_size;\n"
-                              "color = texture(src_tex, pos);\n"
-                              "vec4 osd_color = texture(osd_tex, pos);\n"
-                              "osd_color.rgb *= ref_white;\n"
-                              "color.rgb = mix(color.rgb, osd_color.rgb, osd_color.a);\n";
+  {
+    pl_shader shader = pl_dispatch_begin(osd_dp_);
+    struct pl_shader_desc desc = {
+        .desc = {.name = "src_tex", .type = PL_DESC_SAMPLED_TEX},
+        .binding = {.object = osd_scratch_, .sample_mode = PL_TEX_SAMPLE_NEAREST},
+    };
+    struct pl_custom_shader params = {
+        .body = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
+                "vec2 pos = gl_FragCoord.xy / tex_size;\n"
+                "color = texture(src_tex, pos);\n",
+        .output = PL_SHADER_SIG_COLOR,
+        .descriptors = &desc,
+        .num_descriptors = 1,
+    };
+    pl_shader_custom(shader, &params);
+    struct pl_dispatch_params dp_params = {.shader = &shader, .target = target};
+    if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
+      throw std::runtime_error("pl_dispatch_finish failed (OSD text copy).");
+    }
+  }
+}
 
-  struct pl_custom_shader params = {
-      .body = has_osd ? body_with_osd : body_no_osd,
-      .output = PL_SHADER_SIG_COLOR,
-      .descriptors = desc,
-      .num_descriptors = num_desc,
-      .variables = vars,
-      .num_variables = 1,
-  };
-  pl_shader_custom(shader, &params);
-
-  struct pl_dispatch_params dp_params = {.shader = &shader, .target = swap_frame.planes[0].texture};
-  if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
-    throw std::runtime_error("pl_dispatch_finish failed.");
+void FillRender::PresentTo(struct pl_frame &target, const struct pl_frame *src) {
+  struct pl_frame dst = target;
+  dst.crop = {};
+  if (!pl_render_image(renderer_, src, &dst, &present_params_)) {
+    throw std::runtime_error("pl_render_image failed (present).");
   }
 }

@@ -12,46 +12,60 @@
 
 using namespace EYEQ;
 
+// Linear-light brightness of the comparison grid lines (PL_HDR_NORM units).
+static constexpr float kComparisonLineLightNorm = 0.5f;
+
 GridRender::GridRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density,
                        ICCQueryFunc icc_query)
     : FillRender(log, gpu, render_params, pixel_density, std::move(icc_query)) {
 
   grid_dp_ = pl_dispatch_create(log, gpu_);
+  for (int i = 0; i < PL_MAX_PLANES; i++) {
+    lines_tex_[i] = nullptr;
+  }
 }
 
 GridRender::~GridRender() {
+  for (int i = 0; i < PL_MAX_PLANES; i++) {
+    if (lines_tex_[i]) {
+      pl_tex_destroy(gpu_, &(lines_tex_[i]));
+    }
+  }
   if (grid_dp_) {
     pl_dispatch_destroy(&grid_dp_);
   }
 }
 
-void GridRender::Render(struct pl_frame &swap_frame, const std::map<int, struct pl_frame *> &frames,
-                        const DisplayState &state) {
-  RenderGrid(render_frame_, render_tex_, &swap_frame, frames, state);
+void GridRender::RenderLinear(int width, int height, const std::map<int, struct pl_frame *> &frames,
+                              const DisplayState &state) {
+  const bool amplify = !state.show_ref && state.amplify.has_value() && state.ref_id.has_value();
+  const WorkPrecision precision = amplify ? WorkPrecision::F32 : default_precision_;
 
-  if (!state.show_ref && state.amplify.has_value() && state.ref_id.has_value()) {
+  dis_precision_ = precision;
+  ref_precision_ = precision;
+  RenderGrid(render_frame_, render_tex_, width, height, frames, state, precision);
+
+  if (amplify) {
     DisplayState state_ref = state;
     state_ref.show_ref = true;
-    RenderGrid(ref_frame_, ref_tex_, &swap_frame, frames, state_ref);
-
-    AmplifyFrame(amplify_frame_, amplify_tex_, &render_frame_, &ref_frame_, state);
-    PlotOSD(swap_frame, &amplify_frame_, state_ref);
-    return;
+    ref_precision_ = WorkPrecision::F32;
+    RenderGrid(ref_frame_, ref_tex_, width, height, frames, state_ref, WorkPrecision::F32);
+    AmplifyFrame(amplify_frame_, amplify_tex_, &render_frame_, &ref_frame_, state, WorkPrecision::F32);
+    DrawGridLines(lines_frame_, lines_tex_, &amplify_frame_, state, WorkPrecision::F32);
+    SetResult(lines_frame_, lines_tex_[0], WorkPrecision::F32);
+  } else {
+    DrawGridLines(lines_frame_, lines_tex_, &render_frame_, state, precision);
+    SetResult(lines_frame_, lines_tex_[0], precision);
   }
-
-  // Finally draw text and info overlays
-  PlotOSD(swap_frame, &render_frame_, state);
 }
 
-void GridRender::RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *swap_frame,
-                            const std::map<int, struct pl_frame *> &frames, const DisplayState &state) {
+void GridRender::RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], int width, int height,
+                            const std::map<int, struct pl_frame *> &frames, const DisplayState &state,
+                            WorkPrecision precision) {
   float line_width = kLineWidth * pixel_density_;
-  float swap_width = swap_frame->planes[0].texture->params.w;
-  float swap_height = swap_frame->planes[0].texture->params.h;
-  float cell_width = (swap_width - (state.grid.cols - 1) * line_width) / state.grid.cols;
-  float cell_height = (swap_height - (state.grid.rows - 1) * line_width) / state.grid.rows;
+  float cell_width = (width - (state.grid.cols - 1) * line_width) / state.grid.cols;
+  float cell_height = (height - (state.grid.rows - 1) * line_width) / state.grid.rows;
 
-  // Render each frame at the specified position and size in swap_frame's format
   for (int row = 0; row < state.grid.rows; row++) {
     for (int col = 0; col < state.grid.cols; col++) {
       int index = row * state.grid.cols + col;
@@ -133,7 +147,7 @@ void GridRender::RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], con
       struct pl_render_params params = *render_params_;
       if (0 == index) {
         params.border = PL_CLEAR_COLOR;
-        RenderFrame(dst, tex, swap_frame, &src_frame, out_crop, id, &params);
+        RenderFrame(dst, tex, width, height, &src_frame, out_crop, id, precision, &params);
       } else {
         params.border = PL_CLEAR_SKIP;
         dst.crop = out_crop;
@@ -152,14 +166,12 @@ void GridRender::RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], con
   }
 }
 
-void GridRender::PlotOSD(struct pl_frame &swap_frame, const struct pl_frame *src, const DisplayState &state) {
-  pl_shader shader = pl_dispatch_begin(osd_dp_);
+void GridRender::DrawGridLines(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *src,
+                               const DisplayState &state, WorkPrecision precision) {
+  PrepareLinearFrame(dst, tex, src->planes[0].texture->params.w, src->planes[0].texture->params.h, precision);
 
-  bool has_osd = (osd_overlay_ != nullptr);
-
-  struct pl_shader_desc desc[2];
-  int num_desc = 1;
-  desc[0] = {
+  pl_shader shader = pl_dispatch_begin(grid_dp_);
+  struct pl_shader_desc desc = {
       .desc =
           {
               .name = "tex",
@@ -171,116 +183,73 @@ void GridRender::PlotOSD(struct pl_frame &swap_frame, const struct pl_frame *src
               .sample_mode = PL_TEX_SAMPLE_NEAREST,
           },
   };
-
-  if (has_osd) {
-    desc[1] = {
-        .desc =
-            {
-                .name = "osd_tex",
-                .type = PL_DESC_SAMPLED_TEX,
-            },
-        .binding =
-            {
-                .object = osd_overlay_,
-                .sample_mode = PL_TEX_SAMPLE_NEAREST,
-            },
-    };
-    num_desc = 2;
-  }
-
   float line_width = kLineWidth * pixel_density_;
-  float ref_white = reference_white(swap_frame.color.transfer);
-  float light = 0.8 * ref_white;
+  float light = kComparisonLineLightNorm;
+  int grid_rows = state.grid.rows;
+  int grid_cols = state.grid.cols;
   struct pl_shader_var vars[] = {
-      {
-          .var = pl_var_int("grid_rows"),
-          .data = &state.grid.rows,
-      },
-      {
-          .var = pl_var_int("grid_cols"),
-          .data = &state.grid.cols,
-      },
-      {
-          .var = pl_var_float("line_width"),
-          .data = &line_width,
-      },
-      {
-          .var = pl_var_float("light"),
-          .data = &light,
-      },
-      {
-          .var = pl_var_float("ref_white"),
-          .data = &ref_white,
-      },
+      {.var = pl_var_int("grid_rows"), .data = &grid_rows},
+      {.var = pl_var_int("grid_cols"), .data = &grid_cols},
+      {.var = pl_var_float("line_width"), .data = &line_width},
+      {.var = pl_var_float("light"), .data = &light},
   };
 
-  // Common grid line rendering
-  static const char *grid_body_common = "vec2 tex_size = vec2(textureSize(tex, 0));\n"
-                                        "vec2 pos = gl_FragCoord.xy / tex_size;\n"
-                                        "\n"
-                                        "float line_width_x = line_width / tex_size.x;\n"
-                                        "float line_width_y = line_width / tex_size.y;\n"
-                                        "float total_line_width_x = line_width_x * float(grid_cols - 1);\n"
-                                        "float total_line_width_y = line_width_y * float(grid_rows - 1);\n"
-                                        "float cell_width = (1.0 - total_line_width_x) / float(grid_cols);\n"
-                                        "float cell_height = (1.0 - total_line_width_y) / float(grid_rows);\n"
-                                        "\n"
-                                        "bool on_grid_line = false;\n"
-                                        "float x_pos = 0.0;\n"
-                                        "float y_pos = 0.0;\n"
-                                        "int cell_x = 0;\n"
-                                        "int cell_y = 0;\n"
-                                        "\n"
-                                        "while (cell_x < grid_cols - 1) {\n"
-                                        "    x_pos += cell_width;\n"
-                                        "    if (pos.x < x_pos) break;\n"
-                                        "    if (pos.x < x_pos + line_width_x) {\n"
-                                        "        on_grid_line = true;\n"
-                                        "        break;\n"
-                                        "    }\n"
-                                        "    x_pos += line_width_x;\n"
-                                        "    cell_x++;\n"
-                                        "}\n"
-                                        "\n"
-                                        "while (cell_y < grid_rows - 1) {\n"
-                                        "    y_pos += cell_height;\n"
-                                        "    if (pos.y < y_pos) break;\n"
-                                        "    if (pos.y < y_pos + line_width_y) {\n"
-                                        "        on_grid_line = true;\n"
-                                        "        break;\n"
-                                        "    }\n"
-                                        "    y_pos += line_width_y;\n"
-                                        "    cell_y++;\n"
-                                        "}\n"
-                                        "\n"
-                                        "if (on_grid_line) {\n"
-                                        "    color = vec4(light, light, light, 1.0);\n"
-                                        "} else {\n"
-                                        "    color = texture(tex, pos);\n"
-                                        "}\n";
-
-  static const char *osd_blend = "\n"
-                                 "vec4 osd_color = texture(osd_tex, pos);\n"
-                                 "osd_color.rgb *= ref_white;\n"
-                                 "color.rgb = mix(color.rgb, osd_color.rgb, osd_color.a);\n";
-
-  std::string body = grid_body_common;
-  if (has_osd) {
-    body += osd_blend;
-  }
+  static const char *body = "vec2 tex_size = vec2(textureSize(tex, 0));\n"
+                            "vec2 pos = gl_FragCoord.xy / tex_size;\n"
+                            "\n"
+                            "float line_width_x = line_width / tex_size.x;\n"
+                            "float line_width_y = line_width / tex_size.y;\n"
+                            "float total_line_width_x = line_width_x * float(grid_cols - 1);\n"
+                            "float total_line_width_y = line_width_y * float(grid_rows - 1);\n"
+                            "float cell_width = (1.0 - total_line_width_x) / float(grid_cols);\n"
+                            "float cell_height = (1.0 - total_line_width_y) / float(grid_rows);\n"
+                            "\n"
+                            "bool on_grid_line = false;\n"
+                            "float x_pos = 0.0;\n"
+                            "float y_pos = 0.0;\n"
+                            "int cell_x = 0;\n"
+                            "int cell_y = 0;\n"
+                            "\n"
+                            "while (cell_x < grid_cols - 1) {\n"
+                            "    x_pos += cell_width;\n"
+                            "    if (pos.x < x_pos) break;\n"
+                            "    if (pos.x < x_pos + line_width_x) {\n"
+                            "        on_grid_line = true;\n"
+                            "        break;\n"
+                            "    }\n"
+                            "    x_pos += line_width_x;\n"
+                            "    cell_x++;\n"
+                            "}\n"
+                            "\n"
+                            "while (cell_y < grid_rows - 1) {\n"
+                            "    y_pos += cell_height;\n"
+                            "    if (pos.y < y_pos) break;\n"
+                            "    if (pos.y < y_pos + line_width_y) {\n"
+                            "        on_grid_line = true;\n"
+                            "        break;\n"
+                            "    }\n"
+                            "    y_pos += line_width_y;\n"
+                            "    cell_y++;\n"
+                            "}\n"
+                            "\n"
+                            "if (on_grid_line) {\n"
+                            "    color = vec4(light, light, light, 1.0);\n"
+                            "} else {\n"
+                            "    color = texture(tex, pos);\n"
+                            "}\n";
 
   struct pl_custom_shader params = {
-      .body = body.c_str(),
+      .body = body,
       .output = PL_SHADER_SIG_COLOR,
-      .descriptors = desc,
-      .num_descriptors = num_desc,
+      .descriptors = &desc,
+      .num_descriptors = 1,
       .variables = vars,
-      .num_variables = 5,
+      .num_variables = 4,
   };
   pl_shader_custom(shader, &params);
 
-  struct pl_dispatch_params dp_params = {.shader = &shader, .target = swap_frame.planes[0].texture};
-  if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
+  struct pl_dispatch_params dp_params = {.shader = &shader, .target = dst.planes[0].texture};
+  if (!pl_dispatch_finish(grid_dp_, &dp_params)) {
     throw std::runtime_error("pl_dispatch_finish failed.");
   }
 }

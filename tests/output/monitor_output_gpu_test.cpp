@@ -405,8 +405,14 @@ void TestSlideAndAmplify(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *str
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "amplify request accepted");
     Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "amplify request displayed");
     const std::vector<float> rgb = DownloadTargetRgb(gpu, monitor);
-    Check(Close(AtRgb(rgb, 96, 48, 24), {0.6f, 0.6f, 0.6f}, 0.03f),
-          "amplified target center is ref+(dis-ref)*amp, got " + ColorString(AtRgb(rgb, 96, 48, 24)));
+    // Amplification is defined in the display-linear domain (V2.1 D1). For the
+    // BT.1886 codes 0.4/0.2 at gain 2 the measured linear value is
+    // 0.0215 + 2*(0.1117-0.0215) = 0.2020, which the SDR transfer encodes to
+    // ~0.5135. The old gamma-domain 0.6 is deliberately not reproduced.
+    const Color center = AtRgb(rgb, 96, 48, 24);
+    Check(Close(center, {0.5135f, 0.5135f, 0.5135f}, 0.02f),
+          "amplified target center is the display-linear ref+(dis-ref)*amp result, got " + ColorString(center));
+    Check(!Close(center, {0.6f, 0.6f, 0.6f}, 0.02f), "the gamma-domain amplification result is not produced");
     CheckPackedAgainstOracle(sinks, monitor, gpu, resolved, 304);
     Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "amplify closed");
   }

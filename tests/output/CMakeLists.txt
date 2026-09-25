@@ -13,6 +13,8 @@ set(_monitor_display_sources
   ${CMAKE_SOURCE_DIR}/src/display/video_frame.cpp
   ${CMAKE_SOURCE_DIR}/src/display/osd.cpp
   ${CMAKE_SOURCE_DIR}/src/display/render_util.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/mapping_target.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/output_encode.cpp
   ${CMAKE_SOURCE_DIR}/src/display/vulkan_exts.cpp
   ${CMAKE_SOURCE_DIR}/src/display/platform_icc_stub.cpp
   ${CMAKE_SOURCE_DIR}/src/log.cpp

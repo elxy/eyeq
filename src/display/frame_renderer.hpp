@@ -15,7 +15,9 @@ extern "C" {
 #include <libplacebo/shaders/icc.h>
 
 #include "fill_render.hpp"
+#include "mapping_target.hpp"
 #include "osd.hpp"
+#include "output_encode.hpp"
 #include "render.hpp"
 #include "render_context.hpp"
 #include "video_frame.hpp"
@@ -79,6 +81,14 @@ public:
   void SetTargetDisplayNits(double nits, bool override_enabled);
 
   /*
+   * Overrides the display mapping target used by the comparison core. The
+   * target is the "HDR mapping completed" description; its storage precision is
+   * a functional choice (F16 for plain display once verified, F32 for the
+   * difference path), never a load-adaptive one.
+   */
+  void SetMappingTarget(const MappingTarget &target, WorkPrecision precision);
+
+  /*
    * Store and open an ICC profile. @p data is the raw profile binary; resolving
    * "auto" to system display data is the caller's (Window's) responsibility.
    */
@@ -109,6 +119,17 @@ public:
    */
   void Render(struct pl_frame &target, const DisplayState &state);
 
+  /*
+   * Diagnostics/tests: the display-linear composition produced by the last
+   * Render() call. The texture is owned by the compositor and is only valid
+   * until the next Render()/FeedFrames() call.
+   */
+  const struct pl_frame &GetLinearResult() const;
+  pl_tex GetLinearResultTexture() const;
+  WorkPrecision GetLinearResultPrecision() const;
+  WorkPrecision GetDisPrecision() const;
+  WorkPrecision GetRefPrecision() const;
+
   void RecalibrateICCParams(const struct pl_color_space *target_color);
 
   OsdManager *GetOsdManager() { return osd_manager_.get(); }
@@ -116,6 +137,11 @@ public:
 
 private:
   void OpenICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id);
+
+  // Explicit transfer encode into the presentation target. Returns false when
+  // the target transfer is not PQ/BT.1886, in which case the color-managed
+  // presentation hop is used instead.
+  bool EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear);
 
   RenderContext *context_;
   DisplayMode mode_;
@@ -130,6 +156,15 @@ private:
 
   int main_id_ = 0;
   float sdr_white_on_hdr_ = 0; // SDR white level override (nits) for HDR rendering
+
+  // The single display mapping target every source is mapped to before the
+  // comparison, and the storage precision of the display-linear work textures.
+  MappingTarget mapping_target_;
+  WorkPrecision work_precision_ = WorkPrecision::F16;
+
+  // Explicit display-linear -> wire-transfer encoder used for the presentation
+  // target when its transfer is PQ or SDR BT.1886 (no tone/gamut mapping).
+  std::unique_ptr<OutputEncoder> encoder_;
 
   double target_display_nits_ = 1000.0;
   bool target_display_override_enabled_ = false; // opt-in max_luma override (explicit --target-display-nits)

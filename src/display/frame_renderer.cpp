@@ -81,6 +81,19 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   if (config.enable_osd) {
     osd_manager_ = std::make_unique<OsdManager>(gpu, pixel_density_);
   }
+
+  // Default comparison mapping target: BT.2020/D65, peak from the renderer's
+  // target display nits, true black and the standard SDR white. The work
+  // precision is a functional choice; F16 is the plain-display candidate and
+  // the difference path upgrades itself to F32.
+  mapping_target_.primaries = PL_COLOR_PRIM_BT_2020;
+  mapping_target_.peak_nits = static_cast<float>(target_display_nits_);
+  mapping_target_.black_nits = 0.0f;
+  mapping_target_.sdr_white_nits = PL_COLOR_SDR_WHITE;
+  work_precision_ = WorkPrecision::F16;
+  display_render_->SetMappingTarget(mapping_target_, work_precision_);
+
+  encoder_ = std::make_unique<OutputEncoder>(context.log(), gpu);
 }
 
 FrameRenderer::~FrameRenderer() {
@@ -108,6 +121,29 @@ FrameRenderer::~FrameRenderer() {
 void FrameRenderer::SetTargetDisplayNits(double nits, bool override_enabled) {
   target_display_nits_ = nits;
   target_display_override_enabled_ = override_enabled;
+  mapping_target_.peak_nits = static_cast<float>(nits);
+  if (display_render_) {
+    display_render_->SetMappingTarget(mapping_target_, work_precision_);
+  }
+}
+
+const struct pl_frame &FrameRenderer::GetLinearResult() const { return display_render_->LinearResult(); }
+
+pl_tex FrameRenderer::GetLinearResultTexture() const { return display_render_->LinearResultTexture(); }
+
+WorkPrecision FrameRenderer::GetLinearResultPrecision() const { return display_render_->ResultPrecision(); }
+
+WorkPrecision FrameRenderer::GetDisPrecision() const { return display_render_->DisPrecision(); }
+
+WorkPrecision FrameRenderer::GetRefPrecision() const { return display_render_->RefPrecision(); }
+
+void FrameRenderer::SetMappingTarget(const MappingTarget &target, WorkPrecision precision) {
+  ValidateMappingTarget(target);
+  mapping_target_ = target;
+  work_precision_ = precision;
+  if (display_render_) {
+    display_render_->SetMappingTarget(mapping_target_, work_precision_);
+  }
 }
 
 void FrameRenderer::SetICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id) {
@@ -363,7 +399,53 @@ void FrameRenderer::Render(struct pl_frame &target, const DisplayState &state) {
   }
   display_render_->SetOsdOverlay(osd_overlay);
 
-  display_render_->Render(target, pl_frames_, state);
+  // The comparison work space must share the presentation target's primaries:
+  // the standalone wire encoder is transfer-only, so primaries are handled by
+  // the mapping target. In V2-1 the desktop is the only consumer, so the target
+  // primaries are the safe default; an explicit SetMappingTarget() overrides
+  // the physical peak/black/SDR white but this keeps the gamut coherent.
+  if (target.color.primaries != PL_COLOR_PRIM_UNKNOWN) {
+    mapping_target_.primaries = target.color.primaries;
+    display_render_->SetMappingTarget(mapping_target_, work_precision_);
+  }
+
+  const int width = static_cast<int>(target.planes[0].texture->params.w);
+  const int height = static_cast<int>(target.planes[0].texture->params.h);
+  // 1. Map every source through the shared display mapping target and compose
+  //    Fill/Slide/Grid, the reference switch and the difference amplification in
+  //    the display-linear domain.
+  display_render_->RenderLinear(width, height, pl_frames_, state);
+  // 2. Explicit transfer encode into the presentation target when it uses PQ or
+  //    BT.1886; otherwise fall back to a color-managed hop. In both cases no
+  //    tone/gamut compression is allowed to re-map the already-mapped result.
+  const struct pl_frame &linear = display_render_->LinearResult();
+  if (!EncodeToTarget(target, linear)) {
+    display_render_->PresentTo(target, &linear);
+  }
+  // 3. Text OSD is desktop-only and is blended after the conversion, so the
+  //    public display-linear result never contains burned-in text.
+  display_render_->PlotOsdText(target.planes[0].texture, target.color.transfer);
+}
+
+bool FrameRenderer::EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear) {
+  if (!encoder_ || !target.planes[0].texture || !linear.planes[0].texture) {
+    return false;
+  }
+  EncodeParams params;
+  switch (target.color.transfer) {
+  case PL_COLOR_TRC_PQ:
+    params.transfer = OutputTransfer::PQ;
+    break;
+  case PL_COLOR_TRC_BT_1886:
+    params.transfer = OutputTransfer::SDR_BT1886;
+    break;
+  default:
+    return false;
+  }
+  params.sdr_white_nits = mapping_target_.sdr_white_nits;
+  params.black_nits = mapping_target_.black_nits;
+  encoder_->Encode(target.planes[0].texture, linear.planes[0].texture, params);
+  return true;
 }
 
 void FrameRenderer::RecalibrateICCParams(const struct pl_color_space *target_color) {

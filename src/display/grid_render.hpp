@@ -10,16 +10,22 @@ public:
              ICCQueryFunc icc_query = nullptr);
   ~GridRender() override;
 
-  void Render(struct pl_frame &swap_frame, const std::map<int, struct pl_frame *> &frames,
-              const DisplayState &state) override;
+  void RenderLinear(int width, int height, const std::map<int, struct pl_frame *> &frames,
+                    const DisplayState &state) override;
 
 protected:
   pl_dispatch grid_dp_;
 
-  void RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *swap_frame,
-                  const std::map<int, struct pl_frame *> &frames, const DisplayState &state);
+  // Final linear result carrying the grid lines (separate from the cell
+  // composite so the lines are not read/write dependent on it).
+  struct pl_frame lines_frame_;
+  pl_tex lines_tex_[PL_MAX_PLANES];
 
-  void PlotOSD(struct pl_frame &swap_frame, const struct pl_frame *src, const DisplayState &state);
+  void RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], int width, int height,
+                  const std::map<int, struct pl_frame *> &frames, const DisplayState &state, WorkPrecision precision);
+
+  void DrawGridLines(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *src,
+                     const DisplayState &state, WorkPrecision precision);
 };
 
 }; // namespace EYEQ
