@@ -28,7 +28,9 @@ FillRender::FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_p
   present_color_map_.gamut_mapping = &pl_gamut_map_clip;
   present_params_ = *render_params_;
   present_params_.color_map_params = &present_color_map_;
-  present_params_.dither_params = nullptr;
+  // The final desktop hop dithers to the swapchain depth (closure b); the
+  // compose and explicit-encode stages stay dither-free.
+  present_params_.dither_params = pl_render_default_params.dither_params;
   present_params_.peak_detect_params = nullptr;
 
   for (int i = 0; i < PL_MAX_PLANES; i++) {
@@ -355,10 +357,34 @@ void FillRender::PlotOsdText(pl_tex target, enum pl_color_transfer target_trc) {
   }
 }
 
-void FillRender::PresentTo(struct pl_frame &target, const struct pl_frame *src) {
+void FillRender::SetPresentDitherEnabled(bool enabled) {
+  // pl_render_default_params.dither_params is libplacebo's default dither; the
+  // hop only dithers to the output depth, it never re-maps the display-linear
+  // values.
+  present_params_.dither_params = enabled ? pl_render_default_params.dither_params : nullptr;
+}
+
+void FillRender::PresentTo(struct pl_frame &target, const struct pl_frame *src, const EncodeRect *preview) {
   struct pl_frame dst = target;
-  dst.crop = {};
-  if (!pl_render_image(renderer_, src, &dst, &present_params_)) {
+  struct pl_frame s = *src;
+  s.crop = {}; // always present the full canvas
+  if (preview != nullptr) {
+    // Letterboxed desktop preview: clear the target first because the area
+    // outside the destination crop is left untouched by pl_render_image.
+    float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    pl_tex_clear(gpu_, target.planes[0].texture, black);
+    const float tw = static_cast<float>(target.planes[0].texture->params.w);
+    const float th = static_cast<float>(target.planes[0].texture->params.h);
+    struct pl_rect2df crop{};
+    crop.x0 = preview->x * tw;
+    crop.y0 = preview->y * th;
+    crop.x1 = (preview->x + preview->w) * tw;
+    crop.y1 = (preview->y + preview->h) * th;
+    dst.crop = crop;
+  } else {
+    dst.crop = {};
+  }
+  if (!pl_render_image(renderer_, &s, &dst, &present_params_)) {
     throw std::runtime_error("pl_render_image failed (present).");
   }
 }

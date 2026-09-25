@@ -8,6 +8,7 @@
 #include <libplacebo/renderer.h>
 
 #include "mapping_target.hpp"
+#include "output_encode.hpp"
 #include "render.hpp"
 
 namespace EYEQ {
@@ -61,9 +62,18 @@ public:
    * presentation/encode target (swapchain or offscreen save texture). Kept in
    * the compositor so the pl_renderer that owns the color management stays
    * encapsulated. No application ICC is applied here: ICC already belongs to
-   * the per-source mapping in V2-1.
+   * the per-source mapping.
+   *
+   * @p preview, when non-null, is the normalized target rectangle the canvas is
+   * scaled into; the target is cleared to black outside it (desktop letterbox).
+   * Null means the canvas covers the whole target (1:1 or plain scaling).
    */
-  void PresentTo(struct pl_frame &target, const struct pl_frame *src);
+  void PresentTo(struct pl_frame &target, const struct pl_frame *src, const EncodeRect *preview = nullptr);
+
+  // Final-hop dithering (V2.2 closure b). The compose and explicit-encode stages
+  // never dither; only the color-managed desktop presentation hop to a low-depth
+  // swapchain does, so an 8-bit sRGB target does not band on smooth gradients.
+  void SetPresentDitherEnabled(bool enabled);
 
   /*
    * Blends the text OSD overlay onto an already-encoded target. Kept separate

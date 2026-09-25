@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <libplacebo/shaders/custom.h>
 #include <spdlog/fmt/fmt.h>
@@ -20,6 +23,58 @@ static constexpr float kPqC2 = 2413.0f / 128.0f;
 static constexpr float kPqC3 = 2392.0f / 128.0f;
 static constexpr float kPqPeakNits = 10000.0f;
 static constexpr float kSdrWhiteNits = 203.0f;
+
+namespace {
+
+// IEEE-754 binary16 -> float, used by the finite scan so both the F16 and the F32
+// work textures can be validated without a libplacebo format conversion.
+float HalfBitsToFloat(uint16_t half) {
+  const uint32_t sign = static_cast<uint32_t>(half >> 15) & 0x1u;
+  const uint32_t exponent = static_cast<uint32_t>(half >> 10) & 0x1fu;
+  const uint32_t mantissa = static_cast<uint32_t>(half) & 0x3ffu;
+  float value;
+  if (exponent == 0) {
+    value = std::ldexp(static_cast<float>(mantissa), -24);
+  } else if (exponent == 31) {
+    value = mantissa != 0 ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+  } else {
+    value = std::ldexp(static_cast<float>(mantissa | 0x400u), static_cast<int>(exponent) - 25);
+  }
+  return sign != 0 ? -value : value;
+}
+
+} // namespace
+
+void ValidateLinearTextureFinite(pl_gpu gpu, pl_tex tex) {
+  if (!tex || !tex->params.host_readable) {
+    throw std::invalid_argument("ValidateLinearTextureFinite: texture is null or not host-readable");
+  }
+  const std::size_t w = tex->params.w;
+  const std::size_t h = tex->params.h;
+  const int bits = tex->params.format->component_depth[0];
+  if (bits != 16 && bits != 32) {
+    throw std::invalid_argument("ValidateLinearTextureFinite: unsupported component depth");
+  }
+  const std::size_t stride = static_cast<std::size_t>(bits / 8) * 4;
+  std::vector<uint8_t> raw(w * h * stride);
+  struct pl_tex_transfer_params transfer = {
+      .tex = tex,
+      .row_pitch = w * stride,
+      .ptr = raw.data(),
+  };
+  if (!pl_tex_download(gpu, &transfer)) {
+    throw std::runtime_error("ValidateLinearTextureFinite: failed to download the texture");
+  }
+  const std::size_t samples = w * h * 4;
+  for (std::size_t i = 0; i < samples; ++i) {
+    const float value = (bits == 16) ? HalfBitsToFloat(reinterpret_cast<const uint16_t *>(raw.data())[i])
+                                     : reinterpret_cast<const float *>(raw.data())[i];
+    if (!std::isfinite(value)) {
+      throw std::runtime_error("ValidateLinearTextureFinite: display-linear sample " + std::to_string(i) +
+                               " is not finite (NaN/Inf); refusing to present or encode it");
+    }
+  }
+}
 
 const char *ToString(OutputTransfer transfer) {
   switch (transfer) {
@@ -63,6 +118,9 @@ float Bt1886DecodeNits(float code, float black_nits, float white_nits, float gam
 }
 
 float EncodeNormToCode(float norm, const EncodeParams &params) {
+  if (!std::isfinite(norm)) {
+    throw std::invalid_argument("EncodeNormToCode: non-finite display-linear value (NaN/Inf is a hard error)");
+  }
   const float nits = norm * kSdrWhiteNits;
   float code;
   switch (params.transfer) {
@@ -79,6 +137,9 @@ float EncodeNormToCode(float norm, const EncodeParams &params) {
 }
 
 float DecodeCodeToNorm(float code, const EncodeParams &params) {
+  if (!std::isfinite(code)) {
+    throw std::invalid_argument("DecodeCodeToNorm: non-finite code value (NaN/Inf is a hard error)");
+  }
   float nits;
   switch (params.transfer) {
   case OutputTransfer::PQ:
@@ -106,13 +167,10 @@ OutputEncoder::~OutputEncoder() {
   }
 }
 
-void OutputEncoder::Encode(pl_tex dst, const pl_tex linear, const EncodeParams &params) {
+void OutputEncoder::Encode(pl_tex dst, const pl_tex linear, const EncodeParams &params, const EncodeRect &rect,
+                           pl_timer timer) {
   if (!dst || !linear) {
     throw std::invalid_argument("OutputEncoder::Encode: null texture");
-  }
-  if (dst->params.w != linear->params.w || dst->params.h != linear->params.h) {
-    throw std::invalid_argument(fmt::format("OutputEncoder::Encode: size mismatch ({}x{} -> {}x{})", linear->params.w,
-                                            linear->params.h, dst->params.w, dst->params.h));
   }
   if (!(linear->params.sampleable)) {
     throw std::invalid_argument("OutputEncoder::Encode: source texture is not sampleable");
@@ -120,11 +178,21 @@ void OutputEncoder::Encode(pl_tex dst, const pl_tex linear, const EncodeParams &
   if (!(dst->params.renderable)) {
     throw std::invalid_argument("OutputEncoder::Encode: destination texture is not renderable");
   }
+  if (!std::isfinite(rect.x) || !std::isfinite(rect.y) || !std::isfinite(rect.w) || !std::isfinite(rect.h) ||
+      rect.w <= 0.0f || rect.h <= 0.0f) {
+    throw std::invalid_argument("OutputEncoder::Encode: invalid destination rectangle");
+  }
 
   const int is_pq = (params.transfer == OutputTransfer::PQ) ? 1 : 0;
   float sdr_white = params.sdr_white_nits;
   float black = params.black_nits;
   float gamma = params.gamma;
+  float dst_w = static_cast<float>(dst->params.w);
+  float dst_h = static_cast<float>(dst->params.h);
+  float rect_x = rect.x;
+  float rect_y = rect.y;
+  float rect_w = rect.w;
+  float rect_h = rect.h;
 
   pl_shader shader = pl_dispatch_begin(dp_);
   struct pl_shader_desc desc = {
@@ -136,23 +204,27 @@ void OutputEncoder::Encode(pl_tex dst, const pl_tex linear, const EncodeParams &
       .binding =
           {
               .object = linear,
-              .sample_mode = PL_TEX_SAMPLE_NEAREST,
+              .sample_mode = PL_TEX_SAMPLE_LINEAR,
           },
   };
   struct pl_shader_var vars[] = {
-      {.var = pl_var_int("is_pq"), .data = &is_pq},
-      {.var = pl_var_float("sdr_white_nits"), .data = &sdr_white},
-      {.var = pl_var_float("black_nits"), .data = &black},
-      {.var = pl_var_float("gamma"), .data = &gamma},
+      {.var = pl_var_int("is_pq"), .data = &is_pq},        {.var = pl_var_float("sdr_white_nits"), .data = &sdr_white},
+      {.var = pl_var_float("black_nits"), .data = &black}, {.var = pl_var_float("gamma"), .data = &gamma},
+      {.var = pl_var_float("dst_w"), .data = &dst_w},      {.var = pl_var_float("dst_h"), .data = &dst_h},
+      {.var = pl_var_float("rect_x"), .data = &rect_x},    {.var = pl_var_float("rect_y"), .data = &rect_y},
+      {.var = pl_var_float("rect_w"), .data = &rect_w},    {.var = pl_var_float("rect_h"), .data = &rect_h},
   };
 
   // The body mirrors EncodeNormToCode()/PqEncodeNits()/Bt1886EncodeNits(): the
   // display-linear value is converted to nits first, then only the transfer
   // function and the single [0,1] range clamp run. No tone or gamut mapping is
-  // applied here.
-  static const char *body = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
-                            "vec2 pos = gl_FragCoord.xy / tex_size;\n"
-                            "vec3 lin = texture(src_tex, pos).rgb;\n"
+  // applied here. The destination rectangle selects the preview region; outside
+  // it the output is black.
+  static const char *body = "vec2 p = gl_FragCoord.xy / vec2(dst_w, dst_h);\n"
+                            "float inside = step(rect_x, p.x) * step(p.x, rect_x + rect_w) * step(rect_y, p.y) *\n"
+                            "               step(p.y, rect_y + rect_h);\n"
+                            "vec2 q = clamp((p - vec2(rect_x, rect_y)) / vec2(rect_w, rect_h), vec2(0.0), vec2(1.0));\n"
+                            "vec3 lin = texture(src_tex, q).rgb * inside;\n"
                             "vec3 nits = max(lin, vec3(0.0)) * 203.0;\n"
                             "vec3 code;\n"
                             "if (is_pq != 0) {\n"
@@ -174,11 +246,11 @@ void OutputEncoder::Encode(pl_tex dst, const pl_tex linear, const EncodeParams &
       .descriptors = &desc,
       .num_descriptors = 1,
       .variables = vars,
-      .num_variables = 4,
+      .num_variables = 10,
   };
   pl_shader_custom(shader, &custom);
 
-  struct pl_dispatch_params dp_params = {.shader = &shader, .target = dst};
+  struct pl_dispatch_params dp_params = {.shader = &shader, .target = dst, .timer = timer};
   if (!pl_dispatch_finish(dp_, &dp_params)) {
     throw std::runtime_error("OutputEncoder::Encode: pl_dispatch_finish failed");
   }

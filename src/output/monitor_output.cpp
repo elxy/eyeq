@@ -24,9 +24,8 @@ using Clock = std::chrono::steady_clock;
 
 } // namespace
 
-MonitorOutput::MonitorOutput(RenderContext &context, const ResolvedOutput &output, FrameSink &sink, DisplayMode mode,
-                             ScaleMethod scale_method, ScaleMethod plane_scale_method)
-    : context_(&context), sink_(&sink), output_(output), mode_(mode) {
+MonitorOutput::MonitorOutput(RenderContext &context, const ResolvedOutput &output, FrameSink &sink)
+    : context_(&context), sink_(&sink), output_(output) {
   if (!context.HasDevice()) {
     throw std::invalid_argument("MonitorOutput requires a RenderContext with a created device");
   }
@@ -65,15 +64,6 @@ MonitorOutput::MonitorOutput(RenderContext &context, const ResolvedOutput &outpu
   if (!ValidateLayout(output.layout, output.layout.image_bytes, &error)) {
     throw std::invalid_argument("invalid monitor output layout: " + error);
   }
-
-  FrameRenderer::Config config;
-  config.mode = mode;
-  config.scale_method = scale_method;
-  config.plane_scale_method = plane_scale_method;
-  config.pixel_density = 1.0f;
-  config.enable_osd = false;      // no SDL_ttf/font dependency for offscreen output
-  config.colorspace_hint = false; // no swapchain to hint
-  renderer_ = std::make_unique<FrameRenderer>(context, config);
 
   pl_gpu gpu = context.gpu();
   // Only resources this constructor acquired are cleaned up on failure. The
@@ -130,13 +120,14 @@ MonitorOutput::MonitorOutput(RenderContext &context, const ResolvedOutput &outpu
       throw std::invalid_argument("unsupported monitor output transfer");
     }
     // Destination peak only: this describes the monitor target, it does not
-    // override the source mastering peak (no SetTargetDisplayNits(..., true)).
+    // override the source mastering peak.
     target_.frame.color.hdr.max_luma = target_peak;
 
+    encoder_ = std::make_unique<OutputEncoder>(context.log(), gpu);
     packer_ = std::make_unique<FramePacker>(gpu, ToPackConfig(output_));
   } catch (...) {
     // The destructor will not run for a throwing constructor; release the raw GPU
-    // resource acquired so far. renderer_/packer_ are cleaned up by their unique_ptr.
+    // resource acquired so far. encoder_/packer_ are cleaned up by their unique_ptr.
     if (target_.tex != nullptr) {
       pl_tex_destroy(gpu, &target_.tex);
     }
@@ -158,7 +149,7 @@ MonitorOutput::~MonitorOutput() {
   if (target_.tex != nullptr && context_ != nullptr) {
     pl_tex_destroy(context_->gpu(), &target_.tex);
   }
-  renderer_.reset();
+  encoder_.reset();
 }
 
 void MonitorOutput::SetResult(Status status, const char *stage, std::string reason) {
@@ -176,126 +167,67 @@ MonitorOutput::StepResult MonitorOutput::MakeResult(Status status) const {
   return result;
 }
 
-bool MonitorOutput::ValidateScene(const Request &request, std::string *error) const {
-  // FeedFrames maps every entry of the submitted frame set, not only the ones this
-  // scene references. Reject any null entry here, before any mapping happens: the
-  // renderer must not have to defend against it (av_frame_ref on a null frame
-  // crashes). The Busy path returns before this function is ever called, so an
-  // in-flight request still does not read a new input.
-  for (const auto &[id, frame] : request.frames) {
-    if (frame == nullptr) {
-      *error = fmt::format("submitted frame for video {} is null", id);
-      return false;
-    }
-  }
-
-  auto require = [&](int id) -> bool {
-    if (request.frames.find(id) == request.frames.end()) {
-      *error = fmt::format("scene references video {} which is not part of the submitted frame set", id);
-      return false;
-    }
-    return true;
-  };
-
-  if (!require(request.main_source_id)) {
+bool MonitorOutput::ValidateFrame(const Request &request, std::string *error) const {
+  const RenderedFrame &frame = request.frame;
+  if (!frame.IsValid()) {
+    *error = "the submitted common result is not valid (null texture or zero size)";
     return false;
   }
-
-  const DisplayState &state = request.state;
-  if (state.show_ref && !state.ref_id.has_value()) {
-    *error = "show_ref is set but ref_id is missing";
+  if (frame.width != output_.layout.width || frame.height != output_.layout.height) {
+    *error = fmt::format("common result size {}x{} does not match the resolved layout {}x{}", frame.width, frame.height,
+                         output_.layout.width, output_.layout.height);
     return false;
   }
-
-  // Collect every source the renderer will actually sample for this mode. This
-  // mirrors fill_render.cpp / slide_render.cpp / grid_render.cpp branch by branch:
-  // an amplify reference is sampled whenever it is present, even in the non-ref
-  // view, so it must come from THIS request and never from the renderer's cache.
-  std::vector<int> needed;
-  switch (mode_) {
-  case DisplayMode::Fill:
-    if (state.show_ref) {
-      needed.push_back(state.ref_id.value());
-    } else {
-      needed.push_back(state.fill.id);
-      if (state.amplify.has_value() && state.ref_id.has_value()) {
-        needed.push_back(state.ref_id.value());
-      }
-    }
+  // The encode step is transfer-only, so the common result's primaries must
+  // already be the output primaries; the coordination layer owns the mapping
+  // target. Reject a mismatch instead of silently mis-tagging the wire data.
+  enum pl_color_primaries expected = PL_COLOR_PRIM_BT_709;
+  switch (output_.color.encoding.primaries) {
+  case ColorPrimaries::BT709:
+    expected = PL_COLOR_PRIM_BT_709;
     break;
-  case DisplayMode::Slide:
-    if (state.show_ref) {
-      needed.push_back(state.ref_id.value());
-    } else {
-      needed.push_back(state.slide.left_id);
-      needed.push_back(state.slide.right_id);
-      if (state.amplify.has_value() && state.ref_id.has_value()) {
-        needed.push_back(state.ref_id.value());
-      }
-    }
+  case ColorPrimaries::BT2020:
+    expected = PL_COLOR_PRIM_BT_2020;
     break;
-  case DisplayMode::Grid: {
-    // GridRender uses grid.cols/rows for both the normal and the reference view (in
-    // the reference view every cell samples ref_id but the cell layout is still
-    // computed from the grid), so validate the structure once for both views. A
-    // trailing empty cell is legal: GridRender skips ids past the end of the list,
-    // so only the actually visible ids are required to be present.
-    if (state.grid.rows <= 0 || state.grid.cols <= 0) {
-      *error = fmt::format("grid layout has an invalid size {}x{}", state.grid.cols, state.grid.rows);
-      return false;
-    }
-    if (state.ids.empty()) {
-      *error = "grid has no video ids";
-      return false;
-    }
-    if (state.show_ref) {
-      needed.push_back(state.ref_id.value());
-    } else {
-      const std::size_t rows = static_cast<std::size_t>(state.grid.rows);
-      const std::size_t cols = static_cast<std::size_t>(state.grid.cols);
-      const std::size_t visible = std::min(rows * cols, state.ids.size());
-      for (std::size_t i = 0; i < visible; ++i) {
-        needed.push_back(state.ids[i]);
-      }
-      if (state.amplify.has_value() && state.ref_id.has_value()) {
-        needed.push_back(state.ref_id.value());
-      }
-    }
-    break;
-  }
   default:
-    *error = "unsupported display mode for monitor output";
+    *error = "unsupported monitor output primaries";
     return false;
   }
-
-  for (int id : needed) {
-    if (!require(id)) {
-      return false;
-    }
+  if (frame.color.primaries != expected) {
+    *error = fmt::format("common result primaries '{}' do not match the output primaries '{}'",
+                         pl_color_primaries_name(frame.color.primaries), pl_color_primaries_name(expected));
+    return false;
+  }
+  if (frame.color.transfer != PL_COLOR_TRC_LINEAR) {
+    *error =
+        fmt::format("common result transfer '{}' is not display-linear", pl_color_transfer_name(frame.color.transfer));
+    return false;
+  }
+  if (!std::isfinite(frame.sdr_white_nits) || frame.sdr_white_nits <= 0.0f || !std::isfinite(frame.black_nits) ||
+      frame.black_nits < 0.0f) {
+    *error = "common result carries invalid SDR white/black luminance";
+    return false;
   }
   return true;
 }
 
 bool MonitorOutput::ReapSlotIfPossible() {
   if (slot_ == nullptr) {
-    in_flight_frames_.clear();
     return true;
   }
   try {
     packer_->Reap(slot_);
   } catch (const std::logic_error &) {
-    // A Failed slot whose GPU work is still in use. Keep the handle and the source
-    // refs; a later Pump or Close() must finish the drain.
+    // A Failed slot whose GPU work is still in use. Keep the handle; a later Pump
+    // or Close() must finish the drain.
     return false;
   }
   slot_ = nullptr;
-  in_flight_frames_.clear();
   return true;
 }
 
 bool MonitorOutput::AdvanceAndReapSlot() {
   if (slot_ == nullptr) {
-    in_flight_frames_.clear();
     return true;
   }
   // One bounded, non-blocking poll so a Pending slot can reach Ready/Failed while
@@ -331,56 +263,40 @@ MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
     return SubmitOutcome::Failed;
   }
   if (request_in_flight_) {
-    // Busy: do not read, map, modify or consume the new input in any way.
+    // Busy: do not read, encode, modify or consume the new input in any way.
     return SubmitOutcome::Busy;
   }
 
   in_flight_info_ = request.info;
 
-  std::string scene_error;
-  if (!ValidateScene(request, &scene_error)) {
-    SetResult(Status::Failed, "config", std::move(scene_error));
-    return SubmitOutcome::Failed;
-  }
-
-  in_flight_frames_ = request.frames; // shared refs keep the AVFrame headers alive
-  const DisplayState &state = request.state;
-  renderer_->SetMainSource(request.main_source_id);
-
-  std::vector<int> failed_ids;
-  try {
-    failed_ids = renderer_->FeedFrames(in_flight_frames_);
-  } catch (const std::exception &e) {
-    // Publish the failure for this request before propagating, so status() and
-    // last_result() can never describe the failure with a previous success.
-    in_flight_frames_.clear();
-    SetResult(Status::Failed, "feed", e.what());
-    throw;
-  }
-  if (!failed_ids.empty()) {
-    std::string reason = fmt::format("frame update failed for video {}", failed_ids.front());
-    in_flight_frames_.clear();
-    SetResult(Status::Failed, "feed", std::move(reason));
+  std::string frame_error;
+  if (!ValidateFrame(request, &frame_error)) {
+    SetResult(Status::Failed, "config", std::move(frame_error));
     return SubmitOutcome::Failed;
   }
 
   try {
-    renderer_->Render(target_.frame, state);
+    // Encode the common display-linear result into the wire transfer. Transfer
+    // only: the primaries already match (validated above), no tone/gamut mapping
+    // runs here.
+    EncodeParams params;
+    params.transfer =
+        output_.color.encoding.transfer == ColorTransfer::PQ ? OutputTransfer::PQ : OutputTransfer::SDR_BT1886;
+    params.sdr_white_nits = request.frame.sdr_white_nits;
+    params.black_nits = request.frame.black_nits;
+    encoder_->Encode(target_.tex, request.frame.texture, params);
   } catch (const std::exception &e) {
-    in_flight_frames_.clear();
     SetResult(Status::Failed, "render", e.what());
-    throw;
+    return SubmitOutcome::Failed;
   } catch (...) {
-    in_flight_frames_.clear();
-    SetResult(Status::Failed, "render", "unknown render failure");
-    throw;
+    SetResult(Status::Failed, "render", "unknown encode failure");
+    return SubmitOutcome::Failed;
   }
   ++diagnostics_.render_count;
 
   slot_ = packer_->Submit(target_.tex, in_flight_info_.submit_id);
   ++diagnostics_.pack_submit_count;
   if (slot_ == nullptr) {
-    in_flight_frames_.clear();
     SetResult(Status::Failed, "pack", "FramePacker::Submit returned nullptr (ring full or shutting down)");
     return SubmitOutcome::Failed;
   }
@@ -435,8 +351,7 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
 
   if (terminal_failed_) {
     // The in-flight request cannot succeed. Publish the failure now and keep
-    // draining its slot; the resources/source stay alive until the packer allows
-    // the reclaim.
+    // draining its slot; the resources stay alive until the packer allows the reclaim.
     SetResult(Status::Failed, "event", terminal_reason_);
     const bool drained = AdvanceAndReapSlot();
     request_in_flight_ = !drained;
@@ -551,7 +466,6 @@ CloseStatus MonitorOutput::Close(int drain_timeout_ms) {
   if (drain == PackDrain::Idle) {
     request_in_flight_ = false;
     drain_pending_ = false;
-    in_flight_frames_.clear();
   }
 
   // 3. Close the borrowed sink with whatever budget is left.

@@ -61,9 +61,8 @@ Window::~Window() {
 
 void Window::DestroyGraphics() {
   // Target/mapping resources and other GPU objects first, so that the Vulkan
-  // device (owned by the context) is destroyed only after them.
-  frame_renderer_.reset();
-
+  // device (owned by the context) is destroyed only after them. The coordinator
+  // that owns the FrameRenderer is destroyed by the caller before this window.
   if (render_save_tex_) {
     if (context_) {
       pl_tex_destroy(context_->gpu(), &render_save_tex_);
@@ -279,51 +278,39 @@ void Window::CreateVulkanContext() {
 }
 
 void Window::ColorspaceHint(const struct pl_color_space *colorspace) {
-  // When ICC is applied, the hint should match the ICC target color space;
-  // otherwise macOS compositor will apply a secondary correction based on an incorrect color space declaration
-  struct pl_color_space icc_target{};
-  bool has_icc = frame_renderer_->GetICCTargetColorSpace(&icc_target);
+  // The coordinator has already resolved the ICC policy: in monitoring mode it
+  // never hands over an ICC target, and in the plain desktop it hands over the
+  // ICC target when a global profile is active. This function only applies the
+  // hint and the HDR-on-SDR warning.
+  if (colorspace) {
+    SDL_DisplayID display_id = SDL_GetDisplayForWindow(window_);
+    SDL_PropertiesID prop_id = SDL_GetDisplayProperties(display_id);
+    bool support_hdr = SDL_GetBooleanProperty(prop_id, SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
 
-  if (has_icc) {
-    static bool hint_logged = false;
-    if (!hint_logged) {
-      Logger->debug("ICC active, colorspace hint overridden to ICC target: primaries={}, transfer={}",
-                    pl_color_primaries_name(icc_target.primaries), pl_color_transfer_name(icc_target.transfer));
-      hint_logged = true;
-    }
-    pl_swapchain_colorspace_hint(swapchain_, &icc_target);
-  } else {
-    // Normal handling without ICC: use the source video color space
-    if (colorspace) {
-      SDL_DisplayID display_id = SDL_GetDisplayForWindow(window_);
-      SDL_PropertiesID prop_id = SDL_GetDisplayProperties(display_id);
-      bool support_hdr = SDL_GetBooleanProperty(prop_id, SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
-
-      bool is_hdr = pl_color_space_is_hdr(colorspace);
-      static bool warned = false;
-      if (is_hdr && !support_hdr) {
-        if (!warned) {
-          Logger->warn("HDR content on non-HDR display detected. Use HDR display or add --no-colorspace-hint to "
-                       "enable tone mapping");
-          warned = true;
-        }
-      } else {
-        warned = false;
+    bool is_hdr = pl_color_space_is_hdr(colorspace);
+    static bool warned = false;
+    if (is_hdr && !support_hdr) {
+      if (!warned) {
+        Logger->warn("HDR content on non-HDR display detected. Use HDR display or add --no-colorspace-hint to "
+                     "enable tone mapping");
+        warned = true;
       }
+    } else {
+      warned = false;
     }
-
-    static bool hint_logged_no_icc = false;
-    if (!hint_logged_no_icc) {
-      if (colorspace) {
-        Logger->debug("colorspace hint (no ICC): primaries={}, transfer={}",
-                      pl_color_primaries_name(colorspace->primaries), pl_color_transfer_name(colorspace->transfer));
-      } else {
-        Logger->debug("colorspace hint: nullptr (no hint)");
-      }
-      hint_logged_no_icc = true;
-    }
-    pl_swapchain_colorspace_hint(swapchain_, colorspace);
   }
+
+  static bool hint_logged = false;
+  if (!hint_logged) {
+    if (colorspace) {
+      Logger->debug("colorspace hint: primaries={}, transfer={}", pl_color_primaries_name(colorspace->primaries),
+                    pl_color_transfer_name(colorspace->transfer));
+    } else {
+      Logger->debug("colorspace hint: nullptr (no hint)");
+    }
+    hint_logged = true;
+  }
+  pl_swapchain_colorspace_hint(swapchain_, colorspace);
 }
 
 void Window::LoadICCProfile(const std::string &path, std::optional<int> video_id) {
@@ -351,7 +338,11 @@ void Window::LoadICCProfile(const std::string &path, std::optional<int> video_id
     profile_info.source = path;
   }
 
-  // The ICC data object, calibration and rendering use belong to the renderer;
-  // the window only resolves the raw profile bytes (including "auto").
-  frame_renderer_->SetICCProfile(std::move(profile_info.data), profile_info.source, video_id);
+  // The window only resolves the raw profile bytes (including "auto"); the
+  // coordinator owns the ICC policy (monitoring mode disables all application
+  // ICC) and the renderer owns the ICC objects.
+  if (!coordinator_) {
+    throw std::logic_error("Window::LoadICCProfile called before SetCoordinator");
+  }
+  coordinator_->LoadICCProfile(std::move(profile_info.data), profile_info.source, video_id);
 }

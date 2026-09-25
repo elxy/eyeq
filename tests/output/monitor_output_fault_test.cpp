@@ -20,6 +20,7 @@ extern "C" {
 #include <libplacebo/gpu.h>
 #include <libplacebo/vulkan.h>
 
+#include "display/display_coordinator.hpp"
 #include "display/render.hpp"
 #include "display/render_context.hpp"
 #include "fake_frame_sink.hpp"
@@ -120,6 +121,33 @@ EYEQ::ResolvedOutput BuildResolved(int width, int height) {
   return resolved;
 }
 
+std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &context,
+                                                          const EYEQ::ResolvedOutput &resolved) {
+  EYEQ::DisplayCoordinator::Config cfg;
+  cfg.mode = EYEQ::DisplayMode::Fill;
+  cfg.pixel_density = 1.0f;
+  cfg.enable_osd = false;
+  cfg.colorspace_hint = false;
+  cfg.mapping_target.primaries = PL_COLOR_PRIM_BT_709;
+  cfg.mapping_target.peak_nits = static_cast<float>(resolved.color.target_nits);
+  cfg.mapping_target.black_nits = 0.0f;
+  cfg.mapping_target.sdr_white_nits = PL_COLOR_SDR_WHITE;
+  cfg.canvas_w = resolved.layout.width;
+  cfg.canvas_h = resolved.layout.height;
+  return std::make_unique<EYEQ::DisplayCoordinator>(context, cfg, nullptr);
+}
+
+EYEQ::MonitorOutput::Request MakeRequest(EYEQ::DisplayCoordinator &coordinator,
+                                         const std::map<int, std::shared_ptr<AVFrame>> &frames,
+                                         const EYEQ::DisplayState &state, int main_id, uint64_t submit_id) {
+  coordinator.SetMainSource(main_id);
+  coordinator.FeedFrames(frames);
+  EYEQ::MonitorOutput::Request request;
+  request.frame = coordinator.RenderScene(state);
+  request.info.submit_id = submit_id;
+  return request;
+}
+
 MonitorOutput::StepResult Drive(MonitorOutput &monitor, int max_pumps = 50000) {
   for (int i = 0; i < max_pumps; ++i) {
     const MonitorOutput::StepResult step = monitor.Pump();
@@ -156,18 +184,15 @@ int main() {
     g_remaining_download_failures = 1;
     EYEQ::frame_packer_test::MutableHooks().tex_download = &HookDownload;
 
-    MonitorOutput monitor(context, resolved, scripted, EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, resolved);
+    MonitorOutput monitor(context, resolved, scripted);
 
     auto frame = MakeSolidFrame(stream, 64, 54, 0.3f);
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = EYEQ::DisplayState{};
-    request.state.ids = {5};
-    request.state.scale = 1.0f;
-    request.state.fill.id = 5;
-    request.info.submit_id = 2001;
+    EYEQ::DisplayState request_state = EYEQ::DisplayState{};
+    request_state.ids = {5};
+    request_state.scale = 1.0f;
+    request_state.fill.id = 5;
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 2001);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "fault request accepted");
 
     const auto failed = Drive(monitor);
@@ -197,14 +222,11 @@ int main() {
     // A new explicit request (not an automatic restart) succeeds once the injection
     // is exhausted, proving the failure did not silently poison the module.
     auto second = MakeSolidFrame(stream, 64, 54, 0.6f);
-    MonitorOutput::Request next;
-    next.frames[5] = second;
-    next.main_source_id = 5;
-    next.state = EYEQ::DisplayState{};
-    next.state.ids = {5};
-    next.state.scale = 1.0f;
-    next.state.fill.id = 5;
-    next.info.submit_id = 2002;
+    EYEQ::DisplayState next_state = EYEQ::DisplayState{};
+    next_state.ids = {5};
+    next_state.scale = 1.0f;
+    next_state.fill.id = 5;
+    auto next = MakeRequest(*coordinator, {{5, second}}, next_state, 5, 2002);
     Check(monitor.Submit(next) == MonitorOutput::SubmitOutcome::Accepted, "request after failure accepted");
     const auto displayed = Drive(monitor);
     Check(displayed.status == MonitorOutput::Status::Displayed, "request after failure displays");
@@ -224,17 +246,14 @@ int main() {
       g_gpu_lost = true;
       EYEQ::frame_packer_test::MutableHooks().gpu_is_failed = &HookGpuIsFailed;
 
-      MonitorOutput gpu_monitor(context, resolved, gpu_scripted, EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                                EYEQ::ScaleMethod::Bicubic);
+      auto coordinator = MakeCoordinator(context, resolved);
+      MonitorOutput gpu_monitor(context, resolved, gpu_scripted);
       auto gpu_frame = MakeSolidFrame(stream, 64, 54, 0.3f);
-      MonitorOutput::Request gpu_request;
-      gpu_request.frames[5] = gpu_frame;
-      gpu_request.main_source_id = 5;
-      gpu_request.state = EYEQ::DisplayState{};
-      gpu_request.state.ids = {5};
-      gpu_request.state.scale = 1.0f;
-      gpu_request.state.fill.id = 5;
-      gpu_request.info.submit_id = 3001;
+      EYEQ::DisplayState gpu_request_state = EYEQ::DisplayState{};
+      gpu_request_state.ids = {5};
+      gpu_request_state.scale = 1.0f;
+      gpu_request_state.fill.id = 5;
+      auto gpu_request = MakeRequest(*coordinator, {{5, gpu_frame}}, gpu_request_state, 5, 3001);
       Check(gpu_monitor.Submit(gpu_request) == MonitorOutput::SubmitOutcome::Accepted, "gpu-lost request accepted");
 
       const auto first = gpu_monitor.Pump();
@@ -257,14 +276,11 @@ int main() {
       Check(!gpu_monitor.AcceptsRequests(), "module still refuses requests while the slot cannot be reclaimed");
 
       auto second_frame = MakeSolidFrame(stream, 64, 54, 0.9f);
-      MonitorOutput::Request gpu_second;
-      gpu_second.frames[9] = second_frame;
-      gpu_second.main_source_id = 9;
-      gpu_second.state = EYEQ::DisplayState{};
-      gpu_second.state.ids = {9};
-      gpu_second.state.scale = 1.0f;
-      gpu_second.state.fill.id = 9;
-      gpu_second.info.submit_id = 3002;
+      EYEQ::DisplayState gpu_second_state = EYEQ::DisplayState{};
+      gpu_second_state.ids = {9};
+      gpu_second_state.scale = 1.0f;
+      gpu_second_state.fill.id = 9;
+      auto gpu_second = MakeRequest(*coordinator, {{9, second_frame}}, gpu_second_state, 9, 3002);
       Check(gpu_monitor.Submit(gpu_second) == MonitorOutput::SubmitOutcome::Busy,
             "a new submit is Busy while the failed slot is retained, not accepted");
       Check(gpu_fake.still_display_count() == 0, "nothing is displayed while the failure is retained");
@@ -295,8 +311,8 @@ int main() {
       std::snprintf(device_lost.message, sizeof(device_lost.message), "%s", "scripted device lost");
       event_scripted.ScriptEvent(device_lost);
 
-      MonitorOutput event_monitor(context, resolved, event_scripted, EYEQ::DisplayMode::Fill,
-                                  EYEQ::ScaleMethod::Bicubic, EYEQ::ScaleMethod::Bicubic);
+      auto coordinator = MakeCoordinator(context, resolved);
+      MonitorOutput event_monitor(context, resolved, event_scripted);
       const auto step = event_monitor.Pump();
       Check(step.status == MonitorOutput::Status::Failed && step.stage == "event",
             "idle DeviceLost event publishes Failed at stage event");
@@ -308,14 +324,11 @@ int main() {
       Check(!event_monitor.AcceptsRequests(), "an idle terminal event stops accepting requests");
 
       auto event_frame = MakeSolidFrame(stream, 64, 54, 0.3f);
-      MonitorOutput::Request event_request;
-      event_request.frames[5] = event_frame;
-      event_request.main_source_id = 5;
-      event_request.state = EYEQ::DisplayState{};
-      event_request.state.ids = {5};
-      event_request.state.scale = 1.0f;
-      event_request.state.fill.id = 5;
-      event_request.info.submit_id = 3101;
+      EYEQ::DisplayState event_request_state = EYEQ::DisplayState{};
+      event_request_state.ids = {5};
+      event_request_state.scale = 1.0f;
+      event_request_state.fill.id = 5;
+      auto event_request = MakeRequest(*coordinator, {{5, event_frame}}, event_request_state, 5, 3101);
       Check(event_monitor.Submit(event_request) == MonitorOutput::SubmitOutcome::Failed,
             "submit after an idle DeviceLost reports Failed");
       Check(event_fake.still_display_count() == 0, "an idle terminal event never displays");
@@ -327,17 +340,14 @@ int main() {
     {
       EYEQ::test::FakeFrameSink post_fake(1);
       eyeq_test::ScriptedFrameSink post_scripted(post_fake);
-      MonitorOutput post_monitor(context, resolved, post_scripted, EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                                 EYEQ::ScaleMethod::Bicubic);
+      auto coordinator = MakeCoordinator(context, resolved);
+      MonitorOutput post_monitor(context, resolved, post_scripted);
       auto post_frame = MakeSolidFrame(stream, 64, 54, 0.5f);
-      MonitorOutput::Request post_request;
-      post_request.frames[5] = post_frame;
-      post_request.main_source_id = 5;
-      post_request.state = EYEQ::DisplayState{};
-      post_request.state.ids = {5};
-      post_request.state.scale = 1.0f;
-      post_request.state.fill.id = 5;
-      post_request.info.submit_id = 3201;
+      EYEQ::DisplayState post_request_state = EYEQ::DisplayState{};
+      post_request_state.ids = {5};
+      post_request_state.scale = 1.0f;
+      post_request_state.fill.id = 5;
+      auto post_request = MakeRequest(*coordinator, {{5, post_frame}}, post_request_state, 5, 3201);
       Check(post_monitor.Submit(post_request) == MonitorOutput::SubmitOutcome::Accepted,
             "post-completion request accepted");
       Check(Drive(post_monitor).status == MonitorOutput::Status::Displayed, "post-completion request displayed");

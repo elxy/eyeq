@@ -48,10 +48,30 @@ float Bt1886DecodeNits(float code, float black_nits, float white_nits, float gam
 
 // Applies the wire transfer to a display-linear PL_HDR_NORM value and clamps to
 // the full-range [0, 1] code interval (the single range compression of the
-// pipeline; it is never applied anywhere else).
+// pipeline; it is never applied anywhere else). Throws std::invalid_argument on
+// a non-finite input: NaN/Inf is a hard error, never clamped away (V2.1 3.2).
 float EncodeNormToCode(float norm, const EncodeParams &params);
-// Inverse of EncodeNormToCode, without the final clamp.
+// Inverse of EncodeNormToCode, without the final clamp. Throws on a non-finite
+// input.
 float DecodeCodeToNorm(float code, const EncodeParams &params);
+
+// Downloads a display-linear texture (F16 or F32) and throws std::runtime_error
+// when any sample is NaN/Inf. This is the explicit product-side NaN/Inf gate: the
+// common result must be finite before it can be presented or encoded. A full-frame
+// readback is acceptable only because V2-2 is still-only; the continuous-play
+// checkpoint must replace it with a GPU-side check.
+void ValidateLinearTextureFinite(pl_gpu gpu, pl_tex tex);
+
+// Normalized destination rectangle the encoded image is written into. The
+// default covers the whole target; a smaller rectangle letterboxes the image and
+// fills the rest with black (used by the desktop presenter to place the fixed
+// canvas inside the preview rectangle).
+struct EncodeRect {
+  float x = 0.0f;
+  float y = 0.0f;
+  float w = 1.0f;
+  float h = 1.0f;
+};
 
 /*
  * Explicit, independently testable display-linear -> wire-transfer encoder.
@@ -60,7 +80,8 @@ float DecodeCodeToNorm(float code, const EncodeParams &params);
  * full-range RGB texture the FramePacker consumes. It never tone maps, never
  * gamut maps and never touches source metadata: only the per-channel transfer
  * function and the final [0,1] clamp run, and the result is checked against the
- * CPU oracles above.
+ * CPU oracles above. The destination may differ in size from the source: the
+ * linear image is sampled (bilinear) into @p rect.
  */
 class OutputEncoder {
 public:
@@ -73,8 +94,12 @@ public:
   OutputEncoder &operator=(OutputEncoder &&) = delete;
 
   // Encodes @p linear (full-range RGB LINEAR) into @p dst. Both textures must
-  // live on the same pl_gpu and have matching dimensions.
-  void Encode(pl_tex dst, const pl_tex linear, const EncodeParams &params);
+  // live on the same pl_gpu. When @p rect does not cover the whole target the
+  // area outside it is set to black.
+  // @p timer, when non-null, receives the GPU execution time of this dispatch
+  // (distinct from host/queue wait). Used by the precision/perf evidence.
+  void Encode(pl_tex dst, const pl_tex linear, const EncodeParams &params, const EncodeRect &rect = EncodeRect{},
+              pl_timer timer = nullptr);
 
 private:
   pl_gpu gpu_ = nullptr;

@@ -1,7 +1,9 @@
 #include "frame_renderer.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -93,6 +95,7 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   work_precision_ = WorkPrecision::F16;
   display_render_->SetMappingTarget(mapping_target_, work_precision_);
 
+  display_render_->SetPresentDitherEnabled(config.present_dither);
   encoder_ = std::make_unique<OutputEncoder>(context.log(), gpu);
 }
 
@@ -147,7 +150,44 @@ void FrameRenderer::SetMappingTarget(const MappingTarget &target, WorkPrecision 
 }
 
 void FrameRenderer::SetICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id) {
+  if (!icc_enabled_) {
+    // Monitoring mode (V2.1 D2): no application-side ICC is loaded or applied.
+    // Report explicitly instead of silently dropping the profile.
+    static bool logged = false;
+    if (!logged) {
+      Logger->info("Application ICC is disabled in monitoring mode; profile '{}' is ignored", source);
+      logged = true;
+    }
+    return;
+  }
   OpenICCProfile(std::move(data), source, video_id);
+}
+
+void FrameRenderer::SetIccEnabled(bool enabled) {
+  if (icc_enabled_ == enabled) {
+    return;
+  }
+  icc_enabled_ = enabled;
+  if (!enabled) {
+    // Close the GPU-backed ICC objects so nothing can apply them afterwards.
+    CloseICCProfiles();
+  }
+  Logger->info("Application ICC {}", enabled ? "enabled" : "disabled");
+}
+
+void FrameRenderer::CloseICCProfiles() {
+  if (global_icc_object_) {
+    pl_icc_close(&global_icc_object_);
+  }
+  for (auto &[id, obj] : per_video_icc_objects_) {
+    if (obj) {
+      pl_icc_close(&obj);
+    }
+  }
+  per_video_icc_objects_.clear();
+  per_video_icc_data_.clear();
+  global_icc_data_.clear();
+  last_icc_target_luma_ = -1.0f;
 }
 
 void FrameRenderer::OpenICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id) {
@@ -213,6 +253,9 @@ void FrameRenderer::OpenICCProfile(std::vector<uint8_t> data, const std::string 
 }
 
 pl_icc_object FrameRenderer::GetICCObjectForVideo(int video_id) const {
+  if (!icc_enabled_) {
+    return nullptr;
+  }
   auto it = per_video_icc_objects_.find(video_id);
   if (it != per_video_icc_objects_.end())
     return it->second;
@@ -222,7 +265,7 @@ pl_icc_object FrameRenderer::GetICCObjectForVideo(int video_id) const {
 }
 
 bool FrameRenderer::GetICCTargetColorSpace(struct pl_color_space *out) const {
-  if (!global_icc_object_) {
+  if (!icc_enabled_ || !global_icc_object_) {
     return false;
   }
   *out = {};
@@ -312,122 +355,165 @@ static std::string format_time(float seconds) {
 }
 
 void FrameRenderer::Render(struct pl_frame &target, const DisplayState &state) {
-  // Compose OSD overlay. The target provides the size; the OSD manager is only
-  // present when the instance was created with OSD enabled.
-  pl_tex osd_overlay = nullptr;
-  if (state.show_osd && osd_manager_) {
-    int win_w = static_cast<int>(target.planes[0].texture->params.w);
-    int win_h = static_cast<int>(target.planes[0].texture->params.h);
-    int margin = static_cast<int>(kOsdMargin * pixel_density_);
-
-    std::vector<OsdEntry> entries;
-
-    switch (mode_) {
-    case DisplayMode::Fill: {
-      int id = state.show_ref && state.ref_id.has_value() ? state.ref_id.value() : state.fill.id;
-      auto it = state.osd_infos.find(id);
-      if (it != state.osd_infos.end()) {
-        entries.push_back({it->second.Format(), margin, margin});
-      }
-    } break;
-    case DisplayMode::Slide: {
-      int left_id = state.show_ref && state.ref_id.has_value() ? state.ref_id.value() : state.slide.left_id;
-      int right_id = state.show_ref && state.ref_id.has_value() ? state.ref_id.value() : state.slide.right_id;
-      auto it_left = state.osd_infos.find(left_id);
-      if (it_left != state.osd_infos.end()) {
-        entries.push_back({it_left->second.Format(), margin, margin});
-      }
-      auto it_right = state.osd_infos.find(right_id);
-      if (it_right != state.osd_infos.end()) {
-        // Top-right corner: use TTF to get actual text width for precise positioning
-        std::string text = it_right->second.Format();
-        int text_w = osd_manager_->GetTextWidth(text);
-        int x = win_w - text_w - margin;
-        if (x < 0)
-          x = margin;
-        entries.push_back({text, x, margin});
-      }
-    } break;
-    case DisplayMode::Grid: {
-      float line_width = kLineWidth * pixel_density_;
-      float cell_width = (win_w - (state.grid.cols - 1) * line_width) / state.grid.cols;
-      float cell_height = (win_h - (state.grid.rows - 1) * line_width) / state.grid.rows;
-      for (int row = 0; row < state.grid.rows; row++) {
-        for (int col = 0; col < state.grid.cols; col++) {
-          int index = row * state.grid.cols + col;
-          if (index >= static_cast<int>(state.ids.size()))
-            continue;
-          int id = state.show_ref && state.ref_id.has_value() ? state.ref_id.value() : state.ids[index];
-          auto it = state.osd_infos.find(id);
-          if (it != state.osd_infos.end()) {
-            int x = static_cast<int>(col * (cell_width + line_width) + margin);
-            int y = static_cast<int>(row * (cell_height + line_width) + margin);
-            entries.push_back({it->second.Format(), x, y});
-          }
-        }
-      }
-    } break;
-    }
-
-    // Bottom-right corner: time at mouse position / total duration
-    if (state.mouse_time_s >= 0 && state.total_duration_s > 0) {
-      std::string time_text = format_time(state.mouse_time_s) + " / " + format_time(state.total_duration_s);
-      int text_w = osd_manager_->GetTextWidth(time_text);
-      int text_h = osd_manager_->GetTextHeight();
-      int bar_height = static_cast<int>(kProgressBarHeight * pixel_density_);
-      int x = win_w - text_w - margin;
-      int y = win_h - text_h - bar_height - margin;
-      if (x < 0)
-        x = margin;
-      entries.push_back({time_text, x, y});
-    }
-
-    // Bottom-center: playback FPS
-    {
-      std::string fps_text = fmt::format("Playback FPS: {:.1f} / Main: {:.1f}", state.playback_fps, state.main_fps);
-      int text_w = osd_manager_->GetTextWidth(fps_text);
-      int text_h = osd_manager_->GetTextHeight();
-      int bar_height = static_cast<int>(kProgressBarHeight * pixel_density_);
-      int x = (win_w - text_w) / 2;
-      int y = win_h - text_h - bar_height - margin;
-      if (x < 0)
-        x = margin;
-      entries.push_back({fps_text, x, y});
-    }
-
-    osd_overlay = osd_manager_->ComposeOverlay(win_w, win_h, entries, state.playback_progress);
-  }
-  display_render_->SetOsdOverlay(osd_overlay);
-
-  // The comparison work space must share the presentation target's primaries:
-  // the standalone wire encoder is transfer-only, so primaries are handled by
-  // the mapping target. In V2-1 the desktop is the only consumer, so the target
-  // primaries are the safe default; an explicit SetMappingTarget() overrides
-  // the physical peak/black/SDR white but this keeps the gamut coherent.
+  // Fused convenience path used by the offscreen tests and single-target
+  // callers: it keeps the historical behavior of following the presentation
+  // target primaries. The production desktop path goes through the coordinator,
+  // which composes with an explicit fixed mapping target and presents with a
+  // preview rectangle.
   if (target.color.primaries != PL_COLOR_PRIM_UNKNOWN) {
     mapping_target_.primaries = target.color.primaries;
     display_render_->SetMappingTarget(mapping_target_, work_precision_);
   }
-
   const int width = static_cast<int>(target.planes[0].texture->params.w);
   const int height = static_cast<int>(target.planes[0].texture->params.h);
-  // 1. Map every source through the shared display mapping target and compose
-  //    Fill/Slide/Grid, the reference switch and the difference amplification in
-  //    the display-linear domain.
-  display_render_->RenderLinear(width, height, pl_frames_, state);
-  // 2. Explicit transfer encode into the presentation target when it uses PQ or
-  //    BT.1886; otherwise fall back to a color-managed hop. In both cases no
-  //    tone/gamut compression is allowed to re-map the already-mapped result.
-  const struct pl_frame &linear = display_render_->LinearResult();
-  if (!EncodeToTarget(target, linear)) {
-    display_render_->PresentTo(target, &linear);
+  RenderScene(width, height, state);
+  PresentToTarget(target, state, EncodeRect{});
+}
+
+void FrameRenderer::RenderScene(int width, int height, const DisplayState &state) {
+  if (width <= 0 || height <= 0) {
+    throw std::invalid_argument(fmt::format("FrameRenderer::RenderScene: invalid canvas size {}x{}", width, height));
   }
-  // 3. Text OSD is desktop-only and is blended after the conversion, so the
-  //    public display-linear result never contains burned-in text.
+  if (pl_frames_.empty()) {
+    throw std::logic_error("FrameRenderer::RenderScene called before FeedFrames");
+  }
+  // The mapping target is an explicit, fixed input of the coordinator; it is not
+  // re-derived from any presentation target here (V2-1 handoff #5).
+  display_render_->RenderLinear(width, height, pl_frames_, state);
+  scene_valid_ = true;
+  scene_width_ = width;
+  scene_height_ = height;
+  if (validate_linear_result_) {
+    ValidateLinearResultFinite();
+  }
+}
+
+pl_tex FrameRenderer::ComposeOsdOverlay(int target_w, int target_h, const EncodeRect &preview,
+                                        const DisplayState &state) {
+  if (!state.show_osd || !osd_manager_) {
+    return nullptr;
+  }
+  // The OSD belongs to the desktop preview: position every entry relative to the
+  // presented (letterboxed) rectangle, not the raw window, so it stays inside
+  // the image.
+  const int px = static_cast<int>(preview.x * target_w);
+  const int py = static_cast<int>(preview.y * target_h);
+  const int pw = static_cast<int>(preview.w * target_w);
+  const int ph = static_cast<int>(preview.h * target_h);
+  const int margin = static_cast<int>(kOsdMargin * pixel_density_);
+
+  std::vector<OsdEntry> entries;
+  switch (mode_) {
+  case DisplayMode::Fill: {
+    int id = state.show_ref && state.ref_id.has_value() ? state.ref_id.value() : state.fill.id;
+    auto it = state.osd_infos.find(id);
+    if (it != state.osd_infos.end()) {
+      entries.push_back({it->second.Format(), px + margin, py + margin});
+    }
+  } break;
+  case DisplayMode::Slide: {
+    int left_id = state.show_ref && state.ref_id.has_value() ? state.ref_id.value() : state.slide.left_id;
+    int right_id = state.show_ref && state.ref_id.has_value() ? state.ref_id.value() : state.slide.right_id;
+    auto it_left = state.osd_infos.find(left_id);
+    if (it_left != state.osd_infos.end()) {
+      entries.push_back({it_left->second.Format(), px + margin, py + margin});
+    }
+    auto it_right = state.osd_infos.find(right_id);
+    if (it_right != state.osd_infos.end()) {
+      std::string text = it_right->second.Format();
+      int text_w = osd_manager_->GetTextWidth(text);
+      int x = px + pw - text_w - margin;
+      if (x < px + margin)
+        x = px + margin;
+      entries.push_back({text, x, py + margin});
+    }
+  } break;
+  case DisplayMode::Grid: {
+    float line_width = kLineWidth * pixel_density_;
+    float cell_width = (pw - (state.grid.cols - 1) * line_width) / state.grid.cols;
+    float cell_height = (ph - (state.grid.rows - 1) * line_width) / state.grid.rows;
+    for (int row = 0; row < state.grid.rows; row++) {
+      for (int col = 0; col < state.grid.cols; col++) {
+        int index = row * state.grid.cols + col;
+        if (index >= static_cast<int>(state.ids.size()))
+          continue;
+        int id = state.show_ref && state.ref_id.has_value() ? state.ref_id.value() : state.ids[index];
+        auto it = state.osd_infos.find(id);
+        if (it != state.osd_infos.end()) {
+          int x = px + static_cast<int>(col * (cell_width + line_width) + margin);
+          int y = py + static_cast<int>(row * (cell_height + line_width) + margin);
+          entries.push_back({it->second.Format(), x, y});
+        }
+      }
+    }
+  } break;
+  }
+
+  // Bottom-right corner: time at mouse position / total duration
+  if (state.mouse_time_s >= 0 && state.total_duration_s > 0) {
+    std::string time_text = format_time(state.mouse_time_s) + " / " + format_time(state.total_duration_s);
+    int text_w = osd_manager_->GetTextWidth(time_text);
+    int text_h = osd_manager_->GetTextHeight();
+    int bar_height = static_cast<int>(kProgressBarHeight * pixel_density_);
+    int x = px + pw - text_w - margin;
+    int y = py + ph - text_h - bar_height - margin;
+    if (x < px + margin)
+      x = px + margin;
+    entries.push_back({time_text, x, y});
+  }
+
+  // Bottom-center: playback FPS
+  {
+    std::string fps_text = fmt::format("Playback FPS: {:.1f} / Main: {:.1f}", state.playback_fps, state.main_fps);
+    int text_w = osd_manager_->GetTextWidth(fps_text);
+    int text_h = osd_manager_->GetTextHeight();
+    int bar_height = static_cast<int>(kProgressBarHeight * pixel_density_);
+    int x = px + (pw - text_w) / 2;
+    int y = py + ph - text_h - bar_height - margin;
+    if (x < px + margin)
+      x = px + margin;
+    entries.push_back({fps_text, x, y});
+  }
+
+  return osd_manager_->ComposeOverlay(target_w, target_h, entries, state.playback_progress);
+}
+
+void FrameRenderer::PresentToTarget(struct pl_frame &target, const DisplayState &state, const EncodeRect &preview) {
+  if (!scene_valid_) {
+    throw std::logic_error("FrameRenderer::PresentToTarget called before RenderScene");
+  }
+  if (!target.planes[0].texture) {
+    throw std::invalid_argument("FrameRenderer::PresentToTarget: null presentation target");
+  }
+  const int target_w = static_cast<int>(target.planes[0].texture->params.w);
+  const int target_h = static_cast<int>(target.planes[0].texture->params.h);
+  // Text OSD is desktop-only and is blended after the conversion, so the public
+  // display-linear result never contains burned-in text.
+  pl_tex osd_overlay = ComposeOsdOverlay(target_w, target_h, preview, state);
+  display_render_->SetOsdOverlay(osd_overlay);
+
+  const struct pl_frame &linear = display_render_->LinearResult();
+  if (!EncodeToTarget(target, linear, preview)) {
+    display_render_->PresentTo(target, &linear, &preview);
+  }
   display_render_->PlotOsdText(target.planes[0].texture, target.color.transfer);
 }
 
-bool FrameRenderer::EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear) {
+void FrameRenderer::ValidateLinearResultFinite() {
+  if (!scene_valid_) {
+    throw std::logic_error("FrameRenderer::ValidateLinearResultFinite called before RenderScene");
+  }
+  const struct pl_frame &linear = display_render_->LinearResult();
+  pl_tex tex = linear.planes[0].texture;
+  if (!tex || !tex->params.host_readable) {
+    throw std::logic_error("FrameRenderer: the linear result is not host-readable; cannot validate NaN/Inf");
+  }
+  // NaN/Inf is a hard error (V2.1 3.2): the shared gate downloads and scans the
+  // common result instead of letting a clamp hide the problem.
+  ValidateLinearTextureFinite(context_->gpu(), tex);
+}
+
+bool FrameRenderer::EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear, const EncodeRect &preview) {
   if (!encoder_ || !target.planes[0].texture || !linear.planes[0].texture) {
     return false;
   }
@@ -444,7 +530,7 @@ bool FrameRenderer::EncodeToTarget(struct pl_frame &target, const struct pl_fram
   }
   params.sdr_white_nits = mapping_target_.sdr_white_nits;
   params.black_nits = mapping_target_.black_nits;
-  encoder_->Encode(target.planes[0].texture, linear.planes[0].texture, params);
+  encoder_->Encode(target.planes[0].texture, linear.planes[0].texture, params, preview);
   return true;
 }
 

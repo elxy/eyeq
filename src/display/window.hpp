@@ -20,7 +20,7 @@ extern "C" {
 #include <libplacebo/colorspace.h>
 #include <libplacebo/shaders/icc.h>
 
-#include "frame_renderer.hpp"
+#include "display_coordinator.hpp"
 #include "log.hpp"
 #include "render.hpp"
 #include "render_context.hpp"
@@ -50,7 +50,14 @@ public:
   static float GetDisplayPixelDensity(SDL_DisplayID display_id, bool high_dpi);
   float GetDisplayPixelDensity();
 
-  void InitRender(DisplayMode display_mode, ScaleMethod &scale_method, ScaleMethod &plane_scale_method);
+  // Installs the coordination layer that owns the single FrameRenderer. The
+  // window becomes a presenter: it never consumes AVFrame and never runs the
+  // source mapping or the scene comparison itself.
+  void SetCoordinator(DisplayCoordinator *coordinator) { coordinator_ = coordinator; }
+  RenderContext &context() { return *context_; }
+  // Presents a color space hint to the swapchain on behalf of the coordinator
+  // (the coordinator resolves the ICC policy before calling this).
+  void PresenterColorspaceHint(const struct pl_color_space *csp) { ColorspaceHint(csp); }
 
   int Width() const {
     int width, height;
@@ -88,9 +95,6 @@ public:
   void Raise() { SDL_RaiseWindow(window_); }
   bool HasInputFocus() const { return SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS; }
 
-  void SetMainSource(int id) { frame_renderer_->SetMainSource(id); }
-  void SetSdrWhiteOnHdr(float nits) { frame_renderer_->SetSdrWhiteOnHdr(nits); }
-
   /**
    * @brief Request saving the next rendered frame (final display image) to the given path
    *
@@ -100,17 +104,6 @@ public:
   void RequestSaveRenderedFrame(const std::filesystem::path &path) { pending_render_save_ = path; }
 
   /**
-   * @brief Set the target display peak luminance (nits) and whether to override HDR max_luma
-   *
-   * @param nits Target display peak luminance
-   * @param override_enabled Whether to force max_luma to @p nits on all HDR content
-   *        (opt-in, i.e. only when the user explicitly passes --target-display-nits)
-   */
-  void SetTargetDisplayNits(double nits, bool override_enabled) {
-    frame_renderer_->SetTargetDisplayNits(nits, override_enabled);
-  }
-
-  /**
    * @brief Load ICC profile
    *
    * @param path ICC file path, or "auto" to auto-detect system display ICC
@@ -118,13 +111,7 @@ public:
    */
   void LoadICCProfile(const std::string &path, std::optional<int> video_id = std::nullopt);
 
-  /**
-   * @brief Feed frames to the renderer for rendering
-   *
-   * @param frames Video frames
-   * @return List of video IDs that failed due to incompatible texture format
-   */
-  std::vector<int> FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames);
+  // Present the common result owned by the coordinator into the swapchain.
   void Render(const DisplayState &state);
 
   /**
@@ -153,10 +140,10 @@ protected:
   VkSurfaceKHR vk_surface_ = VK_NULL_HANDLE;
   pl_swapchain swapchain_ = nullptr;
 
-  // Shared GPU/context lifetime. Declared before frame_renderer_ so that the
-  // renderer (and its frame mappings) is destroyed first.
+  // Shared GPU/context lifetime. The coordinator (owned by main and destroyed
+  // before this window) holds the single FrameRenderer.
   std::unique_ptr<RenderContext> context_;
-  std::unique_ptr<FrameRenderer> frame_renderer_;
+  DisplayCoordinator *coordinator_ = nullptr;
 
   // Rendering result save (rendered frame -> DPX). Desktop-only debug path; the
   // actual frame is rendered by frame_renderer_ into this intermediate target.
@@ -164,10 +151,8 @@ protected:
   pl_tex render_save_tex_ = nullptr;     // host-readable RGBA32F intermediate target
   pl_dispatch render_save_dp_ = nullptr; // pass-through shader to blit intermediate -> swapchain
 
-  // Serializes FeedFrames (decode thread) against Render (main thread) on the
-  // frame_renderer_, including the colorspace-hint callback invoked from
-  // FeedFrames. Configuration methods (InitRender, setter/LoadICCProfile) are
-  // used during startup before frame feeding begins and are not covered by it.
+  // Serializes the swapchain start/present/submit against the colorspace-hint
+  // callback. The coordinator has its own mutex for FeedFrames/RenderScene.
   std::mutex render_mutex_;
 
   void InitWindow(const std::string &title, int video_width, int video_height, SDL_DisplayID display_id);

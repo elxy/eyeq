@@ -10,10 +10,12 @@ extern "C" {
 #include <libavutil/frame.h>
 }
 #include <libplacebo/gpu.h>
+#include <libplacebo/renderer.h>
 
-#include "display/frame_renderer.hpp"
+#include "display/output_encode.hpp"
 #include "display/render.hpp"
 #include "display/render_context.hpp"
+#include "display/rendered_frame.hpp"
 #include "output/frame_packer.hpp"
 #include "output/frame_sink.hpp"
 #include "output/output_profile.hpp"
@@ -21,17 +23,21 @@ extern "C" {
 namespace EYEQ {
 
 /*
- * Reusable still-only monitor output. It renders one frame set with a dedicated
- * FrameRenderer into a fixed offscreen RGB target, packs that target with a
- * FramePacker and hands the packed bytes to FrameSink::DisplayStill.
+ * Reusable still-only monitor output. It does NOT render: it consumes the common
+ * display-linear result produced by the coordination layer (DisplayCoordinator),
+ * encodes it to the wire transfer into a fixed offscreen RGB target, packs that
+ * target with a FramePacker and hands the packed bytes to
+ * FrameSink::DisplayStill. There is no second FrameRenderer here (V2-2).
  *
  * Ownership:
  *   - The RenderContext and the FrameSink are borrowed. The caller keeps both
  *     alive for the whole lifetime of this object and the sink must be dedicated
- *     to this object. The source AVFrame/AVStream owners are also the caller's
- *     responsibility; the frames map is copied to keep the AVFrame headers alive,
- *     but that does not extend the lifetime of an AVStream stored in AVFrame::opaque.
- *   - This object owns the monitor renderer, the fixed target texture and the packer.
+ *     to this object. The common RenderedFrame is also borrowed: it is owned by
+ *     the coordinator's renderer and must stay valid until the request was
+ *     displayed/cancelled and its packer slot reaped. The caller must not compose
+ *     a new scene or reconfigure the coordinator's precision while a request is
+ *     in flight (AcceptsRequests() is the check).
+ *   - This object owns the fixed target texture, the output encoder and the packer.
  *   - It calls FrameSink::Close as part of its own Close(); it never destroys or
  *     closes the sink implicitly during construction/rollback.
  *
@@ -63,15 +69,12 @@ public:
   enum class SubmitOutcome { Accepted, Busy, Failed, Closed };
 
   struct Request {
-    // Every entry is fed to the renderer, so all entries (not only the ids the
-    // scene references) must be non-null; Submit rejects a null entry before any
-    // frame is mapped. Grid scenes may omit trailing cells: only the ids that are
-    // actually visible in the grid must be present, matching GridRender's skip.
-    std::map<int, std::shared_ptr<AVFrame>> frames;
-    DisplayState state;
-    // Explicit main video for FrameRenderer::SetMainSource and for the scene
-    // validation below. It must be present in @p frames; there is no implicit 0.
-    int main_source_id = -1;
+    // The already-composed common result to encode and display. It must be a
+    // valid display-linear frame whose size matches the resolved layout and whose
+    // primaries match the output (the coordinator's mapping target is expected to
+    // be the output target). The frame is borrowed from the coordinator and must
+    // stay valid for the whole in-flight period.
+    RenderedFrame frame;
     SubmissionInfo info;
   };
 
@@ -95,8 +98,7 @@ public:
     uint64_t pack_failed = 0;
   };
 
-  MonitorOutput(RenderContext &context, const ResolvedOutput &output, FrameSink &sink, DisplayMode mode,
-                ScaleMethod scale_method, ScaleMethod plane_scale_method);
+  MonitorOutput(RenderContext &context, const ResolvedOutput &output, FrameSink &sink);
   ~MonitorOutput();
 
   MonitorOutput(const MonitorOutput &) = delete;
@@ -169,15 +171,15 @@ private:
   // waiting for Close(). Never blocks on the GPU.
   bool AdvanceAndReapSlot();
   void RecordTerminalEvent(const OutputEvent &event);
-  bool ValidateScene(const Request &request, std::string *error) const;
+  // Validates the borrowed common result against the resolved output.
+  bool ValidateFrame(const Request &request, std::string *error) const;
 
   RenderContext *context_;
   FrameSink *sink_;
   ResolvedOutput output_;
-  DisplayMode mode_;
 
-  std::unique_ptr<FrameRenderer> renderer_;
   Target target_;
+  std::unique_ptr<OutputEncoder> encoder_;
   std::unique_ptr<FramePacker> packer_;
 
   bool closed_ = false;

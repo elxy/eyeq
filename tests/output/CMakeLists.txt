@@ -6,6 +6,8 @@
 # executable, not a library.
 set(_monitor_display_sources
   ${CMAKE_SOURCE_DIR}/src/display/render_context.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/display_coordinator.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/canvas_geometry.cpp
   ${CMAKE_SOURCE_DIR}/src/display/frame_renderer.cpp
   ${CMAKE_SOURCE_DIR}/src/display/fill_render.cpp
   ${CMAKE_SOURCE_DIR}/src/display/slide_render.cpp

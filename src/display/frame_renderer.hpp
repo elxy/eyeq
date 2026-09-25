@@ -14,6 +14,7 @@ extern "C" {
 #include <libplacebo/gpu.h>
 #include <libplacebo/shaders/icc.h>
 
+#include "canvas_geometry.hpp"
 #include "fill_render.hpp"
 #include "mapping_target.hpp"
 #include "osd.hpp"
@@ -66,6 +67,9 @@ public:
     // time based on this flag; it is not created lazily on first use.
     bool enable_osd = true;
     bool colorspace_hint = false;
+    // Dither the final desktop presentation hop to a low-depth swapchain. The
+    // common display-linear result and the wire encode are never dithered.
+    bool present_dither = true;
   };
 
   FrameRenderer(RenderContext &context, const Config &config, ColorspaceHintFunc colorspace_hint = nullptr);
@@ -91,8 +95,19 @@ public:
   /*
    * Store and open an ICC profile. @p data is the raw profile binary; resolving
    * "auto" to system display data is the caller's (Window's) responsibility.
+   * While application-side ICC is disabled (monitoring mode, V2.1 D2) the call
+   * is a no-op that logs once; the stored profiles are neither opened nor used.
    */
   void SetICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id = std::nullopt);
+
+  // Enables/disables every application-side ICC profile (global, auto and
+  // per-video). Disabling closes and clears the profiles and makes
+  // GetICCObjectForVideo()/GetICCTargetColorSpace() inert. Monitoring mode sets
+  // this to false at construction; the plain desktop keeps it enabled.
+  void SetIccEnabled(bool enabled);
+  bool IsIccEnabled() const { return icc_enabled_; }
+  // True when at least one ICC object (global or per-video) is currently open.
+  bool HasAnyICC() const { return global_icc_object_ != nullptr || !per_video_icc_objects_.empty(); }
 
   pl_icc_object GetICCObjectForVideo(int video_id) const;
   /*
@@ -120,6 +135,33 @@ public:
   void Render(struct pl_frame &target, const DisplayState &state);
 
   /*
+   * Compose the common display-linear result at the fixed canvas size. The
+   * mapping target is an explicit, fixed input here: unlike Render() it never
+   * follows the presentation target's primaries (V2-1 handoff #5).
+   */
+  void RenderScene(int width, int height, const DisplayState &state);
+
+  /*
+   * Encode/present the result of the last RenderScene() into @p target, scaled
+   * into @p preview (normalized target rectangle; full by default), then blend
+   * the desktop text OSD. The desktop presenter owns the swapchain, so this is
+   * the only place the canvas is scaled and letterboxed.
+   */
+  void PresentToTarget(struct pl_frame &target, const DisplayState &state, const EncodeRect &preview = EncodeRect{});
+
+  // When enabled, RenderScene() downloads the linear result and throws when it
+  // contains NaN/Inf (fail-fast NaN/Inf policy, V2.1 section 3.2). Off by default
+  // because a full-frame readback per frame regresses the plain desktop path;
+  // the difference/high-precision path and the tests enable it.
+  void SetValidateLinearResult(bool enabled) { validate_linear_result_ = enabled; }
+  // Toggles dithering on the final desktop presentation hop (closure b).
+  void SetPresentDitherEnabled(bool enabled) { display_render_->SetPresentDitherEnabled(enabled); }
+  bool validate_linear_result() const { return validate_linear_result_; }
+  // Explicitly inspect the last linear result; throws std::runtime_error on a
+  // non-finite sample. Public so the coordinator/callers can enforce it.
+  void ValidateLinearResultFinite();
+
+  /*
    * Diagnostics/tests: the display-linear composition produced by the last
    * Render() call. The texture is owned by the compositor and is only valid
    * until the next Render()/FeedFrames() call.
@@ -137,11 +179,16 @@ public:
 
 private:
   void OpenICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id);
+  void CloseICCProfiles();
 
   // Explicit transfer encode into the presentation target. Returns false when
   // the target transfer is not PQ/BT.1886, in which case the color-managed
   // presentation hop is used instead.
-  bool EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear);
+  bool EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear, const EncodeRect &preview);
+
+  // Compose the desktop text OSD overlay; @p preview is the normalized target
+  // rectangle the canvas is presented into. Returns nullptr when OSD is off.
+  pl_tex ComposeOsdOverlay(int target_w, int target_h, const EncodeRect &preview, const DisplayState &state);
 
   RenderContext *context_;
   DisplayMode mode_;
@@ -165,6 +212,14 @@ private:
   // Explicit display-linear -> wire-transfer encoder used for the presentation
   // target when its transfer is PQ or SDR BT.1886 (no tone/gamut mapping).
   std::unique_ptr<OutputEncoder> encoder_;
+
+  // Application-side ICC master switch (monitoring mode disables it).
+  bool icc_enabled_ = true;
+  // NaN/Inf fail-fast switch and the validity of the last compose.
+  bool validate_linear_result_ = false;
+  bool scene_valid_ = false;
+  int scene_width_ = 0;
+  int scene_height_ = 0;
 
   double target_display_nits_ = 1000.0;
   bool target_display_override_enabled_ = false; // opt-in max_luma override (explicit --target-display-nits)

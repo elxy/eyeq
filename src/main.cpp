@@ -27,6 +27,8 @@ extern "C" {
 #include "utils.hpp"
 #include "sync_player.hpp"
 #include "display/window.hpp"
+#include "display/canvas_geometry.hpp"
+#include "display/display_coordinator.hpp"
 #include "display/render.hpp"
 #include "display/platform_activate.h"
 
@@ -194,8 +196,7 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
 
   app.add_flag("--save-in-source", args.save_in_source, "Use source's directory to save frames");
   app.add_option("--save-format", args.save_format, "Format of saved frames, default is png");
-  app.add_option("--save-render-format", args.save_render_format,
-                 "Format of saved rendered frames, default is dpx");
+  app.add_option("--save-render-format", args.save_render_format, "Format of saved rendered frames, default is dpx");
 
   std::map<std::string, LoggingLevel> ll_map{
       {"off", LoggingLevel::NONE},     {"critical", LoggingLevel::FATAL}, {"error", LoggingLevel::ERR},
@@ -337,19 +338,19 @@ static void update_window_and_grid_size(int &win_w, int &win_h, int &grid_w, int
   }
 }
 
-static void fit_to_window(DisplayState &state, SyncPlayer &player, const Window &window, DisplayMode display_mode) {
+// Fit the initial comparison geometry to the fixed canvas. The canvas does not
+// depend on the window size, so this runs once at startup; a window resize only
+// changes the preview rectangle and never re-runs the source mapping.
+static void fit_to_canvas(DisplayState &state, int canvas_w, int canvas_h, int src_w, int src_h,
+                          DisplayMode display_mode) {
   if (DisplayMode::Grid != display_mode) {
     int resized_w, resized_h;
-    int src_w = player.Width();
-    int dst_w = window.PixelWidth();
-    int dst_h = window.PixelHeight();
-    Window::FitResolutionWithAspectRatio(resized_w, resized_h, (float)player.Width() / player.Height(), dst_w, dst_h);
+    Window::FitResolutionWithAspectRatio(resized_w, resized_h, (float)src_w / src_h, canvas_w, canvas_h);
     state.scale = static_cast<float>(resized_w) / src_w;
-    state.offset_x = (((float)dst_w - resized_w) / 2.);
-    state.offset_y = (((float)dst_h - resized_h) / 2.);
+    state.offset_x = ((static_cast<float>(canvas_w) - resized_w) / 2.);
+    state.offset_y = ((static_cast<float>(canvas_h) - resized_h) / 2.);
   } else {
-    // In Grid mode, state.scale is a relative zoom factor; initial 1.0 means fit to cell
-    // Centering offset is computed per-video by the renderer; reset offsets to zero here
+    // In Grid mode, state.scale is a relative zoom factor; initial 1.0 means fit to cell.
     state.scale = 1.;
     state.offset_x = 0.;
     state.offset_y = 0.;
@@ -545,8 +546,32 @@ int main(int argc, char **argv) {
   }
   Window window(title, args.win_w, args.win_h, args.log_level, args.colorspace_hint, high_dpi, display_id,
                 args.full_screen);
-  window.InitRender(args.display_mode, args.scale_method, args.plane_scale_method);
-  window.SetTargetDisplayNits(args.target_display_nits, args.target_display_set);
+
+  // The fixed comparison canvas is independent of the window: the source video
+  // size for Fill/Slide and the grid layout size for Grid.
+  const int canvas_w = (DisplayMode::Grid == args.display_mode) ? window.PixelWidth() : player.Width();
+  const int canvas_h = (DisplayMode::Grid == args.display_mode) ? window.PixelHeight() : player.Height();
+
+  DisplayCoordinator::Config coordinator_config;
+  coordinator_config.mode = args.display_mode;
+  coordinator_config.scale_method = args.scale_method;
+  coordinator_config.plane_scale_method = args.plane_scale_method;
+  coordinator_config.pixel_density = window.GetDisplayPixelDensity();
+  coordinator_config.enable_osd = true;
+  coordinator_config.colorspace_hint = args.colorspace_hint;
+  coordinator_config.icc_mode = IccMode::Enabled; // user-visible mode wiring lands in V2-3
+  coordinator_config.work_precision = WorkPrecision::F16;
+  coordinator_config.mapping_target.primaries = PL_COLOR_PRIM_BT_2020;
+  coordinator_config.mapping_target.peak_nits = static_cast<float>(args.target_display_nits);
+  coordinator_config.mapping_target.black_nits = 0.0f;
+  coordinator_config.mapping_target.sdr_white_nits = PL_COLOR_SDR_WHITE;
+  coordinator_config.canvas_w = canvas_w;
+  coordinator_config.canvas_h = canvas_h;
+  auto coordinator = std::make_unique<DisplayCoordinator>(
+      window.context(), coordinator_config,
+      [&window](const struct pl_color_space *csp) { window.PresenterColorspaceHint(csp); });
+  window.SetCoordinator(coordinator.get());
+  coordinator->SetTargetDisplayNits(args.target_display_nits, args.target_display_set);
 
   // Load ICC profiles
   for (const auto &spec : args.icc_profiles) {
@@ -570,9 +595,18 @@ int main(int argc, char **argv) {
   }
 
   if (args.sdr_white_on_hdr > 0) {
-    window.SetSdrWhiteOnHdr(args.sdr_white_on_hdr);
+    coordinator->SetSdrWhiteOnHdr(args.sdr_white_on_hdr);
   }
-  window.SetMainSource(args.main_id);
+  coordinator->SetMainSource(args.main_id);
+
+  // Maps a logical mouse position to canvas pixels through the fixed-canvas
+  // preview rectangle. SDL reports mouse coordinates in logical pixels while the
+  // layout is in device pixels, so the density is applied first.
+  auto window_to_canvas = [&](float win_x, float win_y, float *cx, float *cy) -> bool {
+    const float density = window.GetDisplayPixelDensity();
+    const CanvasLayout layout = coordinator->canvas_layout(window.PixelWidth(), window.PixelHeight());
+    return WindowToCanvas(layout, win_x * density, win_y * density, cx, cy);
+  };
 
   struct DisplayState state = {
       .show_ref = false,
@@ -604,10 +638,9 @@ int main(int argc, char **argv) {
     state.slide.right_id = ids[1];
   }
 
-  // In fullscreen the window no longer matches the video resolution, so fit the video into it explicitly
-  if (args.full_screen) {
-    fit_to_window(state, player, window, args.display_mode);
-  }
+  // Fit the initial comparison geometry to the fixed canvas. Window resizes only
+  // change the preview rectangle afterwards.
+  fit_to_canvas(state, canvas_w, canvas_h, player.Width(), player.Height(), args.display_mode);
 
   std::atomic<bool> need_refresh = false;
   float seek_offset_s = 0.0;
@@ -723,7 +756,7 @@ int main(int argc, char **argv) {
       // frames named by the user's Ctrl+E.
       if (!hold_snapshot_for_save) {
         if (auto snapshot = player.TakeSnapshot()) {
-          auto failed_ids = window.FeedFrames(snapshot->frames);
+          auto failed_ids = coordinator->FeedFrames(snapshot->frames);
           if (!failed_ids.empty()) {
             // The fallback runs through the player's control path (rebuild filter
             // graph + re-seek); a failure is reported as a control outcome.
@@ -771,7 +804,9 @@ int main(int argc, char **argv) {
         if (state.show_osd && state.total_duration_s > 0) {
           float mx, my;
           SDL_GetMouseState(&mx, &my);
-          float progress = mx / static_cast<float>(window.Width());
+          float cx = 0.0f, cy = 0.0f;
+          window_to_canvas(mx, my, &cx, &cy);
+          float progress = cx / static_cast<float>(coordinator->canvas_width());
           progress = std::clamp(progress, 0.0f, 1.0f);
           state.mouse_time_s = progress * state.total_duration_s;
         } else {
@@ -861,15 +896,23 @@ int main(int argc, char **argv) {
       break;
     case SDL_EVENT_MOUSE_MOTION:
       if (event.motion.state & SDL_BUTTON_MMASK) {
-        state.offset_x += event.motion.xrel * window.GetDisplayPixelDensity();
-        state.offset_y += event.motion.yrel * window.GetDisplayPixelDensity();
+        // Convert the window-space delta into canvas pixels (the pan/zoom state
+        // lives in canvas space).
+        const float density = window.GetDisplayPixelDensity();
+        const CanvasLayout layout = coordinator->canvas_layout(window.PixelWidth(), window.PixelHeight());
+        const float sx = layout.preview.IsEmpty() ? 1.0f : layout.preview.w / static_cast<float>(layout.canvas_w);
+        const float sy = layout.preview.IsEmpty() ? 1.0f : layout.preview.h / static_cast<float>(layout.canvas_h);
+        state.offset_x += event.motion.xrel * density / sx;
+        state.offset_y += event.motion.yrel * density / sy;
         state.offset_x = align_to_pixel_edge(state.offset_x, state.scale);
         state.offset_y = align_to_pixel_edge(state.offset_y, state.scale);
         state.window_attached = false;
         Logger->trace("offset x: {}, y: {}", state.offset_x, state.offset_y);
         need_refresh = true;
       } else if (DisplayMode::Slide == args.display_mode) {
-        float split_pos = align_to_pixel_edge(event.motion.x, state.scale) / static_cast<float>(window.Width());
+        float cx = 0.0f, cy = 0.0f;
+        window_to_canvas(event.motion.x, event.motion.y, &cx, &cy);
+        float split_pos = align_to_pixel_edge(cx, state.scale) / static_cast<float>(coordinator->canvas_width());
         state.slide.split_pos = split_pos;
         Logger->trace("split_pos changed to {:.2f}", state.slide.split_pos);
         need_refresh = true;
@@ -894,13 +937,12 @@ int main(int argc, char **argv) {
       if (DisplayMode::Grid == args.display_mode) {
         float mouse_x, mouse_y;
         SDL_GetMouseState(&mouse_x, &mouse_y);
-        mouse_x *= window.GetDisplayPixelDensity();
-        mouse_y *= window.GetDisplayPixelDensity();
+        window_to_canvas(mouse_x, mouse_y, &mouse_x, &mouse_y);
 
-        // Calculate grid cell layout
+        // Calculate grid cell layout within the fixed canvas
         float line_width = kLineWidth * window.GetDisplayPixelDensity();
-        float cell_width = (window.PixelWidth() - (state.grid.cols - 1) * line_width) / state.grid.cols;
-        float cell_height = (window.PixelHeight() - (state.grid.rows - 1) * line_width) / state.grid.rows;
+        float cell_width = (coordinator->canvas_width() - (state.grid.cols - 1) * line_width) / state.grid.cols;
+        float cell_height = (coordinator->canvas_height() - (state.grid.rows - 1) * line_width) / state.grid.rows;
 
         // Determine which grid cell the mouse is in
         int col = 0, row = 0;
@@ -943,14 +985,14 @@ int main(int argc, char **argv) {
       // Zoom centered on the mouse position
       float mouse_x, mouse_y;
       SDL_GetMouseState(&mouse_x, &mouse_y);
-      mouse_x *= window.GetDisplayPixelDensity();
-      mouse_y *= window.GetDisplayPixelDensity();
+      window_to_canvas(mouse_x, mouse_y, &mouse_x, &mouse_y);
       state.offset_x = mouse_x - (mouse_x - state.offset_x) * new_scale / state.scale;
       state.offset_y = mouse_y - (mouse_y - state.offset_y) * new_scale / state.scale;
       state.scale = new_scale;
       state.offset_x = align_to_pixel_edge(state.offset_x, state.scale);
       state.offset_y = align_to_pixel_edge(state.offset_y, state.scale);
-      state.slide.split_pos = align_to_pixel_edge(mouse_x, state.scale) / static_cast<float>(window.Width());
+      state.slide.split_pos =
+          align_to_pixel_edge(mouse_x, state.scale) / static_cast<float>(coordinator->canvas_width());
       state.window_attached = false;
       Logger->debug("scale changed to {:.2f}, mouse changed to ({:.2f}, {:.2f}), offset changed to ({:.2f}, {:.2f})",
                     state.scale, mouse_x, mouse_y, state.offset_x, state.offset_y);
@@ -958,11 +1000,9 @@ int main(int argc, char **argv) {
     } break;
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
       Logger->debug("Window pixel size changed {}x{}", event.window.data1, event.window.data2);
+      // A resize only recreates the swapchain and the preview rectangle. The
+      // canvas is fixed, so the source mapping/HDR work is not re-run.
       need_refresh = window.OnResized();
-      if (state.window_attached) {
-        fit_to_window(state, player, window, args.display_mode);
-        need_refresh = true;
-      }
       break;
     case SDL_EVENT_QUIT:
       goto exit;
@@ -1051,9 +1091,9 @@ int main(int argc, char **argv) {
         need_refresh = true;
         break;
       case SDLK_Z:
-        Logger->debug("z key released, fit to window");
+        Logger->debug("z key released, fit to canvas");
         state.window_attached = true;
-        fit_to_window(state, player, window, args.display_mode);
+        fit_to_canvas(state, canvas_w, canvas_h, player.Width(), player.Height(), args.display_mode);
         need_refresh = true;
         break;
       case SDLK_SPACE:

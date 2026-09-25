@@ -15,38 +15,19 @@ extern "C" {
 #include <libplacebo/colorspace.h>
 #include <spdlog/fmt/fmt.h>
 
+#include "display_coordinator.hpp"
 #include "log.hpp"
-#include "osd.hpp"
 #include "utils.hpp"
 #include "window.hpp"
-#include "frame_renderer.hpp"
 
 using namespace EYEQ;
 
-void Window::InitRender(DisplayMode display_mode, ScaleMethod &scale_method, ScaleMethod &plane_scale_method) {
-  FrameRenderer::Config config;
-  config.mode = display_mode;
-  config.scale_method = scale_method;
-  config.plane_scale_method = plane_scale_method;
-  config.pixel_density = SDL_GetWindowPixelDensity(window_);
-  config.enable_osd = true;
-  config.colorspace_hint = colorspace_hint_;
-
-  frame_renderer_ = std::make_unique<FrameRenderer>(
-      *context_, config, [this](const struct pl_color_space *colorspace) { ColorspaceHint(colorspace); });
-}
-
-std::vector<int> Window::FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames) {
-  // render_mutex_ serializes FeedFrames (decode thread) against Render (main
-  // thread) and covers the whole FrameRenderer state, including the colorspace
-  // hint callback that touches the swapchain.
-  std::unique_lock<std::mutex> lock(render_mutex_);
-  return frame_renderer_->FeedFrames(frames);
-}
-
 void Window::Render(const DisplayState &state) {
   std::unique_lock<std::mutex> lock(render_mutex_);
-  if (!frame_renderer_->HasFrames()) {
+  if (!coordinator_) {
+    throw std::logic_error("Window::Render called before SetCoordinator");
+  }
+  if (!coordinator_->HasFrames()) {
     Logger->debug("no frames to render");
     return;
   }
@@ -69,13 +50,14 @@ void Window::Render(const DisplayState &state) {
     swapchain_csp_logged = true;
   }
 
-  // Dynamically recalibrate ICC parameters based on the swapchain's final color space
-  frame_renderer_->RecalibrateICCParams(&target.color);
+  // Dynamically recalibrate ICC parameters based on the swapchain's final color
+  // space. In monitoring mode the coordinator has no ICC to recalibrate.
+  coordinator_->RecalibrateICC(&target.color);
 
-  // Rendering pipeline for different DisplayModes:
-  // 1. Use sample + rect to zoom/pan the video, outputting a frame the same size as swap_frame
-  // 2. Blend according to the DisplayMode
-  // 3. Draw text or status info (including OSD overlay)
+  // The coordinator composes the common result at the fixed canvas (only when
+  // the scene actually changed) and presents it into the target, scaled into the
+  // letterboxed preview rectangle, with the desktop text OSD blended after the
+  // conversion. The window itself never runs the source mapping or comparison.
   struct pl_frame render_dst = target;
   bool saving = pending_render_save_.has_value();
   if (saving) {
@@ -107,7 +89,7 @@ void Window::Render(const DisplayState &state) {
     }
   }
 
-  frame_renderer_->Render(render_dst, state);
+  coordinator_->PresentTo(render_dst, state);
 
   if (saving) {
     pl_gpu gpu = context_->gpu();

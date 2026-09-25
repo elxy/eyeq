@@ -35,8 +35,10 @@ extern "C" {
 #define PL_LIBAV_IMPLEMENTATION 0
 #include <libplacebo/utils/libav.h>
 
+#include "display/display_coordinator.hpp"
 #include "display/render.hpp"
 #include "display/render_context.hpp"
+#include "display/rendered_frame.hpp"
 #include "fake_frame_sink.hpp"
 #include "output/monitor_output.hpp"
 #include "output/output_profile.hpp"
@@ -222,6 +224,47 @@ EYEQ::DisplayState MakeState(std::vector<int> ids, int main_id) {
   return state;
 }
 
+// Builds the coordination layer that owns the single FrameRenderer. The monitor
+// output no longer renders: it consumes the common result this produces. The
+// mapping target mirrors the resolved output so the transfer-only encode is
+// valid (primaries must match).
+std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &context, EYEQ::DisplayMode mode,
+                                                          const EYEQ::ResolvedOutput &resolved) {
+  EYEQ::DisplayCoordinator::Config cfg;
+  cfg.mode = mode;
+  cfg.scale_method = EYEQ::ScaleMethod::Bicubic;
+  cfg.plane_scale_method = EYEQ::ScaleMethod::Bicubic;
+  cfg.pixel_density = 1.0f;
+  cfg.enable_osd = false;
+  cfg.colorspace_hint = false;
+  cfg.work_precision = EYEQ::WorkPrecision::F16;
+  cfg.mapping_target.primaries = (resolved.color.encoding.primaries == EYEQ::ColorPrimaries::BT2020)
+                                     ? PL_COLOR_PRIM_BT_2020
+                                     : PL_COLOR_PRIM_BT_709;
+  cfg.mapping_target.peak_nits = static_cast<float>(resolved.color.target_nits);
+  cfg.mapping_target.black_nits = 0.0f;
+  cfg.mapping_target.sdr_white_nits = PL_COLOR_SDR_WHITE;
+  cfg.canvas_w = resolved.layout.width;
+  cfg.canvas_h = resolved.layout.height;
+  return std::make_unique<EYEQ::DisplayCoordinator>(context, cfg, nullptr);
+}
+
+// Feeds the scene through the coordinator and wraps the composed result into a
+// monitor request. The returned frame is borrowed from the coordinator and stays
+// valid while the coordinator is not composed again.
+EYEQ::MonitorOutput::Request MakeRequest(EYEQ::DisplayCoordinator &coordinator,
+                                         const std::map<int, std::shared_ptr<AVFrame>> &frames,
+                                         const EYEQ::DisplayState &state, int main_id, uint64_t submit_id,
+                                         uint64_t serial = 0) {
+  coordinator.SetMainSource(main_id);
+  coordinator.FeedFrames(frames);
+  EYEQ::MonitorOutput::Request request;
+  request.frame = coordinator.RenderScene(state);
+  request.info.submit_id = submit_id;
+  request.info.source_frame_serial = serial;
+  return request;
+}
+
 std::vector<float> DownloadTargetRgb(pl_gpu gpu, MonitorOutput &monitor) {
   const struct pl_frame &frame = monitor.target_frame();
   const int w = frame.planes[0].texture->params.w;
@@ -304,15 +347,11 @@ void TestSdrR210(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 64, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
   {
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 96, 64, [](int x, int y) { return QuadrantPixel(x, y, 96, 64); });
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = MakeState({5}, 5);
-    request.info.submit_id = 101;
-    request.info.source_frame_serial = 5001;
+    EYEQ::DisplayState request_state = MakeState({5}, 5);
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 101, 5001);
 
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "SDR r210 request accepted");
     const auto step = Drive(monitor);
@@ -340,18 +379,15 @@ void TestPqV210(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   const float pq100 = PqCodeForNits(100.0f);
   SinkPair sinks;
   {
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 96, 54, [&](int, int) { return Color{pq100, pq100, pq100}; });
     frame->color_primaries = AVCOL_PRI_BT2020;
     frame->color_trc = AVCOL_TRC_SMPTE2084;
     SetSourceMasteringPeak(frame.get(), 1000.0);
 
-    MonitorOutput::Request request;
-    request.frames[9] = frame;
-    request.main_source_id = 9;
-    request.state = MakeState({9}, 9);
-    request.info.submit_id = 202;
+    EYEQ::DisplayState request_state = MakeState({9}, 9);
+    auto request = MakeRequest(*coordinator, {{9, frame}}, request_state, 9, 202, 0);
 
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "PQ v210 request accepted");
     const auto step = Drive(monitor);
@@ -370,16 +406,12 @@ void TestSlideAndAmplify(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *str
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 48, EYEQ::PixelFormat::R210, false, 203.0, 0);
   {
     SinkPair sinks;
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Slide, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Slide, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto left = MakeFrame(stream, 96, 48, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
     auto right = MakeFrame(stream, 96, 48, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = left;
-    request.frames[9] = right;
-    request.main_source_id = 5;
-    request.state = MakeState({5, 9}, 5);
-    request.info.submit_id = 303;
+    EYEQ::DisplayState request_state = MakeState({5, 9}, 5);
+    auto request = MakeRequest(*coordinator, {{5, left}, {9, right}}, request_state, 5, 303, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "Slide request accepted");
     Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "Slide request displayed");
     const std::vector<float> rgb = DownloadTargetRgb(gpu, monitor);
@@ -390,18 +422,14 @@ void TestSlideAndAmplify(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *str
   }
   {
     SinkPair sinks;
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto dis = MakeFrame(stream, 96, 48, [](int, int) { return Color{0.4f, 0.4f, 0.4f}; });
     auto ref = MakeFrame(stream, 96, 48, [](int, int) { return Color{0.2f, 0.2f, 0.2f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = dis;
-    request.frames[9] = ref;
-    request.main_source_id = 5;
-    request.state = MakeState({5, 9}, 5);
-    request.state.ref_id = 9;
-    request.state.amplify = 2.0f;
-    request.info.submit_id = 304;
+    EYEQ::DisplayState request_state = MakeState({5, 9}, 5);
+    request_state.ref_id = 9;
+    request_state.amplify = 2.0f;
+    auto request = MakeRequest(*coordinator, {{5, dis}, {9, ref}}, request_state, 5, 304, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "amplify request accepted");
     Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "amplify request displayed");
     const std::vector<float> rgb = DownloadTargetRgb(gpu, monitor);
@@ -421,18 +449,14 @@ void TestSlideAndAmplify(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *str
 void TestGrid(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 48, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
-  MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Grid, EYEQ::ScaleMethod::Bicubic,
-                        EYEQ::ScaleMethod::Bicubic);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Grid, resolved);
+  MonitorOutput monitor(context, resolved, sinks.sink());
   auto red = MakeFrame(stream, 48, 48, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
   auto blue = MakeFrame(stream, 48, 48, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
-  MonitorOutput::Request request;
-  request.frames[5] = red;
-  request.frames[9] = blue;
-  request.main_source_id = 5;
-  request.state = MakeState({5, 9}, 5);
-  request.state.grid.cols = 2;
-  request.state.grid.rows = 1;
-  request.info.submit_id = 405;
+  EYEQ::DisplayState request_state = MakeState({5, 9}, 5);
+  request_state.grid.cols = 2;
+  request_state.grid.rows = 1;
+  auto request = MakeRequest(*coordinator, {{5, red}, {9, blue}}, request_state, 5, 405, 0);
   Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "Grid request accepted");
   Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "Grid request displayed");
   const std::vector<float> rgb = DownloadTargetRgb(gpu, monitor);
@@ -446,31 +470,24 @@ void TestStillBusy(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   const EYEQ::ResolvedOutput resolved = BuildResolved(64, 64, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
   sinks.scripted.ScriptStill(EYEQ::StillOutcome::Busy, 3);
-  MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                        EYEQ::ScaleMethod::Bicubic);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+  MonitorOutput monitor(context, resolved, sinks.sink());
   auto frame = MakeFrame(stream, 64, 64, [](int x, int y) { return QuadrantPixel(x, y, 64, 64); });
-  MonitorOutput::Request request;
-  request.frames[5] = frame;
-  request.main_source_id = 5;
-  request.state = MakeState({5}, 5);
-  request.info.submit_id = 506;
-  request.info.source_frame_serial = 77;
+  EYEQ::DisplayState request_state = MakeState({5}, 5);
+  auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 506, 77);
   Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "Busy test request accepted");
 
   // A second request while the first is in flight must be Busy and must not touch
-  // the new input.
-  auto other = MakeFrame(stream, 64, 64, [](int, int) { return Color{0.1f, 0.2f, 0.3f}; });
-  AVFrame *other_raw = other.get();
-  uint8_t *other_data = other_raw->data[0];
-  const int other_format = other_raw->format;
+  // the new input. It deliberately reuses the first result instead of asking the
+  // coordinator to compose again: recomposing would recycle the very texture the
+  // in-flight request is still packing (the borrow contract).
   MonitorOutput::Request second;
-  second.frames[9] = other;
-  second.main_source_id = 9;
-  second.state = MakeState({9}, 9);
+  second.frame = request.frame;
   second.info.submit_id = 507;
+  const uint64_t second_render_id = second.frame.identity.render_id;
   Check(monitor.Submit(second) == MonitorOutput::SubmitOutcome::Busy, "second submit while in flight is Busy");
-  Check(other_raw->data[0] == other_data && other_raw->format == other_format,
-        "Busy submit does not modify the new input");
+  Check(second.frame.identity.render_id == second_render_id && second.frame.texture != nullptr,
+        "Busy submit does not consume or modify the new result");
   Check(monitor.diagnostics().render_count == 1 && monitor.diagnostics().pack_submit_count == 1,
         "Busy submit did not render or pack again");
 
@@ -499,11 +516,9 @@ void TestStillBusy(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   // The next request is accepted and reuses the packer ring; the first sink copy
   // must remain its own independent snapshot.
   const std::vector<uint8_t> first_copy = *sinks.fake.copy(506);
-  MonitorOutput::Request third;
-  third.frames[9] = other;
-  third.main_source_id = 9;
-  third.state = MakeState({9}, 9);
-  third.info.submit_id = 508;
+  auto other = MakeFrame(stream, 64, 64, [](int, int) { return Color{0.1f, 0.2f, 0.3f}; });
+  EYEQ::DisplayState third_state = MakeState({9}, 9);
+  auto third = MakeRequest(*coordinator, {{9, other}}, third_state, 9, 508, 0);
   Check(monitor.Submit(third) == MonitorOutput::SubmitOutcome::Accepted, "next request accepted after completion");
   Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "next request displayed");
   Check(sinks.fake.copy(506) != nullptr && *sinks.fake.copy(506) == first_copy,
@@ -517,14 +532,11 @@ void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   {
     // Cancel while the packer is still working.
     SinkPair sinks;
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = MakeState({5}, 5);
-    request.info.submit_id = 601;
+    EYEQ::DisplayState request_state = MakeState({5}, 5);
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 601, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "cancel test request accepted");
     monitor.Cancel();
     const auto step = Drive(monitor);
@@ -537,14 +549,11 @@ void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     // further DisplayStill call.
     SinkPair sinks;
     sinks.scripted.ScriptStill(EYEQ::StillOutcome::Busy, 100);
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = MakeState({5}, 5);
-    request.info.submit_id = 602;
+    EYEQ::DisplayState request_state = MakeState({5}, 5);
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 602, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "cancel-busy request accepted");
     // Pump until the sink has been offered the bytes (scripted Busy).
     int guard = 0;
@@ -563,11 +572,8 @@ void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     Check(sinks.scripted.still_calls() == calls_before_cancel, "cancel does not call DisplayStill again");
     Check(sinks.fake.still_display_count() == 0, "cancelled Busy request was never displayed");
     // The module is reusable after a logical cancel.
-    MonitorOutput::Request next;
-    next.frames[5] = frame;
-    next.main_source_id = 5;
-    next.state = MakeState({5}, 5);
-    next.info.submit_id = 603;
+    EYEQ::DisplayState next_state = MakeState({5}, 5);
+    auto next = MakeRequest(*coordinator, {{5, frame}}, next_state, 5, 603, 0);
     Check(monitor.Submit(next) == MonitorOutput::SubmitOutcome::Accepted, "request accepted after cancel");
     Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "request displayed after cancel");
     Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "cancel-busy test closed");
@@ -580,14 +586,11 @@ void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream
   {
     SinkPair sinks;
     sinks.scripted.ScriptStill(EYEQ::StillOutcome::DeviceError, 1);
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = MakeState({5}, 5);
-    request.info.submit_id = 701;
+    EYEQ::DisplayState request_state = MakeState({5}, 5);
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 701, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "device-error request accepted");
     const auto step = Drive(monitor);
     Check(step.status == MonitorOutput::Status::Failed && step.stage == "still",
@@ -601,14 +604,11 @@ void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream
   {
     SinkPair sinks;
     sinks.scripted.ScriptStill(EYEQ::StillOutcome::Closed, 1);
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = MakeState({5}, 5);
-    request.info.submit_id = 702;
+    EYEQ::DisplayState request_state = MakeState({5}, 5);
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 702, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "sink-closed request accepted");
     const auto step = Drive(monitor);
     Check(step.status == MonitorOutput::Status::Failed, "sink Closed surfaces as Failed, not Displayed");
@@ -623,14 +623,11 @@ void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream
     event.stage = EYEQ::OutputEvent::Stage::DisplayStill;
     std::snprintf(event.message, sizeof(event.message), "%s", "scripted sink error");
     sinks.scripted.ScriptEvent(event);
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = MakeState({5}, 5);
-    request.info.submit_id = 703;
+    EYEQ::DisplayState request_state = MakeState({5}, 5);
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 703, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "error-event request accepted");
     const auto step = Drive(monitor);
     Check(step.status == MonitorOutput::Status::Failed && step.stage == "event",
@@ -647,14 +644,11 @@ void TestClose(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     // Close with a still-pending request: cancel, drain and close.
     SinkPair sinks;
     sinks.scripted.ScriptStill(EYEQ::StillOutcome::Busy, 100);
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = MakeState({5}, 5);
-    request.info.submit_id = 801;
+    EYEQ::DisplayState request_state = MakeState({5}, 5);
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 801, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "close-pending request accepted");
     Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "Close reclaims the Ready/Busy slot and closes");
     Check(sinks.fake.still_display_count() == 0, "close-time cancel never displayed");
@@ -665,14 +659,11 @@ void TestClose(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     // scripted sink refuses to close.
     SinkPair sinks;
     sinks.scripted.ScriptClose(EYEQ::CloseStatus::DrainTimeout, 1);
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
+    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+    MonitorOutput monitor(context, resolved, sinks.sink());
     auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-    MonitorOutput::Request request;
-    request.frames[5] = frame;
-    request.main_source_id = 5;
-    request.state = MakeState({5}, 5);
-    request.info.submit_id = 802;
+    EYEQ::DisplayState request_state = MakeState({5}, 5);
+    auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 802, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "close-timeout request accepted");
     Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "close-timeout request displayed");
     Check(monitor.Close(1000) == EYEQ::CloseStatus::DrainTimeout, "first Close reports DrainTimeout");
@@ -682,318 +673,26 @@ void TestClose(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   }
 }
 
-void TestSceneValidation(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
-  (void)gpu;
-  const EYEQ::ResolvedOutput resolved = BuildResolved(64, 54, EYEQ::PixelFormat::R210, false, 203.0, 0);
-  SinkPair sinks;
-  MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                        EYEQ::ScaleMethod::Bicubic);
-  auto stale = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.9f, 0.9f, 0.9f}; });
-  auto fresh = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.1f, 0.1f, 0.1f}; });
-
-  // Unknown main source id.
-  MonitorOutput::Request bad_main;
-  bad_main.frames[9] = fresh;
-  bad_main.main_source_id = 42;
-  bad_main.state = MakeState({9}, 9);
-  bad_main.info.submit_id = 901;
-  Check(monitor.Submit(bad_main) == MonitorOutput::SubmitOutcome::Failed, "unknown main_source_id is rejected");
-  Check(monitor.last_result().stage == "config" && !monitor.last_result().reason.empty(),
-        "config failure reports stage and reason");
-
-  // First request establishes the renderer's frame map.
-  MonitorOutput::Request first;
-  first.frames[5] = stale;
-  first.main_source_id = 5;
-  first.state = MakeState({5}, 5);
-  first.info.submit_id = 902;
-  Check(monitor.Submit(first) == MonitorOutput::SubmitOutcome::Accepted, "first scene accepted with id 5");
-  Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "first scene displayed");
-  const uint64_t renders_after_first = monitor.diagnostics().render_count;
-
-  // Second request only supplies id 9 but its DisplayState still points at id 5.
-  // The stale frame must not be reused to stand in for the missing input.
-  MonitorOutput::Request stale_scene;
-  stale_scene.frames[9] = fresh;
-  stale_scene.main_source_id = 9;
-  stale_scene.state = MakeState({9}, 9);
-  stale_scene.state.fill.id = 5;
-  stale_scene.info.submit_id = 903;
-  Check(monitor.Submit(stale_scene) == MonitorOutput::SubmitOutcome::Failed,
-        "a scene referencing an id outside the submitted frame set is rejected");
-  Check(monitor.diagnostics().render_count == renders_after_first, "rejected scene was not rendered");
-
-  // Grid scene referencing a missing cell id, using a Grid monitor so the Grid
-  // validation branch is the one exercised.
-  {
-    SinkPair grid_sinks;
-    MonitorOutput grid_monitor(context, resolved, grid_sinks.sink(), EYEQ::DisplayMode::Grid,
-                               EYEQ::ScaleMethod::Bicubic, EYEQ::ScaleMethod::Bicubic);
-    MonitorOutput::Request grid_missing;
-    grid_missing.frames[9] = fresh;
-    grid_missing.main_source_id = 9;
-    grid_missing.state = MakeState({9, 5}, 9);
-    grid_missing.state.grid.cols = 2;
-    grid_missing.state.grid.rows = 1;
-    grid_missing.info.submit_id = 904;
-    Check(grid_monitor.Submit(grid_missing) == MonitorOutput::SubmitOutcome::Failed,
-          "Grid scene with a missing cell id is rejected");
-    Check(grid_monitor.Close(2000) == EYEQ::CloseStatus::Closed, "grid scene-validation monitor closed");
-  }
-  Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "scene-validation monitor closed");
-}
-
-// F2 regression: every source a mode actually samples must come from THIS request,
-// including the amplify reference in the non-ref view, and show_ref must carry a
-// ref_id. The warm-up request leaves id 42 in the renderer cache so a stale reuse
-// would be visible as a successful display.
-void TestSceneDependencies(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
-  (void)gpu;
-  const EYEQ::ResolvedOutput resolved = BuildResolved(64, 54, EYEQ::PixelFormat::R210, false, 203.0, 0);
-  auto base = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-  auto other = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.6f, 0.6f, 0.6f}; });
-  auto reference = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.15f, 0.15f, 0.15f}; });
-
-  const EYEQ::DisplayMode modes[] = {EYEQ::DisplayMode::Slide, EYEQ::DisplayMode::Grid};
-  const char *names[] = {"Slide", "Grid"};
-  for (int m = 0; m < 2; ++m) {
-    SinkPair sinks;
-    MonitorOutput monitor(context, resolved, sinks.sink(), modes[m], EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
-
-    auto configure_grid = [&](MonitorOutput::Request &r) {
-      if (modes[m] == EYEQ::DisplayMode::Grid) {
-        r.state.grid.cols = 2;
-        r.state.grid.rows = 1;
-      }
-    };
-
-    // Warm the renderer cache with 5/9/42.
-    MonitorOutput::Request warm;
-    warm.frames[5] = base;
-    warm.frames[9] = other;
-    warm.frames[42] = reference;
-    warm.main_source_id = 5;
-    warm.state = MakeState({5, 9}, 5);
-    configure_grid(warm);
-    warm.info.submit_id = 1200 + m;
-    Check(monitor.Submit(warm) == MonitorOutput::SubmitOutcome::Accepted,
-          std::string(names[m]) + " warm-up request accepted");
-    Check(Drive(monitor).status == MonitorOutput::Status::Displayed,
-          std::string(names[m]) + " warm-up request displayed");
-
-    // Only 5/9 are fed, but amplify + ref_id 42 are set: the cached 42 must not be
-    // borrowed to satisfy the request.
-    MonitorOutput::Request stale;
-    stale.frames[5] = base;
-    stale.frames[9] = other;
-    stale.main_source_id = 5;
-    stale.state = MakeState({5, 9}, 5);
-    configure_grid(stale);
-    stale.state.ref_id = 42;
-    stale.state.amplify = 2.0f;
-    stale.info.submit_id = 1210 + m;
-    Check(monitor.Submit(stale) == MonitorOutput::SubmitOutcome::Failed,
-          std::string(names[m]) + " amplify reference missing from this request is rejected");
-    Check(monitor.last_result().stage == "config", std::string(names[m]) + " missing reference is a config failure");
-    Check(monitor.diagnostics().displayed == 1,
-          std::string(names[m]) + " rejected stale-reference request never displayed");
-
-    // show_ref without ref_id is a config error, not a renderer exception.
-    MonitorOutput::Request no_ref;
-    no_ref.frames[5] = base;
-    no_ref.main_source_id = 5;
-    no_ref.state = MakeState({5}, 5);
-    no_ref.state.show_ref = true;
-    no_ref.info.submit_id = 1220 + m;
-    Check(monitor.Submit(no_ref) == MonitorOutput::SubmitOutcome::Failed,
-          std::string(names[m]) + " show_ref without ref_id is rejected");
-
-    // show_ref with a ref_id that is not in this request is rejected too.
-    MonitorOutput::Request ref_missing;
-    ref_missing.frames[5] = base;
-    ref_missing.main_source_id = 5;
-    ref_missing.state = MakeState({5}, 5);
-    ref_missing.state.show_ref = true;
-    ref_missing.state.ref_id = 42;
-    ref_missing.info.submit_id = 1230 + m;
-    Check(monitor.Submit(ref_missing) == MonitorOutput::SubmitOutcome::Failed,
-          std::string(names[m]) + " show_ref ref_id outside this request is rejected");
-
-    // Positive control: the same amplify request succeeds when 42 is present.
-    MonitorOutput::Request good;
-    good.frames[5] = base;
-    good.frames[9] = other;
-    good.frames[42] = reference;
-    good.main_source_id = 5;
-    good.state = MakeState({5, 9}, 5);
-    configure_grid(good);
-    good.state.ref_id = 42;
-    good.state.amplify = 2.0f;
-    good.info.submit_id = 1240 + m;
-    Check(monitor.Submit(good) == MonitorOutput::SubmitOutcome::Accepted,
-          std::string(names[m]) + " amplify request with the reference present is accepted");
-    Check(Drive(monitor).status == MonitorOutput::Status::Displayed,
-          std::string(names[m]) + " amplify request displays");
-
-    Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, std::string(names[m]) + " dependency monitor closed");
-  }
-
-  // Fill amplify reference missing from this request.
-  {
-    SinkPair sinks;
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
-    MonitorOutput::Request stale;
-    stale.frames[5] = base;
-    stale.main_source_id = 5;
-    stale.state = MakeState({5}, 5);
-    stale.state.ref_id = 42;
-    stale.state.amplify = 2.0f;
-    stale.info.submit_id = 1250;
-    Check(monitor.Submit(stale) == MonitorOutput::SubmitOutcome::Failed,
-          "Fill amplify reference missing from this request is rejected");
-    Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "fill dependency monitor closed");
-  }
-
-  // Grid structure and null-frame preconditions.
-  {
-    SinkPair sinks;
-    MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Grid, EYEQ::ScaleMethod::Bicubic,
-                          EYEQ::ScaleMethod::Bicubic);
-
-    // A 2x2 grid with only 3 ids is legal: GridRender skips the trailing empty cell.
-    // The composition layer must accept it so it goes through the same renderer path
-    // the player uses instead of imposing a stricter grid contract.
-    MonitorOutput::Request partial;
-    partial.frames[5] = base;
-    partial.frames[9] = other;
-    partial.frames[42] = reference;
-    partial.main_source_id = 5;
-    partial.state = MakeState({5, 9, 42}, 5);
-    partial.state.grid.cols = 2;
-    partial.state.grid.rows = 2;
-    partial.info.submit_id = 1260;
-    Check(monitor.Submit(partial) == MonitorOutput::SubmitOutcome::Accepted,
-          "2x2 grid with 3 ids (trailing empty cell) is accepted");
-    Check(Drive(monitor).status == MonitorOutput::Status::Displayed,
-          "2x2 grid with 3 ids displays like the player renderer");
-    Check(monitor.diagnostics().displayed == 1, "the partial grid displayed exactly once");
-
-    // Empty ids, non-positive dimensions (in BOTH the normal and reference view) and
-    // null entries are rejected before any mapping/feed.
-    MonitorOutput::Request empty_ids;
-    empty_ids.frames[5] = base;
-    empty_ids.main_source_id = 5;
-    empty_ids.state = MakeState({5}, 5);
-    empty_ids.state.ids.clear();
-    empty_ids.state.grid.cols = 2;
-    empty_ids.state.grid.rows = 2;
-    empty_ids.info.submit_id = 1261;
-    Check(monitor.Submit(empty_ids) == MonitorOutput::SubmitOutcome::Failed, "grid with empty ids is rejected");
-
-    MonitorOutput::Request zero_grid;
-    zero_grid.frames[5] = base;
-    zero_grid.main_source_id = 5;
-    zero_grid.state = MakeState({5}, 5);
-    zero_grid.state.grid.cols = 0;
-    zero_grid.state.grid.rows = 1;
-    zero_grid.info.submit_id = 1262;
-    Check(monitor.Submit(zero_grid) == MonitorOutput::SubmitOutcome::Failed, "grid with zero columns is rejected");
-
-    MonitorOutput::Request ref_zero_grid;
-    ref_zero_grid.frames[5] = base;
-    ref_zero_grid.main_source_id = 5;
-    ref_zero_grid.state = MakeState({5}, 5);
-    ref_zero_grid.state.show_ref = true;
-    ref_zero_grid.state.ref_id = 5;
-    ref_zero_grid.state.grid.cols = 0;
-    ref_zero_grid.state.grid.rows = 1;
-    ref_zero_grid.info.submit_id = 1263;
-    Check(monitor.Submit(ref_zero_grid) == MonitorOutput::SubmitOutcome::Failed,
-          "reference grid with zero columns is rejected");
-
-    MonitorOutput::Request null_cell;
-    null_cell.frames[5] = base;
-    null_cell.frames[9] = nullptr;
-    null_cell.main_source_id = 5;
-    null_cell.state = MakeState({5, 9}, 5);
-    null_cell.state.grid.cols = 2;
-    null_cell.state.grid.rows = 1;
-    null_cell.info.submit_id = 1264;
-    Check(monitor.Submit(null_cell) == MonitorOutput::SubmitOutcome::Failed, "grid null cell frame is rejected");
-
-    // The renderer maps EVERY submitted entry, so an unreferenced null entry must be
-    // rejected too (it used to crash av_frame_ref inside FeedFrames).
-    MonitorOutput::Request null_unreferenced;
-    null_unreferenced.frames[5] = base;
-    null_unreferenced.frames[99] = nullptr;
-    null_unreferenced.main_source_id = 5;
-    null_unreferenced.state = MakeState({5}, 5);
-    null_unreferenced.info.submit_id = 1265;
-    Check(monitor.Submit(null_unreferenced) == MonitorOutput::SubmitOutcome::Failed,
-          "an unreferenced null frame entry is rejected before Feed");
-    Check(monitor.diagnostics().displayed == 1, "no rejected grid reached the sink");
-
-    MonitorOutput::Request null_main;
-    null_main.frames[5] = nullptr;
-    null_main.main_source_id = 5;
-    null_main.state = MakeState({5}, 5);
-    null_main.info.submit_id = 1266;
-    Check(monitor.Submit(null_main) == MonitorOutput::SubmitOutcome::Failed, "null main source frame is rejected");
-
-    Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "grid structure monitor closed");
-  }
-}
-
-// F3 regression: a failing Submit must publish its own failure state, never leave
-// the previous Displayed result describing the new failure.
-void TestFeedFailure(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
-  (void)gpu;
-  const EYEQ::ResolvedOutput resolved = BuildResolved(64, 54, EYEQ::PixelFormat::R210, false, 203.0, 0);
-  SinkPair sinks;
-  MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                        EYEQ::ScaleMethod::Bicubic);
-  auto good = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
-  MonitorOutput::Request ok;
-  ok.frames[5] = good;
-  ok.main_source_id = 5;
-  ok.state = MakeState({5}, 5);
-  ok.info.submit_id = 400;
-  Check(monitor.Submit(ok) == MonitorOutput::SubmitOutcome::Accepted, "feed-failure first request accepted");
-  Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "feed-failure first request displayed");
-  Check(monitor.last_result().status == MonitorOutput::Status::Displayed && monitor.last_result().submit_id == 400,
-        "the successful result is published before the failing submit");
-
-  auto broken = MakeBrokenFrame(stream, 64, 54);
-  MonitorOutput::Request bad;
-  bad.frames[9] = broken;
-  bad.main_source_id = 9;
-  bad.state = MakeState({9}, 9);
-  bad.info.submit_id = 401;
-  Check(monitor.Submit(bad) == MonitorOutput::SubmitOutcome::Failed, "an unsupported frame format fails the submit");
-  Check(monitor.status() == MonitorOutput::Status::Failed, "status reflects the feed failure");
-  Check(monitor.last_result().status == MonitorOutput::Status::Failed && monitor.last_result().stage == "feed",
-        "last_result reports the new feed failure, not the old Displayed result");
-  Check(monitor.last_result().submit_id == 401, "failure identity is the failing submit");
-  Check(!monitor.last_result().reason.empty(), "feed failure carries a reason");
-  Check(sinks.fake.still_display_count() == 1, "the failed feed never reached the sink");
-  Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "feed-failure monitor closed");
-}
-
 void TestIsolation(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
-  // A second, independent renderer with a different target must not affect the
-  // monitor output. This only shows resource isolation, not a UI viewport.
-  EYEQ::FrameRenderer::Config desktop_config;
+  // A second, independent consumer (its own coordinator/renderer) with a
+  // different target must not affect the monitor output. This only shows resource
+  // isolation, not a UI viewport.
+  EYEQ::DisplayCoordinator::Config desktop_config;
   desktop_config.mode = EYEQ::DisplayMode::Fill;
   desktop_config.pixel_density = 1.0f;
   desktop_config.enable_osd = false;
-  EYEQ::FrameRenderer desktop(context, desktop_config);
+  desktop_config.mapping_target.primaries = PL_COLOR_PRIM_BT_709;
+  desktop_config.mapping_target.peak_nits = 203.0f;
+  desktop_config.mapping_target.black_nits = 0.0f;
+  desktop_config.mapping_target.sdr_white_nits = PL_COLOR_SDR_WHITE;
+  desktop_config.canvas_w = 32;
+  desktop_config.canvas_h = 32;
+  EYEQ::DisplayCoordinator desktop(context, desktop_config);
   auto desktop_source = MakeFrame(stream, 32, 32, [](int, int) { return Color{0.7f, 0.2f, 0.1f}; });
   std::map<int, std::shared_ptr<AVFrame>> desktop_frames;
   desktop_frames[1] = desktop_source;
   desktop.SetMainSource(1);
-  Check(desktop.FeedFrames(desktop_frames).empty(), "desktop renderer accepted its own frame");
+  Check(desktop.FeedFrames(desktop_frames).empty(), "desktop consumer accepted its own frame");
   pl_fmt desktop_format = pl_find_named_fmt(gpu, "rgba32f");
   struct pl_tex_params desktop_params = {
       .w = 32,
@@ -1016,18 +715,16 @@ void TestIsolation(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   desktop_target.color.primaries = PL_COLOR_PRIM_BT_709;
   desktop_target.color.transfer = PL_COLOR_TRC_BT_1886;
   EYEQ::DisplayState desktop_state = MakeState({1}, 1);
-  desktop.Render(desktop_target, desktop_state);
+  desktop.RenderScene(desktop_state);
+  desktop.PresentTo(desktop_target, desktop_state);
 
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 64, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
-  MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                        EYEQ::ScaleMethod::Bicubic);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+  MonitorOutput monitor(context, resolved, sinks.sink());
   auto frame = MakeFrame(stream, 96, 64, [](int x, int y) { return QuadrantPixel(x, y, 96, 64); });
-  MonitorOutput::Request request;
-  request.frames[5] = frame;
-  request.main_source_id = 5;
-  request.state = MakeState({5}, 5);
-  request.info.submit_id = 1001;
+  EYEQ::DisplayState request_state = MakeState({5}, 5);
+  auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 1001, 0);
   Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "isolated monitor request accepted");
   Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "isolated monitor request displayed");
   CheckPackedAgainstOracle(sinks, monitor, gpu, resolved, 1001);
@@ -1040,14 +737,11 @@ void TestUhdOnce(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   const int height = 2160;
   const EYEQ::ResolvedOutput resolved = BuildResolved(width, height, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
-  MonitorOutput monitor(context, resolved, sinks.sink(), EYEQ::DisplayMode::Fill, EYEQ::ScaleMethod::Bicubic,
-                        EYEQ::ScaleMethod::Bicubic);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+  MonitorOutput monitor(context, resolved, sinks.sink());
   auto frame = MakeFrame(stream, width, height, [](int x, int y) { return QuadrantPixel(x, y, 3840, 2160); });
-  MonitorOutput::Request request;
-  request.frames[5] = frame;
-  request.main_source_id = 5;
-  request.state = MakeState({5}, 5);
-  request.info.submit_id = 1101;
+  EYEQ::DisplayState request_state = MakeState({5}, 5);
+  auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 1101, 0);
   Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "UHD request accepted");
   Check(Drive(monitor).status == MonitorOutput::Status::Displayed, "UHD request displayed");
   CheckPackedAgainstOracle(sinks, monitor, gpu, resolved, 1101);
@@ -1075,9 +769,6 @@ int main() {
     TestCancel(gpu, context, owner.stream);
     TestSinkFailures(gpu, context, owner.stream);
     TestClose(gpu, context, owner.stream);
-    TestSceneValidation(gpu, context, owner.stream);
-    TestSceneDependencies(gpu, context, owner.stream);
-    TestFeedFailure(gpu, context, owner.stream);
     TestIsolation(gpu, context, owner.stream);
     TestUhdOnce(gpu, context, owner.stream);
   } catch (const std::exception &e) {

@@ -63,3 +63,32 @@ target_link_libraries(display_linear_gpu_test PRIVATE
 add_test(NAME display_linear_gpu COMMAND display_linear_gpu_test)
 
 set_tests_properties(display_linear_gpu PROPERTIES TIMEOUT 600)
+
+# Coordination-layer tests: the DisplayCoordinator owns the single FrameRenderer,
+# the fixed mapping target, the canvas and the ICC/precision/NaN-Inf policies.
+# Headless Vulkan device; no window, no SDK.
+add_executable(display_coordinator_gpu_test
+  display_coordinator_gpu_test.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/display_coordinator.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/canvas_geometry.cpp
+  ${_display_test_sources})
+target_include_directories(display_coordinator_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(display_coordinator_gpu_test PRIVATE
+  spdlog::spdlog
+  Libplacebo::Libplacebo
+  SDL3::SDL3
+  SDL3_ttf::SDL3_ttf
+  FFmpeg::avcodec
+  FFmpeg::avformat
+  FFmpeg::avutil)
+add_test(NAME display_coordinator_gpu COMMAND display_coordinator_gpu_test)
+set_tests_properties(display_coordinator_gpu PROPERTIES TIMEOUT 600)
+
+# The canvas/preview coordinate transform is pure CPU: it must pass without a GPU,
+# a window or libplacebo.
+add_executable(canvas_geometry_test
+  canvas_geometry_test.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/canvas_geometry.cpp)
+target_include_directories(canvas_geometry_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME canvas_geometry COMMAND canvas_geometry_test)
+set_tests_properties(canvas_geometry PROPERTIES TIMEOUT 60)
