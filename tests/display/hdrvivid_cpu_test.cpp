@@ -63,6 +63,55 @@ int TargetLuminanceCode(double nits) {
   return static_cast<int>(std::lround(pq * 4095.0));
 }
 
+// Which CUVA spline blocks the synthesized metadata declares. "None" leaves
+// spline_flag clear, so the solver falls back to its default dark spline.
+enum class SplineKind { None, DarkMetadata, High1, High2, High3, DarkAndHigh };
+
+const char *SplineKindName(SplineKind kind) {
+  switch (kind) {
+  case SplineKind::None:
+    return "none (default low spline)";
+  case SplineKind::DarkMetadata:
+    return "th_mode 0 (metadata dark spline)";
+  case SplineKind::High1:
+    return "th_mode 1 (highlight)";
+  case SplineKind::High2:
+    return "th_mode 2 (highlight)";
+  case SplineKind::High3:
+    return "th_mode 3 (clamped highlight)";
+  case SplineKind::DarkAndHigh:
+    return "th_mode 0 + th_mode 1";
+  }
+  return "?";
+}
+
+// Thresholds in PQ code units plus the packed th_enable_mb and strength codes.
+struct SplineSpec {
+  int th_mode;
+  double th1, th2, th3;
+  int th_mb_code;
+  unsigned strength_code;
+};
+
+SplineSpec DarkSplineSpec() { return {0, 0.15, 0.30, 0.42, (40 << 2) | 0, 200}; }
+SplineSpec HighSplineSpec(int th_mode) { return {th_mode, 0.55, 0.64, 0.72, 40, 150}; }
+
+void ApplySplines(EYEQ::HDRVividMetadata *meta, const SplineSpec *specs, int count) {
+  for (int set = 0; set < 2; ++set) {
+    meta->spline_flag[set] = count > 0 ? 1 : 0;
+    meta->spline_num[set] = static_cast<unsigned>(count);
+    for (int i = 0; i < count; ++i) {
+      const SplineSpec &s = specs[i];
+      meta->spline_th_mode[set][i] = static_cast<unsigned>(s.th_mode);
+      meta->spline_th_mb[set][i] = static_cast<unsigned>(s.th_mb_code);
+      meta->spline_th[set][i][0] = static_cast<unsigned>(std::lround(s.th1 * 4095.0));
+      meta->spline_th[set][i][1] = static_cast<unsigned>(std::lround((s.th2 - s.th1) * 1023.0 * 4.0));
+      meta->spline_th[set][i][2] = static_cast<unsigned>(std::lround((s.th3 - s.th2) * 1023.0 * 4.0));
+      meta->spline_strength[set][i] = s.strength_code;
+    }
+  }
+}
+
 // A code value chosen so the CUVA "input peak" term (0.8*mean + 0.2*max) sits
 // clearly below the mastering peak: a typical bright HDR scene.
 //
@@ -70,7 +119,7 @@ int TargetLuminanceCode(double nits) {
 // (= tml here, because the content peak is below the target) onto the target
 // itself, i.e. the target is a fixed point of the authored curve. That is what
 // makes the known-point assertion below meaningful rather than tautological.
-EYEQ::HDRVividMetadata MakeMetadata(double target_nits) {
+EYEQ::HDRVividMetadata MakeMetadata(double target_nits, SplineKind spline = SplineKind::None) {
   EYEQ::HDRVividMetadata meta{};
   std::memset(&meta, 0, sizeof(meta));
   meta.system_start_code = 1;
@@ -114,6 +163,31 @@ EYEQ::HDRVividMetadata MakeMetadata(double target_nits) {
     meta.base_param_delta[i] = 0;
     meta.spline_flag[i] = 0;
   }
+
+  SplineSpec specs[2];
+  int count = 0;
+  switch (spline) {
+  case SplineKind::None:
+    break;
+  case SplineKind::DarkMetadata:
+    specs[count++] = DarkSplineSpec();
+    break;
+  case SplineKind::High1:
+    specs[count++] = HighSplineSpec(1);
+    break;
+  case SplineKind::High2:
+    specs[count++] = HighSplineSpec(2);
+    break;
+  case SplineKind::High3:
+    specs[count++] = HighSplineSpec(3);
+    break;
+  case SplineKind::DarkAndHigh:
+    specs[count++] = DarkSplineSpec();
+    specs[count++] = HighSplineSpec(1);
+    break;
+  }
+  ApplySplines(&meta, specs, count);
+
   meta.color_saturation_mapping_flag = 0;
   meta.color_saturation_num = 0;
   return meta;
@@ -198,6 +272,112 @@ void TestCurveKnownPoints() {
   EYEQ::SolveHDRVividCurve(meta, 600.0, mastering_nits, &lower);
   Check(lower.tml < curve.tml, "a lower target yields a lower target code");
   Check(EYEQ::EvalHDRVividCurve(lower, rml) <= at_master + 1e-6, "a lower target never maps the peak higher");
+}
+
+// ---------------------------------------------------------------------------
+// Spline branch coverage
+// ---------------------------------------------------------------------------
+void TestSplineBranchSolving() {
+  std::fprintf(stdout, "[HDR Vivid curve spline branches]\n");
+  const double mastering_nits = 4000.0;
+  const double target_nits = 1000.0;
+  const SplineKind kinds[] = {SplineKind::None,  SplineKind::DarkMetadata, SplineKind::High1,
+                              SplineKind::High2, SplineKind::High3,        SplineKind::DarkAndHigh};
+
+  EYEQ::HDRVividCurve baseline;
+  EYEQ::SolveHDRVividCurve(MakeMetadata(target_nits), target_nits, mastering_nits, &baseline);
+
+  for (SplineKind kind : kinds) {
+    const EYEQ::HDRVividMetadata meta = MakeMetadata(target_nits, kind);
+    EYEQ::HDRVividCurve curve;
+    EYEQ::SolveHDRVividCurve(meta, target_nits, mastering_nits, &curve);
+
+    Check(curve.low_valid == 1, std::string(SplineKindName(kind)) + ": a dark spline is always present");
+    Check(curve.tml > 0.0f, std::string(SplineKindName(kind)) + ": a target luminance is solved");
+
+    bool monotonic = true;
+    double previous = -1e30;
+    for (int i = 0; i <= 200; ++i) {
+      const double y = EYEQ::EvalHDRVividCurve(curve, i / 200.0);
+      if (y + 1e-6 < previous) {
+        monotonic = false;
+      }
+      previous = y;
+    }
+    Check(monotonic, std::string(SplineKindName(kind)) + ": the solved curve is monotonic");
+
+    const bool metadata_dark = kind == SplineKind::DarkMetadata || kind == SplineKind::DarkAndHigh;
+    if (metadata_dark) {
+      CheckNear(curve.th1, 0.15, 0.02, std::string(SplineKindName(kind)) + ": dark-spline th1 comes from metadata");
+      CheckNear(curve.th2, 0.30, 0.02, std::string(SplineKindName(kind)) + ": dark-spline th2 comes from metadata");
+      CheckNear(curve.th3, 0.42, 0.02, std::string(SplineKindName(kind)) + ": dark-spline th3 comes from metadata");
+      CheckNear(curve.dark_slope, 40.0 / 63.0, 0.02,
+                std::string(SplineKindName(kind)) + ": dark-spline slope is decoded from th_enable_mb");
+    } else {
+      // The default dark spline is derived from the frame average brightness.
+      CheckNear(curve.th1, 0.225, 0.02, std::string(SplineKindName(kind)) + ": default dark spline th1");
+    }
+
+    const bool expect_high = kind == SplineKind::High1 || kind == SplineKind::High2 || kind == SplineKind::High3 ||
+                             kind == SplineKind::DarkAndHigh;
+    Check(curve.high_valid == (expect_high ? 1 : 0),
+          std::string(SplineKindName(kind)) + ": highlight-spline presence matches the metadata");
+    if (expect_high) {
+      CheckNear(curve.th1_high, 0.55, 0.02, std::string(SplineKindName(kind)) + ": highlight th1 from metadata");
+      CheckNear(curve.th3_high, 0.74, 0.03, std::string(SplineKindName(kind)) + ": highlight th3 from metadata");
+      const bool expect_clamped = kind == SplineKind::High3;
+      Check(curve.high_clamped == (expect_clamped ? 1 : 0),
+            std::string(SplineKindName(kind)) + ": th_mode 3 is the only clamped highlight mode");
+    }
+
+    if (kind != SplineKind::None) {
+      double max_delta = 0.0;
+      for (int i = 0; i <= 200; ++i) {
+        const double x = i / 200.0;
+        max_delta =
+            std::max(max_delta, std::fabs(EYEQ::EvalHDRVividCurve(curve, x) - EYEQ::EvalHDRVividCurve(baseline, x)));
+      }
+      std::fprintf(stdout, "      %-42s max |spline - default| = %.5f\n", SplineKindName(kind), max_delta);
+      Check(max_delta > 1e-4, std::string(SplineKindName(kind)) + ": the metadata spline changes the curve");
+    }
+  }
+
+  // A metadata dark spline with the high-threshold set must keep the highlight
+  // spline above it (the solver drops a highlight that starts inside the dark
+  // region); this is the documented ordering rule.
+  EYEQ::HDRVividCurve ordered;
+  EYEQ::SolveHDRVividCurve(MakeMetadata(target_nits, SplineKind::DarkAndHigh), target_nits, mastering_nits, &ordered);
+  Check(ordered.high_valid == 1 && ordered.th1_high > ordered.th3, "the highlight spline starts above the dark spline");
+}
+
+// ---------------------------------------------------------------------------
+// Spline-strength boundary (characterization, not a correctness claim)
+// ---------------------------------------------------------------------------
+//
+// At near-maximum spline strength the cubic pieces can overshoot by a fraction of
+// a 10-bit code value. This records the measured bound instead of asserting
+// strict monotonicity that the solver does not guarantee. Whether the CUVA
+// reference implementation behaves identically is NOT verified here.
+void TestSplineStrengthBoundary() {
+  std::fprintf(stdout, "[HDR Vivid spline strength boundary]\n");
+  EYEQ::HDRVividMetadata meta = MakeMetadata(1000.0);
+  // Rewrite the spline block with the strongest legal strength (code 240 -> +0.88).
+  const SplineSpec spec{1, 0.55, 0.64, 0.72, 40, 240};
+  ApplySplines(&meta, &spec, 1);
+
+  EYEQ::HDRVividCurve curve;
+  EYEQ::SolveHDRVividCurve(meta, 1000.0, 4000.0, &curve);
+
+  double previous = -1e30;
+  double worst_backstep = 0.0;
+  for (int i = 0; i <= 400; ++i) {
+    const double y = EYEQ::EvalHDRVividCurve(curve, i / 400.0);
+    worst_backstep = std::max(worst_backstep, previous - y);
+    previous = y;
+  }
+  std::fprintf(stdout, "      strength code 240: max backstep = %.6f PQ code (1 10-bit code = %.6f)\n", worst_backstep,
+               1.0 / 1023.0);
+  Check(worst_backstep < 1e-3, "near-maximum spline strength overshoot stays below 1e-3 PQ code");
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +498,8 @@ int main() {
   try {
     TestPqRoundTrip();
     TestCurveKnownPoints();
+    TestSplineBranchSolving();
+    TestSplineStrengthBoundary();
     TestMetadataParsing();
     TestMetadataAbsent();
     TestMasteringLuminance();
