@@ -111,14 +111,35 @@ void DisplayCoordinator::SetMainSource(int id) { renderer_->SetMainSource(id); }
 void DisplayCoordinator::SetSdrWhiteOnHdr(float nits) { renderer_->SetSdrWhiteOnHdr(nits); }
 
 void DisplayCoordinator::SetTargetDisplayNits(double nits, bool override_enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (result_borrowed_) {
+    throw std::logic_error("DisplayCoordinator::SetTargetDisplayNits called while the result is borrowed");
+  }
+  // Historical, opt-in override of the source HDR max_luma. It never changes the
+  // monitor/comparison target: the renderer's setter also nudges its own default
+  // mapping target, so the coordinator re-applies the mapping target it owns.
   renderer_->SetTargetDisplayNits(nits, override_enabled);
-  mapping_target_.peak_nits = static_cast<float>(nits);
+  renderer_->SetMappingTarget(mapping_target_, work_precision_);
+  InvalidateScene();
+}
+
+void DisplayCoordinator::SetMonitorTarget(float peak_nits, float sdr_white_nits) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (result_borrowed_) {
+    throw std::logic_error("DisplayCoordinator::SetMonitorTarget called while the result is borrowed");
+  }
+  mapping_target_.peak_nits = peak_nits;
+  mapping_target_.sdr_white_nits = sdr_white_nits;
   ValidateMappingTarget(mapping_target_);
   renderer_->SetMappingTarget(mapping_target_, work_precision_);
   InvalidateScene();
 }
 
 void DisplayCoordinator::SetMappingTarget(const MappingTarget &target) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (result_borrowed_) {
+    throw std::logic_error("DisplayCoordinator::SetMappingTarget called while the result is borrowed");
+  }
   ValidateMappingTarget(target);
   mapping_target_ = target;
   renderer_->SetMappingTarget(mapping_target_, work_precision_);
@@ -126,6 +147,7 @@ void DisplayCoordinator::SetMappingTarget(const MappingTarget &target) {
 }
 
 bool DisplayCoordinator::ReconfigurePrecision(WorkPrecision precision) {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (result_borrowed_) {
     // Drain first: the previous result is still in use, so defer the switch
     // until ReleaseResult(). Never change the precision under a live reader.
@@ -155,6 +177,10 @@ void DisplayCoordinator::InvalidateScene() {
 }
 
 void DisplayCoordinator::SetCanvasSize(int width, int height) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (result_borrowed_) {
+    throw std::logic_error("DisplayCoordinator::SetCanvasSize called while the result is borrowed");
+  }
   if (width <= 0 || height <= 0) {
     throw std::invalid_argument(fmt::format("DisplayCoordinator::SetCanvasSize: invalid size {}x{}", width, height));
   }
@@ -234,6 +260,17 @@ const RenderedFrame &DisplayCoordinator::ComposeLocked(const DisplayState &state
   }
 
   const uint64_t key = ComputeSceneKey(state);
+  if (result_borrowed_) {
+    // A consumer still reads the common result texture. Reusing the same cached
+    // scene is fine (resize/OSD do not change the key), but a real recomposition
+    // would overwrite the texture under the reader. Reject it instead of
+    // corrupting the in-flight request; the caller must drain first.
+    if (!scene_key_valid_ || key != last_scene_key_ || !result_.IsValid()) {
+      ++recompose_rejected_count_;
+      throw std::logic_error("DisplayCoordinator: scene recomposition requested while the result is borrowed");
+    }
+    return result_;
+  }
   if (scene_key_valid_ && key == last_scene_key_ && result_.IsValid()) {
     // A UI-only change (resize, OSD toggle) must not re-run the source
     // mapping/HDR work.
@@ -271,12 +308,17 @@ void DisplayCoordinator::PresentTo(struct pl_frame &target, const DisplayState &
   PresentLocked(target, state);
 }
 
+bool DisplayCoordinator::WouldRecompose(const DisplayState &state) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!scene_key_valid_ || !result_.IsValid()) {
+    return true;
+  }
+  return ComputeSceneKey(state) != last_scene_key_;
+}
+
 void DisplayCoordinator::PresentLocked(struct pl_frame &target, const DisplayState &state) {
   if (!result_.IsValid()) {
     throw std::logic_error("DisplayCoordinator::PresentTo called before RenderScene");
-  }
-  if (result_borrowed_) {
-    throw std::logic_error("DisplayCoordinator::PresentTo called while the result is borrowed");
   }
   if (!target.planes[0].texture) {
     throw std::invalid_argument("DisplayCoordinator::PresentTo: null target");
@@ -299,5 +341,21 @@ void DisplayCoordinator::RecalibrateICC(const struct pl_color_space *target_colo
   renderer_->RecalibrateICCParams(target_color);
 }
 
-void DisplayCoordinator::AcquireResult() { result_borrowed_ = true; }
-void DisplayCoordinator::ReleaseResult() { result_borrowed_ = false; }
+void DisplayCoordinator::AcquireResult() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (result_borrowed_) {
+    throw std::logic_error("DisplayCoordinator::AcquireResult called while the result is already borrowed");
+  }
+  if (!result_.IsValid()) {
+    throw std::logic_error("DisplayCoordinator::AcquireResult called before a valid result exists");
+  }
+  result_borrowed_ = true;
+}
+
+void DisplayCoordinator::ReleaseResult() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!result_borrowed_) {
+    throw std::logic_error("DisplayCoordinator::ReleaseResult called without a matching AcquireResult");
+  }
+  result_borrowed_ = false;
+}

@@ -203,7 +203,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
 - `--no-colorspace-hint`: Disable video color space hinting; uses the default color space instead. Enable this for tone mapping when the display does not support HDR
 - `--sdr-white-on-hdr <nits>`: Set the SDR reference white level (in nits) when the main video is HDR. By default, SDR videos are mapped using the standard reference white of 203 nits (ITU-R BT.2408). This option only takes effect when the main video is HDR and the target video is SDR
-- `--target-display-nits <nits>`: Target display peak luminance in nits. When passed, it overrides the peak (`max_luma`) of all HDR content (HLG, DPX read-back) to this value
+- `--target-display-nits <nits>`: Target display peak luminance in nits. When passed, it overrides the peak (`max_luma`) of all HDR content (HLG, DPX read-back) to this value. It does not set the monitoring target; use `--monitor-target-nits` for that
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
 - `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
@@ -216,6 +216,20 @@ After launching, the following keyboard and mouse controls are available:
 - `--icc-profile <profile>`: ICC color management — `auto` uses the system profile (macOS only); a file path specifies a custom ICC profile; `N:path` specifies a profile for a specific video
 - `--loglevel <level>`: Log level — `debug`, `info`, `warning`, `error`, `critical`, `off` (default `info`)
 - `--debug`: Equivalent to `--loglevel debug`
+
+### Monitoring Output (DeckLink)
+
+A build made with `-DEYEQ_ENABLE_DECKLINK=ON` and the DeckLink SDK can send the current comparison result to an external monitor. This is **still-only**: the player stays paused and pressing Space only logs that continuous playback is not supported. The desktop preview and the DeckLink output consume the same composed result, so toggling the desktop OSD or resizing the window never changes the packed output bytes. Without `--monitor-device` the default player is unchanged and does not link the DeckLink backend.
+
+- `--monitor-device <selector>`: Enable monitoring on a DeckLink device. The selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`, including the macOS preview); the macOS system color management is untouched
+- `--monitor-mode <WxH@N|WxH@N/D>`: Native monitor mode as exact integer data, e.g. `3840x2160@50` or `3840x2160@30000/1001`. Required with `--monitor-device`; a mode the device does not natively support is rejected
+- `--monitor-connection {sdi,hdmi}`: Output connection (default `sdi`)
+- `--monitor-pixel-format {v210,r210}`: Output pixel format (default `v210`)
+- `--monitor-color {sdr709,pq2020}`: Color target — `sdr709` (BT.709 / BT.1886) or `pq2020` (BT.2020 / PQ) (default `sdr709`)
+- `--monitor-target-nits <nits>`: Monitor peak luminance in nits, i.e. the comparison target. Required for a `pq2020` target and never derived from `--target-display-nits`. For an `sdr709` target it defaults to 100 nits when omitted
+- `--monitor-sdr-white <nits>`: SDR white level of the common mapping target when monitoring (default 203 nits)
+
+When monitoring is enabled, `--target-display-nits` keeps its historical, opt-in meaning (it overrides the source HDR `max_luma`) and never changes the monitor/comparison target; passing both logs that the external output is unaffected.
 
 ### Environment Variables
 
@@ -264,16 +278,16 @@ After launching, the following keyboard and mouse controls are available:
 
    Use `color_trc=arib-std-b67` for HLG. On an HDR display the PQ output passes through without tone mapping, so `--no-colorspace-hint` and `--target-display-nits` are unnecessary; `--no-colorspace-hint` is required only on non-HDR displays to enable tone mapping.
 
-## DeckLink Output (Work in Progress)
+## DeckLink Output
 
-The DeckLink SDI/HDMI output backend now has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. A GPU frame packer (`src/output/frame_packer.hpp` / `.cpp`) converts nonlinear full-range float RGB into Video-range r210/v210 through an asynchronous readback ring, but the `eyeq` player is **not wired to it yet** and there are no DeckLink playback options, so `eyeq` still cannot output video. Renderer/player integration, audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. A standalone `decklink-test-signal` tool renders a deterministic CPU pattern through the same backend and enables real hardware output when run. Automated validation exercises the native write path only against a fake SDK and the packer against a local GPU; that is the current verification status, not a runtime restriction.
+The DeckLink SDI/HDMI output backend has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. A GPU frame packer (`src/output/frame_packer.hpp` / `.cpp`) converts nonlinear full-range float RGB into Video-range r210/v210 through an asynchronous readback ring. The `eyeq` player is wired to the packer for **still-only** external monitoring (see the Monitoring Output section above): the composition layer keeps a single renderer and hands the same composed result to both the desktop preview and the monitor output, but continuous hardware-clock playback is not implemented yet. Audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. A standalone `decklink-test-signal` tool renders a deterministic CPU pattern through the same backend and enables real hardware output when run. Automated validation exercises the native write path only against a fake SDK and the packer against a local GPU; that is the current verification status, not a runtime restriction.
 
 Optional CMake switches (all default to `OFF`; the normal player build is unaffected):
 
 | Option | Default | Purpose |
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests and, with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection and output-backend tests. No GPU, no device. |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` and `decklink-test-signal` tools. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. The player is not wired to it yet, so `eyeq` still does not output video. |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` and `decklink-test-signal` tools. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. It also wires the still-only external monitoring options into `eyeq`. |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Build the GPU packing tests: a CPU oracle, a real-GPU comparison/readback test and a lifecycle fault-injection test. Needs libplacebo and a working Vulkan device at runtime; no SDK and no DeckLink device. |
 | `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | Build the offscreen display/rendering tests: the real `RenderContext`/`FrameRenderer` on a headless Vulkan device, covering Fill/Slide/Grid, two-instance interleaving, HDR override, ICC isolation and OSD switches. Needs libplacebo and a working Vulkan device at runtime; no SDK, no window and no DeckLink device. |
 | `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | Build the CPU-only player tests: the real `SyncPlayer`/`VideoSource` over locally synthesized YUV4MPEG2 files, covering frame snapshot publication, serialized control completion, relative seeks, multi-source EOF alignment, bounded command work, stop cancellation and seek-failure propagation. No GPU, window, SDK or DeckLink device. |
@@ -358,7 +372,8 @@ at least 16-bit components) on the same `pl_gpu`, applies the frozen first-versi
 policy (BT709/SDR-BT1886 or BT2020/PQ, Video range, Left chroma, no transfer/tonemap/
 ICC processing) and produces r210 (big-endian) or v210 (little-endian) bytes in a
 fixed four-slot ring backed by persistent mapped host buffers and asynchronous
-`pl_tex_download` + `pl_buf_poll`. The `eyeq` player is not wired to it yet.
+`pl_tex_download` + `pl_buf_poll`. In monitoring mode the `eyeq` player sends the
+packer's output to an external monitor (see the Monitoring Output section above).
 
 Running the GPU tests (no SDK, no DeckLink device; a real Vulkan GPU is required and a
 missing GPU fails the test instead of being skipped):
@@ -394,15 +409,19 @@ manual/environment-limited.
 
 ### Still monitor composition layer
 
-`src/output/monitor_output.hpp` combines the real `FrameRenderer`, `FramePacker` and
-`FrameSink` seams into one reusable still-only composition layer. It owns a dedicated
-monitor renderer, a fixed offscreen full-range RGB target and the packer, draws a
-frame set into that target, packs it and hands the bytes to
-`FrameSink::DisplayStill`. At most one request is in flight and the caller advances it
-on the same thread with `Pump()`; a new request while one is in flight is reported as
-Busy and is not read or mapped. `Close()` drains the packer and closes the borrowed
-sink within one total deadline. The `eyeq` player is **not wired to it**: there is no
-monitor CLI, no worker thread, no scheduled playback and no DeckLink device output.
+`src/output/monitor_output.hpp` consumes the common display-linear result produced by
+the coordination layer (`src/display/display_coordinator.*`), encodes it to the wire
+transfer into a fixed offscreen full-range RGB target, packs it with `FramePacker` and
+hands the bytes to `FrameSink::DisplayStill`. It never owns a `FrameRenderer`. At most
+one request is in flight and the caller advances it on the same thread with `Pump()`;
+main drives this through `src/output/monitor_controller.*`, which owns the sink and the
+borrow pairing. A new request while one is in flight is reported as Busy and is not
+read or mapped. `Close()` drains the packer and closes the borrowed sink within one
+total deadline.
+
+With `EYEQ_ENABLE_DECKLINK=ON` the `eyeq` player is wired to this layer for still-only
+external monitoring (see "Monitoring Output (DeckLink)"); continuous hardware-clock
+playback, audio and native HDR passthrough are still not implemented.
 
 The composition tests exercise the real layer against a headless Vulkan device and a
 scripted fake sink (which can really return Still Busy/DeviceError/Closed):

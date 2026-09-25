@@ -66,10 +66,14 @@ find_package(FFmpeg REQUIRED COMPONENTS avcodec avfilter avformat avutil swscale
 
 # CPU-only output contract library: public headers plus pure helpers. It has no SDK
 # dependency and does not use the GPU; libplacebo is linked PUBLIC only because
-# frame_packer.hpp declares pl_tex/pl_gpu parameters.
+# frame_packer.hpp declares pl_tex/pl_gpu parameters. It also carries the pure
+# monitor mode helpers and the strict monitor CLI parsing so the player and the
+# tools share exactly one implementation (no duplicated selector parser).
 add_library(eyeq_output_contract STATIC
   ${CMAKE_SOURCE_DIR}/src/output/pixel_format.cpp
-  ${CMAKE_SOURCE_DIR}/src/output/output_profile.cpp)
+  ${CMAKE_SOURCE_DIR}/src/output/output_profile.cpp
+  ${CMAKE_SOURCE_DIR}/src/output/monitor_cli.cpp
+  ${CMAKE_SOURCE_DIR}/src/output/decklink/monitor_mode.cpp)
 target_include_directories(eyeq_output_contract PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(eyeq_output_contract PUBLIC Libplacebo::Libplacebo)
 
@@ -124,8 +128,7 @@ if(EYEQ_ENABLE_DECKLINK)
   add_library(eyeq_decklink_backend STATIC
     "${_decklink_dispatch}"
     ${CMAKE_SOURCE_DIR}/src/output/decklink/decklink_catalog.cpp
-    ${CMAKE_SOURCE_DIR}/src/output/decklink/decklink_output.cpp
-    ${CMAKE_SOURCE_DIR}/src/output/decklink/monitor_mode.cpp)
+    ${CMAKE_SOURCE_DIR}/src/output/decklink/decklink_output.cpp)
   target_include_directories(eyeq_decklink_backend
     PUBLIC ${CMAKE_SOURCE_DIR}/src
     PRIVATE "${_decklink_include}")
@@ -198,6 +201,19 @@ target_link_libraries(
 # macOS: link AppKit framework (required for ICC profile auto-detection)
 if(APPLE)
   target_link_libraries(${PROJECT_NAME} PRIVATE "-framework AppKit")
+endif()
+
+# SDK-enabled player wiring. The still-only MonitorOutput consumes the common result
+# produced by the DisplayCoordinator; the DeckLink backend is opened only when the
+# user passes --monitor-device. With EYEQ_ENABLE_DECKLINK=OFF none of these sources
+# or symbols are compiled or linked into the default player.
+if(EYEQ_ENABLE_DECKLINK)
+  target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/src/output/monitor_controller.cpp)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE EYEQ_ENABLE_DECKLINK=1)
+  target_link_libraries(${PROJECT_NAME} PRIVATE
+    eyeq_monitor_output
+    eyeq_frame_packer
+    eyeq_decklink_backend)
 endif()
 
 # Configure install rules

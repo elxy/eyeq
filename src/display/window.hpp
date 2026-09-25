@@ -82,6 +82,15 @@ public:
   void Reset();
   bool OnResized();
 
+  /**
+   * @brief Release the swapchain, surface, Vulkan context and the SDL window.
+   *
+   * Idempotent: after it runs the destructor is a no-op. It exists so the V2.1
+   * section 5.4 exit ordering can release GPU resources before SDL_Quit instead of
+   * relying on the destructor that runs after SDL_Quit.
+   */
+  void Shutdown();
+
   bool IsFullscreen() const { return (SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN) != 0; }
   /**
    * @brief Enter or leave fullscreen at runtime

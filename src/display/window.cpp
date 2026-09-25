@@ -135,6 +135,14 @@ void Window::Reset() {
   MoveWindowToCenter(ori_display_id_);
 }
 
+void Window::Shutdown() {
+  DestroyGraphics();
+  if (window_) {
+    SDL_DestroyWindow(window_);
+    window_ = nullptr;
+  }
+}
+
 void Window::SetFullscreen(bool enabled) {
   if (IsFullscreen() == enabled) {
     return;

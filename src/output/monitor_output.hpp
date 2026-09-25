@@ -133,6 +133,10 @@ public:
   void Cancel();
 
   Status status() const { return status_; }
+  // True while the module owns an in-flight request (including a failed request
+  // whose packer slot is still draining). The caller must keep pumping it and
+  // must not compose a new scene that would overwrite the borrowed result.
+  bool in_flight() const { return request_in_flight_; }
   // True only when a new Submit would be accepted right now: the module is not
   // closed/closing/terminal and owns no in-flight (or failed-but-undrained) request.
   bool AcceptsRequests() const { return !closed_ && !closing_ && !terminal_failed_ && !request_in_flight_; }

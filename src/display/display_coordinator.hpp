@@ -103,10 +103,23 @@ public:
   void SetMainSource(int id);
   void SetSdrWhiteOnHdr(float nits);
   void SetTargetDisplayNits(double nits, bool override_enabled);
+  // Sets the monitor/comparison target peak and SDR white explicitly. Used when
+  // monitoring is enabled, where the external monitor target is the comparison
+  // baseline (V2.1 section 8.2); --target-display-nits keeps its historical
+  // source-max_luma override meaning and never becomes the monitor target.
+  void SetMonitorTarget(float peak_nits, float sdr_white_nits);
 
   const MappingTarget &mapping_target() const { return mapping_target_; }
   // Explicitly replaces the fixed mapping target (invalidates the cached scene).
   void SetMappingTarget(const MappingTarget &target);
+
+  /*
+   * True when the given state would force a new composition (different scene key
+   * or no usable cached result). The caller uses this to avoid asking for a
+   * recomposition while a consumer holds the common result (the monitor borrow),
+   * which the assertions below reject.
+   */
+  bool WouldRecompose(const DisplayState &state) const;
 
   WorkPrecision work_precision() const { return work_precision_; }
   /*
@@ -147,7 +160,9 @@ public:
 
   // Borrow management: a consumer marks the result borrowed while it uses it
   // (for example the monitor output encoding/packing it) so a precision
-  // reconfiguration waits for the drain.
+  // reconfiguration waits for the drain. While borrowed, asking for a different
+  // scene or a mapping-target change is rejected (fail-fast) instead of
+  // overwriting the texture the consumer is still reading.
   void AcquireResult();
   void ReleaseResult();
   bool result_borrowed() const { return result_borrowed_; }
@@ -158,6 +173,7 @@ public:
   uint64_t scene_render_count() const { return scene_render_count_; }
   uint64_t present_count() const { return present_count_; }
   uint64_t precision_reconfigure_count() const { return precision_reconfigure_count_; }
+  uint64_t recompose_rejected_count() const { return recompose_rejected_count_; }
   uint64_t scene_revision() const { return scene_revision_; }
 
 private:
@@ -169,7 +185,7 @@ private:
   const RenderedFrame &ComposeLocked(const DisplayState &state);
   void PresentLocked(struct pl_frame &target, const DisplayState &state);
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::unique_ptr<FrameRenderer> renderer_;
   ColorspaceHintFunc presenter_hint_;
 
@@ -194,6 +210,7 @@ private:
   uint64_t scene_render_count_ = 0;
   uint64_t present_count_ = 0;
   uint64_t precision_reconfigure_count_ = 0;
+  uint64_t recompose_rejected_count_ = 0;
 };
 
 } // namespace EYEQ

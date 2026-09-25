@@ -59,4 +59,17 @@ target_compile_definitions(monitor_output_fault_test PRIVATE EYEQ_FRAME_PACKER_T
 target_link_libraries(monitor_output_fault_test PRIVATE ${_monitor_test_libraries})
 add_test(NAME monitor_output_fault COMMAND monitor_output_fault_test)
 
-set_tests_properties(monitor_output_gpu monitor_output_fault PROPERTIES TIMEOUT 900)
+# MonitorController integration: the real coordinator + MonitorOutput + packer with
+# the scripted fake sink, proving the borrow pairing, the shared desktop/monitor
+# result, resize/OSD byte stability, resubmission and the Busy/cancel/failure/
+# drain/close paths on the interface main actually uses.
+add_executable(monitor_controller_gpu_test
+  monitor_controller_gpu_test.cpp
+  ${CMAKE_SOURCE_DIR}/tests/decklink/fake_frame_sink.cpp
+  ${CMAKE_SOURCE_DIR}/src/output/monitor_controller.cpp
+  ${_monitor_display_sources})
+target_include_directories(monitor_controller_gpu_test PRIVATE ${_monitor_test_includes})
+target_link_libraries(monitor_controller_gpu_test PRIVATE eyeq_frame_packer ${_monitor_test_libraries})
+add_test(NAME monitor_controller_gpu COMMAND monitor_controller_gpu_test)
+
+set_tests_properties(monitor_output_gpu monitor_output_fault monitor_controller_gpu PROPERTIES TIMEOUT 900)

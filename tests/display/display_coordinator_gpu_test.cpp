@@ -700,7 +700,22 @@ void TestPrecisionReconfigure(EYEQ::RenderContext &context, AVStream *stream) {
   Check(coordinator->ReconfigurePrecision(EYEQ::WorkPrecision::F32),
         "reconfiguring while unborrowed applies immediately");
   Check(coordinator->precision_reconfigure_count() == 1, "the immediate reconfiguration is counted");
+  // A precision change invalidated the cached scene, so compose again before a
+  // consumer may borrow the (now F32) result.
+  coordinator->RenderScene(state);
+  Check(!coordinator->WouldRecompose(state), "an unchanged scene would not recompose");
   coordinator->AcquireResult();
+  EYEQ::DisplayState changed = state;
+  changed.scale = 1.9f;
+  bool recompose_threw = false;
+  try {
+    coordinator->RenderScene(changed);
+  } catch (const std::logic_error &) {
+    recompose_threw = true;
+  }
+  Check(coordinator->WouldRecompose(changed), "a changed scene would recompose");
+  Check(recompose_threw, "recomposing while the result is borrowed is rejected");
+  Check(coordinator->recompose_rejected_count() == 1, "the rejected recomposition is counted");
   Check(!coordinator->ReconfigurePrecision(EYEQ::WorkPrecision::F16),
         "reconfiguring while the result is borrowed is deferred");
   Check(coordinator->work_precision() == EYEQ::WorkPrecision::F32, "the precision is unchanged while deferred");
@@ -710,6 +725,32 @@ void TestPrecisionReconfigure(EYEQ::RenderContext &context, AVStream *stream) {
   Check(coordinator->work_precision() == EYEQ::WorkPrecision::F16, "the deferred precision is applied after release");
   Check(reconfigured.precision == EYEQ::WorkPrecision::F16, "the recomposed result uses the new precision");
   Check(coordinator->precision_reconfigure_count() == 2, "the deferred reconfiguration is counted once applied");
+}
+
+// ---------------------------------------------------------------------------
+// Target semantics: --target-display-nits is the historical opt-in source
+// max_luma override and never moves the mapping/monitor target (V2.1 8.2).
+// ---------------------------------------------------------------------------
+void TestTargetSemantics(EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[target semantics]\n");
+  const EYEQ::MappingTarget base = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 600.0f);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 64, 48, base);
+  coordinator->SetMainSource(5);
+  coordinator->FeedFrames({{5, MakeFrame(stream, 32, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; })}});
+  EYEQ::DisplayState state = MakeState({5}, 5);
+  coordinator->RenderScene(state);
+
+  coordinator->SetTargetDisplayNits(800.0, true);
+  Check(std::fabs(coordinator->mapping_target().peak_nits - 600.0f) < 0.5f,
+        "--target-display-nits does not change the mapping target peak");
+  coordinator->SetSdrWhiteOnHdr(120.0f);
+  Check(std::fabs(coordinator->mapping_target().sdr_white_nits - PL_COLOR_SDR_WHITE) < 0.5f,
+        "--sdr-white-on-hdr does not change the mapping target SDR white");
+  coordinator->SetMonitorTarget(500.0f, 100.0f);
+  Check(std::fabs(coordinator->mapping_target().peak_nits - 500.0f) < 0.5f,
+        "SetMonitorTarget sets the comparison-baseline peak");
+  Check(std::fabs(coordinator->mapping_target().sdr_white_nits - 100.0f) < 0.5f,
+        "SetMonitorTarget sets the comparison-baseline SDR white");
 }
 
 // ---------------------------------------------------------------------------
@@ -829,6 +870,7 @@ int main() {
     TestIccModeIsolation(context, owner.stream);
     TestMigratedBaselineCompatibility(context, owner.stream);
     TestPrecisionReconfigure(context, owner.stream);
+    TestTargetSemantics(context, owner.stream);
     TestPerformanceRecording(context);
     TestNanInfPolicy(context);
     TestFeedFailure(context, owner.stream);

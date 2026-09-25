@@ -9,6 +9,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <sstream>
 #include <thread>
@@ -31,6 +34,13 @@ extern "C" {
 #include "display/display_coordinator.hpp"
 #include "display/render.hpp"
 #include "display/platform_activate.h"
+
+#ifdef EYEQ_ENABLE_DECKLINK
+#include "output/decklink/monitor_mode.hpp"
+#include "output/decklink_backend.hpp"
+#include "output/monitor_cli.hpp"
+#include "output/monitor_controller.hpp"
+#endif
 
 #include <libplacebo/colorspace.h>
 
@@ -70,6 +80,21 @@ struct EyeQArgs {
   float sdr_white_on_hdr;                // SDR white level (nits) when rendering under HDR
   double target_display_nits;            // Target display peak luminance (nits); overrides HDR max_luma when passed
   bool target_display_set;               // Whether --target-display-nits was explicitly passed
+
+#ifdef EYEQ_ENABLE_DECKLINK
+  // Still-only monitoring (SDK-enabled builds only). --monitor-device enables it;
+  // --monitor-mode is then required. All values are validated before any output
+  // is enabled; the monitor target is the comparison baseline and is never
+  // derived from --target-display-nits.
+  std::optional<std::string> monitor_device; // index:<n> or id:<persistent-id>
+  std::optional<std::string> monitor_mode;   // WxH@N or WxH@N/D (exact integer rate)
+  std::string monitor_connection = "sdi";
+  std::string monitor_pixel_format = "v210";
+  std::string monitor_color_target = "sdr709"; // sdr709 or pq2020
+  double monitor_target_nits = 0.0;            // monitor peak (comparison baseline)
+  bool monitor_target_nits_set = false;
+  double monitor_sdr_white = PL_COLOR_SDR_WHITE;
+#endif
 };
 
 void print_version([[maybe_unused]] int count) {
@@ -228,6 +253,26 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
                  "or 'N:path' to assign to specific video N (e.g. '0:display.icc')")
       ->expected(1, 10);
 
+#ifdef EYEQ_ENABLE_DECKLINK
+  app.add_option("--monitor-device", args.monitor_device,
+                 "Enable still-only monitoring on a DeckLink device; the external monitor becomes the comparison "
+                 "target. Selector is explicit: index:<n> or id:<persistent-id>");
+  app.add_option("--monitor-mode", args.monitor_mode,
+                 "Native monitor mode as exact integer data: WxH@N or WxH@N/D (e.g. 3840x2160@50 or "
+                 "3840x2160@30000/1001). Required with --monitor-device");
+  app.add_option("--monitor-connection", args.monitor_connection, "Monitor connection: sdi or hdmi (default: sdi)");
+  app.add_option("--monitor-pixel-format", args.monitor_pixel_format,
+                 "Monitor pixel format: v210 or r210 (default: v210)");
+  app.add_option("--monitor-color", args.monitor_color_target,
+                 "Monitor color target: sdr709 (BT.709/BT.1886) or pq2020 (BT.2020/PQ) (default: sdr709)");
+  app.add_option("--monitor-target-nits", args.monitor_target_nits,
+                 "Monitor peak luminance (nits), i.e. the comparison baseline. Required for a pq2020 target; it is "
+                 "never derived from --target-display-nits, whose source-max_luma override meaning is unchanged")
+      ->check(CLI::PositiveNumber);
+  app.add_option("--monitor-sdr-white", args.monitor_sdr_white,
+                 "SDR white level (nits) of the common mapping target when monitoring (default: 203)");
+#endif
+
   try {
     app.parse(argc, argv);
   } catch (const CLI::ParseError &e) {
@@ -240,6 +285,23 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
 
   // Overriding HDR max_luma is opt-in: only when the user explicitly passes --target-display-nits.
   args.target_display_set = app.count("--target-display-nits") > 0;
+
+#ifdef EYEQ_ENABLE_DECKLINK
+  args.monitor_target_nits_set = app.count("--monitor-target-nits") > 0;
+  if (args.monitor_device.has_value() && !args.monitor_mode.has_value()) {
+    Logger->critical("--monitor-mode is required with --monitor-device");
+    exit(1);
+  }
+  if (!args.monitor_device.has_value() && args.monitor_mode.has_value()) {
+    Logger->critical("--monitor-mode requires --monitor-device");
+    exit(1);
+  }
+  // A PQ monitor peak cannot be guessed; refuse instead of defaulting to 1000.
+  if (args.monitor_device.has_value() && !args.monitor_target_nits_set && args.monitor_color_target == "pq2020") {
+    Logger->critical("--monitor-target-nits is required for a pq2020 monitor target (no HDR monitor peak is guessed)");
+    exit(1);
+  }
+#endif
 
   int video_idx = 0;
   std::optional<int> ref_idx;
@@ -381,6 +443,65 @@ static void save_snapshot_frames(const EyeQArgs &args, const FrameSnapshot &snap
     }
   }
 }
+
+#ifdef EYEQ_ENABLE_DECKLINK
+// Resolves and opens the monitoring output strictly before anything is enabled.
+// Every parse/validation/catalog/open failure throws with a message: an
+// unsupported request is rejected, never silently downgraded to SDR, and no
+// device configuration is written (the catalog query and Open only read).
+static std::unique_ptr<MonitorController> SetupMonitor(RenderContext &context, DisplayCoordinator &coordinator,
+                                                       const EyeQArgs &args) {
+  std::string error;
+  DeviceId selector;
+  if (!ParseDeviceSelector(*args.monitor_device, &selector, &error)) {
+    throw std::runtime_error("--monitor-device: " + error);
+  }
+  VideoConnection connection = VideoConnection::SDI;
+  if (!ParseMonitorConnection(args.monitor_connection, &connection, &error)) {
+    throw std::runtime_error("--monitor-connection: " + error);
+  }
+  PixelFormat pixel_format = PixelFormat::V210;
+  if (!ParseMonitorPixelFormat(args.monitor_pixel_format, &pixel_format, &error)) {
+    throw std::runtime_error("--monitor-pixel-format: " + error);
+  }
+  MonitorColorTarget color_target = MonitorColorTarget::SdrBt709;
+  if (!ParseMonitorColorTarget(args.monitor_color_target, &color_target, &error)) {
+    throw std::runtime_error("--monitor-color: " + error);
+  }
+  MonitorMode requested;
+  if (!ParseMonitorMode(*args.monitor_mode, &requested, &error)) {
+    throw std::runtime_error("--monitor-mode: " + error);
+  }
+
+  // The mode must come from the device's native list; nothing is constructed that
+  // ListModes did not return.
+  std::vector<MonitorMode> modes;
+  if (!DeckLinkOutput::ListModes(selector, connection, pixel_format, &modes, &error)) {
+    throw std::runtime_error("failed to query DeckLink native modes: " + error);
+  }
+  MonitorMode selected;
+  if (!SelectMonitorMode(modes, requested, &selected, &error)) {
+    throw std::runtime_error("--monitor-mode: " + error);
+  }
+
+  OutputRequest request;
+  if (!BuildMonitorOutputRequest(selector, selected, connection, pixel_format, color_target, args.monitor_target_nits,
+                                 &request, &error)) {
+    throw std::runtime_error("invalid monitor output request: " + error);
+  }
+
+  auto backend = std::make_unique<DeckLinkOutput>();
+  ResolvedOutput resolved;
+  if (!backend->Open(request, &resolved, &error)) {
+    throw std::runtime_error("failed to open the DeckLink output: " + error);
+  }
+  Logger->info("Monitoring enabled: mode {} connection {} pixel format {} color target {} monitor peak {:.1f} nits, "
+               "SDR white {:.1f} nits (still-only)",
+               FormatMonitorMode(resolved.mode), args.monitor_connection, args.monitor_pixel_format,
+               MonitorColorTargetLabel(color_target), args.monitor_target_nits, args.monitor_sdr_white);
+  return std::make_unique<MonitorController>(context, coordinator, std::move(backend), resolved);
+}
+#endif
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
@@ -552,6 +673,20 @@ int main(int argc, char **argv) {
   const int canvas_w = (DisplayMode::Grid == args.display_mode) ? window.PixelWidth() : player.Width();
   const int canvas_h = (DisplayMode::Grid == args.display_mode) ? window.PixelHeight() : player.Height();
 
+  // Monitoring (SDK-enabled builds) makes the external monitor the comparison
+  // target and disables every application-side ICC (V2.1 decision D2). Plain
+  // desktop keeps the original ICC behavior and mapping peak.
+  bool monitoring = false;
+#ifdef EYEQ_ENABLE_DECKLINK
+  monitoring = args.monitor_device.has_value();
+  if (monitoring && !args.monitor_target_nits_set) {
+    // A pq2020 target already required --monitor-target-nits in parse_args; this
+    // only fills the documented SDR default.
+    args.monitor_target_nits = 100.0;
+    Logger->info("Monitoring: using the SDR default monitor peak of 100 nits; pass --monitor-target-nits to override");
+  }
+#endif
+
   DisplayCoordinator::Config coordinator_config;
   coordinator_config.mode = args.display_mode;
   coordinator_config.scale_method = args.scale_method;
@@ -559,12 +694,20 @@ int main(int argc, char **argv) {
   coordinator_config.pixel_density = window.GetDisplayPixelDensity();
   coordinator_config.enable_osd = true;
   coordinator_config.colorspace_hint = args.colorspace_hint;
-  coordinator_config.icc_mode = IccMode::Enabled; // user-visible mode wiring lands in V2-3
+  coordinator_config.icc_mode = monitoring ? IccMode::MonitoringDisabled : IccMode::Enabled;
   coordinator_config.work_precision = WorkPrecision::F16;
   coordinator_config.mapping_target.primaries = PL_COLOR_PRIM_BT_2020;
-  coordinator_config.mapping_target.peak_nits = static_cast<float>(args.target_display_nits);
+#ifdef EYEQ_ENABLE_DECKLINK
+  const float mapping_peak =
+      monitoring ? static_cast<float>(args.monitor_target_nits) : static_cast<float>(args.target_display_nits);
+  const float mapping_sdr_white = monitoring ? static_cast<float>(args.monitor_sdr_white) : PL_COLOR_SDR_WHITE;
+#else
+  const float mapping_peak = static_cast<float>(args.target_display_nits);
+  const float mapping_sdr_white = PL_COLOR_SDR_WHITE;
+#endif
+  coordinator_config.mapping_target.peak_nits = mapping_peak;
   coordinator_config.mapping_target.black_nits = 0.0f;
-  coordinator_config.mapping_target.sdr_white_nits = PL_COLOR_SDR_WHITE;
+  coordinator_config.mapping_target.sdr_white_nits = mapping_sdr_white;
   coordinator_config.canvas_w = canvas_w;
   coordinator_config.canvas_h = canvas_h;
   auto coordinator = std::make_unique<DisplayCoordinator>(
@@ -593,12 +736,43 @@ int main(int argc, char **argv) {
     Logger->info("Loading ICC profile '{}' globally", spec);
     window.LoadICCProfile(spec, std::nullopt);
   }
+  if (monitoring && !args.icc_profiles.empty()) {
+    Logger->info("Monitoring mode: {} ICC profile argument(s) have no effect (application ICC is disabled)",
+                 args.icc_profiles.size());
+  }
 
   if (args.sdr_white_on_hdr > 0) {
     coordinator->SetSdrWhiteOnHdr(args.sdr_white_on_hdr);
   }
   coordinator->SetMainSource(args.main_id);
 
+#ifdef EYEQ_ENABLE_DECKLINK
+  std::unique_ptr<MonitorController> monitor;
+  if (monitoring) {
+    // The external monitor target is the comparison baseline (V2.1 section 8.2).
+    // --target-display-nits keeps its historical source max_luma override meaning
+    // and never doubles as the monitor target.
+    coordinator->SetMonitorTarget(static_cast<float>(args.monitor_target_nits),
+                                  static_cast<float>(args.monitor_sdr_white));
+    if (args.target_display_set) {
+      Logger->info("--target-display-nits {:.1f} keeps its historical source max_luma override meaning and does NOT "
+                   "change the monitor/comparison target ({:.1f} nits)",
+                   args.target_display_nits, args.monitor_target_nits);
+    }
+    try {
+      monitor = SetupMonitor(window.context(), *coordinator, args);
+    } catch (const std::exception &e) {
+      // No output was enabled; release the GPU resources before SDL_Quit so the
+      // failure path follows the same ordering rule as the normal exit path.
+      Logger->critical("Monitor output setup failed: {}", e.what());
+      monitor.reset();
+      coordinator.reset();
+      window.Shutdown();
+      SDL_Quit();
+      return 1;
+    }
+  }
+#endif
   // Maps a logical mouse position to canvas pixels through the fixed-canvas
   // preview rectangle. SDL reports mouse coordinates in logical pixels while the
   // layout is in device pixels, so the density is applied first.
@@ -732,6 +906,18 @@ int main(int argc, char **argv) {
 
   player.Start(true);
 
+#ifdef EYEQ_ENABLE_DECKLINK
+  // One bounded output step per event-loop turn, so continuous UI events (which
+  // skip the idle inner loop) cannot starve the monitor pump.
+  auto pump_output = [&]() {
+    if (monitor) {
+      monitor->Tick();
+    }
+  };
+#else
+  auto pump_output = []() {};
+#endif
+
   // After all initialization, process accumulated system events and re-activate the window
   // Fix macOS issue where the window loses focus after lengthy initialization
   SDL_PumpEvents();
@@ -742,6 +928,7 @@ int main(int argc, char **argv) {
   SDL_Keymod keymod;
   while (true) {
     SDL_PumpEvents();
+    pump_output();
     while (!SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(kUpdateIntervalMS));
 
@@ -800,23 +987,34 @@ int main(int argc, char **argv) {
       }
 
       if (need_refresh) {
-        // Update time corresponding to mouse position (for OSD bottom-right display)
-        if (state.show_osd && state.total_duration_s > 0) {
-          float mx, my;
-          SDL_GetMouseState(&mx, &my);
-          float cx = 0.0f, cy = 0.0f;
-          window_to_canvas(mx, my, &cx, &cy);
-          float progress = cx / static_cast<float>(coordinator->canvas_width());
-          progress = std::clamp(progress, 0.0f, 1.0f);
-          state.mouse_time_s = progress * state.total_duration_s;
-        } else {
-          state.mouse_time_s = -1.0f;
+        // While a monitor request is in flight the common result is borrowed. A
+        // real recomposition would overwrite the texture the monitor still reads,
+        // so defer it (keep need_refresh set) until the request drains. A pure UI
+        // change (resize/OSD) does not change the scene key and still presents.
+        bool monitor_blocks = false;
+#ifdef EYEQ_ENABLE_DECKLINK
+        monitor_blocks = monitor && !monitor->accepts_requests() && coordinator->WouldRecompose(state);
+#endif
+        if (!monitor_blocks) {
+          // Update time corresponding to mouse position (for OSD bottom-right display)
+          if (state.show_osd && state.total_duration_s > 0) {
+            float mx, my;
+            SDL_GetMouseState(&mx, &my);
+            float cx = 0.0f, cy = 0.0f;
+            window_to_canvas(mx, my, &cx, &cy);
+            float progress = cx / static_cast<float>(coordinator->canvas_width());
+            progress = std::clamp(progress, 0.0f, 1.0f);
+            state.mouse_time_s = progress * state.total_duration_s;
+          } else {
+            state.mouse_time_s = -1.0f;
+          }
+          window.Render(state);
+          hold_snapshot_for_save = false; // the pending rendered-frame save was consumed
+          window.SetTitle(title_);
+          need_refresh = false;
         }
-        window.Render(state);
-        hold_snapshot_for_save = false; // the pending rendered-frame save was consumed
-        window.SetTitle(title_);
-        need_refresh = false;
       }
+      pump_output();
       SDL_PumpEvents();
     }
 
@@ -1097,6 +1295,12 @@ int main(int argc, char **argv) {
         need_refresh = true;
         break;
       case SDLK_SPACE:
+        if (monitoring) {
+          // Still-only boundary: monitoring never starts continuous playback, and
+          // DisplayStill is never looped to fake it (V2.1 section 5.2 / V2-3).
+          Logger->info("Monitoring mode is still-only; continuous playback is not supported (Play ignored)");
+          break;
+        }
         Logger->debug("space key pressed, switch pause state");
         player.InvertPause();
         break;
@@ -1193,11 +1397,24 @@ int main(int argc, char **argv) {
   }
 
 exit:
-  // Drop the UI-held snapshot before stopping/releasing the sources: a snapshot
-  // keeps AVFrame references whose opaque points at the VideoSource streams.
+  // V2.1 section 5.4 exit ordering: stop producing, drain the monitor output and
+  // its borrowed result, release the renderer/textures/sources, release the
+  // swapchain/surface/context, and only then SDL_Quit.
   shown_snapshot.reset();
+#ifdef EYEQ_ENABLE_DECKLINK
+  if (monitor) {
+    const CloseStatus monitor_close = monitor->Close(5000);
+    if (monitor_close != CloseStatus::Closed) {
+      Logger->error("Monitor output did not drain cleanly: {} ({})", static_cast<int>(monitor_close),
+                    monitor->last_result().reason);
+      exit_code = 1;
+    }
+    monitor.reset();
+  }
+#endif
   player.Stop();
-
+  coordinator.reset();
+  window.Shutdown();
   SDL_Quit();
   return exit_code;
 }
