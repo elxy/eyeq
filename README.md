@@ -6,7 +6,7 @@ A multi-video subjective quality comparison tool, focused on visual quality asse
 
 Compared to [video-compare](https://github.com/pixop/video-compare), EyeQ adds:
 
-1. High bit-depth, HDR10, and Dolby Vision (Profile 5) support
+1. High bit-depth, HDR10, Dolby Vision (Profile 5/8) and HDR Vivid 1.0 (`--hdrvivid-render`) support
 2. ICC color management with automatic system display ICC profile detection on macOS
 3. Simultaneous comparison of 1–10 videos with on-the-fly reference switching for fidelity evaluation
 4. Three display modes: Fill (switch), Slide (side-by-side swipe), and Grid
@@ -204,6 +204,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--no-colorspace-hint`: Disable video color space hinting; uses the default color space instead. Enable this for tone mapping when the display does not support HDR
 - `--sdr-white-on-hdr <nits>`: Set the SDR reference white level (in nits) when the main video is HDR. By default, SDR videos are mapped using the standard reference white of 203 nits (ITU-R BT.2408). This option only takes effect when the main video is HDR and the target video is SDR
 - `--target-display-nits <nits>`: Target display peak luminance in nits. When passed, it overrides the peak (`max_luma`) of all HDR content (HLG, DPX read-back) to this value. It does not set the monitoring target; use `--monitor-target-nits` for that
+- `--hdrvivid-render`: Apply HDR Vivid 1.0 dynamic metadata with a GPU tone-mapping curve. Each frame that carries CUVA metadata is mapped to the common display mapping target (the monitor target while monitoring, otherwise `--target-display-nits`) through the same single renderer every other source uses, so Vivid and Dolby Vision are compared in one display-linear space. Sources without Vivid metadata are left untouched, and the source's mastering/dynamic metadata is never rewritten into the public result
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
 - `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)

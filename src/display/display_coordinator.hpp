@@ -75,6 +75,9 @@ public:
     MappingTarget mapping_target{};
     int canvas_w = 0;
     int canvas_h = 0;
+    // HDR Vivid dynamic tone mapping. When disabled (default) sources with CUVA
+    // metadata are mapped as plain PQ content, exactly as before.
+    bool hdrvivid = false;
   };
 
   DisplayCoordinator(RenderContext &context, const Config &config, ColorspaceHintFunc presenter_hint = nullptr);
@@ -103,6 +106,16 @@ public:
   void SetMainSource(int id);
   void SetSdrWhiteOnHdr(float nits);
   void SetTargetDisplayNits(double nits, bool override_enabled);
+
+  /*
+   * Enable or disable HDR Vivid dynamic tone mapping on the single renderer.
+   * The curve targets the coordinator's fixed common mapping target, so Vivid
+   * and Dolby Vision (whose reshape/mapping is performed inside the same
+   * pl_render_image source decode) share one mapping exit. Toggling it changes
+   * the scene, so the current result is invalidated.
+   */
+  void SetHdrVividEnabled(bool enabled);
+  bool hdrvivid_enabled() const { return renderer_->IsHdrVividEnabled(); }
   // Sets the monitor/comparison target peak and SDR white explicitly. Used when
   // monitoring is enabled, where the external monitor target is the comparison
   // baseline (V2.1 section 8.2); --target-display-nits keeps its historical

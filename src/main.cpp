@@ -78,6 +78,7 @@ struct EyeQArgs {
 
   std::vector<std::string> icc_profiles; // ICC profile specifications
   float sdr_white_on_hdr;                // SDR white level (nits) when rendering under HDR
+  bool hdrvivid_render;                  // Apply HDR Vivid 1.0 dynamic metadata on the GPU
   double target_display_nits;            // Target display peak luminance (nits); overrides HDR max_luma when passed
   bool target_display_set;               // Whether --target-display-nits was explicitly passed
 
@@ -190,6 +191,8 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   app.add_flag("!--no-colorspace-hint", args.colorspace_hint, "Disable colorspace hint to allow tone mapping");
   app.add_option("--sdr-white-on-hdr", args.sdr_white_on_hdr,
                  "SDR reference white level in nits when the main video is HDR (default: 203)");
+  app.add_flag("--hdrvivid-render", args.hdrvivid_render,
+               "Apply HDR Vivid 1.0 dynamic metadata to the common display mapping target on the GPU");
   app.add_option("--target-display-nits", args.target_display_nits,
                  "Target display peak luminance (nits); when passed, overrides the peak (max_luma) of all HDR "
                  "content");
@@ -529,6 +532,7 @@ int main(int argc, char **argv) {
       .log_level = LoggingLevel::INFO,
       .hardware_decoder = HardwareDecoder::Auto,
       .sdr_white_on_hdr = 0,
+      .hdrvivid_render = false,
       .target_display_nits = 1000.0,
       .target_display_set = false,
   };
@@ -696,6 +700,7 @@ int main(int argc, char **argv) {
   coordinator_config.colorspace_hint = args.colorspace_hint;
   coordinator_config.icc_mode = monitoring ? IccMode::MonitoringDisabled : IccMode::Enabled;
   coordinator_config.work_precision = WorkPrecision::F16;
+  coordinator_config.hdrvivid = args.hdrvivid_render;
   coordinator_config.mapping_target.primaries = PL_COLOR_PRIM_BT_2020;
 #ifdef EYEQ_ENABLE_DECKLINK
   const float mapping_peak =

@@ -13,6 +13,7 @@
 #include "platform_icc.h"
 #include "slide_render.hpp"
 #include "grid_render.hpp"
+#include "hdrvivid_meta.hpp"
 #include "utils.hpp"
 
 using namespace EYEQ;
@@ -62,17 +63,25 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   render_params_.plane_upscaler = get_filter_config(config.plane_scale_method);
 
   FillRender::ICCQueryFunc icc_query = [this](int video_id) -> pl_icc_object { return GetICCObjectForVideo(video_id); };
+  // The HDR Vivid hook is selected per source inside the compositor, so Grid can
+  // attach a different curve to each cell from one shared renderer.
+  FillRender::HdrVividQueryFunc hdrvivid_query = [this](int video_id) -> const struct pl_hook * {
+    return HdrVividHookForVideo(video_id);
+  };
 
   pl_gpu gpu = context_->gpu();
   switch (mode_) {
   case DisplayMode::Fill:
-    display_render_ = std::make_unique<FillRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query);
+    display_render_ =
+        std::make_unique<FillRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query, hdrvivid_query);
     break;
   case DisplayMode::Slide:
-    display_render_ = std::make_unique<SlideRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query);
+    display_render_ =
+        std::make_unique<SlideRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query, hdrvivid_query);
     break;
   case DisplayMode::Grid:
-    display_render_ = std::make_unique<GridRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query);
+    display_render_ =
+        std::make_unique<GridRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query, hdrvivid_query);
     break;
   default:
     throw std::runtime_error("Unsupported display mode for FrameRenderer");
@@ -128,9 +137,86 @@ void FrameRenderer::SetTargetDisplayNits(double nits, bool override_enabled) {
   if (display_render_) {
     display_render_->SetMappingTarget(mapping_target_, work_precision_);
   }
+  // The HDR Vivid curve is solved against the mapping target, so it must be
+  // re-solved when that target changes. The coordinator re-applies its own
+  // fixed target right after this call, which also re-solves.
+  ResolveHdrVividParams();
+}
+
+void FrameRenderer::SetHdrVividEnabled(bool enabled) {
+  if (hdrvivid_enabled_ == enabled) {
+    return;
+  }
+  hdrvivid_enabled_ = enabled;
+  if (enabled) {
+    if (!hdrvivid_shader_) {
+      hdrvivid_shader_ = std::make_unique<HDRVividShader>();
+    }
+    ResolveHdrVividParams();
+    if (hdrvivid_params_.empty()) {
+      // Not an error: the current input may simply have no dynamic metadata.
+      Logger->info("HDR Vivid dynamic rendering enabled (mapping target peak {:.0f} nits); no source currently "
+                   "carries HDR Vivid metadata",
+                   mapping_target_.peak_nits);
+    }
+  } else {
+    hdrvivid_params_.clear();
+    Logger->info("HDR Vivid dynamic rendering disabled");
+  }
+}
+
+void FrameRenderer::ResolveHdrVividParams() {
+  if (!hdrvivid_enabled_ || !hdrvivid_shader_) {
+    return;
+  }
+  hdrvivid_params_.clear();
+  for (const auto &[id, meta] : hdrvivid_metadata_) {
+    HDRVividShaderParams params;
+    const auto it = hdrvivid_mastering_nits_.find(id);
+    const double mastering = it == hdrvivid_mastering_nits_.end() ? 1000.0 : it->second;
+    // Single target mapping exit: every source, Vivid or not, is solved against
+    // the same common display mapping target peak.
+    SolveHDRVividShaderParams(meta, mapping_target_.peak_nits, mastering, &params);
+    hdrvivid_params_[id] = params;
+    if (!hdrvivid_logged_) {
+      Logger->info("Video #{}: HDR Vivid 1.0 dynamic metadata detected; tone mapping to the common display target "
+                   "({:.0f} nits) on the GPU",
+                   id, mapping_target_.peak_nits);
+      hdrvivid_logged_ = true;
+    }
+  }
+}
+
+const struct pl_hook *FrameRenderer::HdrVividHookForVideo(int video_id) {
+  if (!hdrvivid_enabled_ || !hdrvivid_shader_) {
+    return nullptr;
+  }
+  const auto it = hdrvivid_params_.find(video_id);
+  if (it == hdrvivid_params_.end() || !it->second.valid) {
+    return nullptr;
+  }
+  // The hook is consumed synchronously by the very next pl_render_image() call
+  // for this source, so updating the single shared shader here cannot leak one
+  // source's curve into another.
+  hdrvivid_shader_->SetParams(it->second);
+  return hdrvivid_shader_->Hook();
 }
 
 const struct pl_frame &FrameRenderer::GetLinearResult() const { return display_render_->LinearResult(); }
+
+uint64_t FrameRenderer::MappingPassCount(int video_id) const {
+  return display_render_ ? display_render_->MappingPassCount(video_id) : 0;
+}
+
+uint64_t FrameRenderer::HdrVividApplyCount() const {
+  return display_render_ ? display_render_->HdrVividApplyCount() : 0;
+}
+
+void FrameRenderer::ResetMappingCounts() {
+  if (display_render_) {
+    display_render_->ResetMappingCounts();
+  }
+}
 
 pl_tex FrameRenderer::GetLinearResultTexture() const { return display_render_->LinearResultTexture(); }
 
@@ -147,6 +233,7 @@ void FrameRenderer::SetMappingTarget(const MappingTarget &target, WorkPrecision 
   if (display_render_) {
     display_render_->SetMappingTarget(mapping_target_, work_precision_);
   }
+  ResolveHdrVividParams();
 }
 
 void FrameRenderer::SetICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id) {
@@ -286,8 +373,18 @@ const struct pl_frame *FrameRenderer::GetSourceFrame(int video_id) const {
 
 std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames) {
   std::vector<int> failed_ids;
+  std::map<int, HDRVividMetadata> parsed_vivid;
+  std::map<int, double> parsed_mastering;
   for (auto [i, frame] : frames) {
     try {
+      // Dynamic HDR metadata belongs to the decode result, not to the output:
+      // parse it here, once, and keep only the raw CUVA codes. The AVFrame is
+      // never handed to a consumer.
+      HDRVividMetadata meta;
+      if (ParseHDRVividMetadata(frame.get(), &meta)) {
+        parsed_vivid[i] = meta;
+        parsed_mastering[i] = MasteringDisplayMaxLuminance(frame.get());
+      }
       auto search = av_frames_.find(i);
       if (search != av_frames_.end()) {
         av_frames_.at(i).UpdateAVFrame(frame, context_->hw_device());
@@ -340,6 +437,16 @@ std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<A
   }
 
   display_render_->UpdateMainFrame(main);
+
+  // Replace the stored dynamic metadata with this feed's result (a source that
+  // lost its metadata must lose the curve) and re-solve against the current
+  // common target.
+  hdrvivid_metadata_.swap(parsed_vivid);
+  hdrvivid_mastering_nits_.swap(parsed_mastering);
+  if (hdrvivid_enabled_ && !hdrvivid_metadata_.empty()) {
+    ++hdrvivid_frame_count_;
+  }
+  ResolveHdrVividParams();
   return failed_ids;
 }
 

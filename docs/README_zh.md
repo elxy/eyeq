@@ -4,7 +4,7 @@
 
 相比于[video-compare](https://github.com/pixop/video-compare)，主要增加了：
 
-1. 支持高位深、HDR10和Dolby Vision (Profile 5)
+1. 支持高位深、HDR10、Dolby Vision (Profile 5/8) 与 HDR Vivid 1.0（`--hdrvivid-render`）
 2. 支持ICC色彩管理，macOS下自动检测系统显示器ICC配置
 3. 支持1-10个视频同时对比，随时切换参考视频，便于评估保真度
 4. 三种显示模式：Fill(切换)、Slide(左右滑动)、Grid(网格)
@@ -202,6 +202,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
 - `--sdr-white-on-hdr <nits>`：当主视频为HDR时，设置SDR视频的参考白电平（单位nits）。默认按照标准参考白203 nits（ITU-R BT.2408）进行映射。该选项仅在主视频为HDR、对比视频为SDR时生效
 - `--target-display-nits <nits>`：目标显示峰值亮度，单位 nits。传入后，把所有 HDR 内容（HLG、DPX 读回）的峰值（`max_luma`）覆盖为该值。它不设置监看目标，监看目标请用 `--monitor-target-nits`
+- `--hdrvivid-render`：用 GPU 色调映射曲线应用 HDR Vivid 1.0 动态元数据。每帧携带 CUVA 元数据时，通过所有其他源共用的同一个渲染器映射到公共显示映射目标（监看时为监看目标，否则为 `--target-display-nits`），因此 Vivid 与 Dolby Vision 在同一显示线性空间中比较。无 Vivid 元数据的源不受影响，源 mastering/动态元数据也不会被写回公共结果
 - `--high-dpi {auto,yes,no}`：High-DPI模式，默认`auto`自动检测
 - `--scale-method <method>`：视频放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`

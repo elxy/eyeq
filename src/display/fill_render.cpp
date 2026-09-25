@@ -13,8 +13,9 @@
 using namespace EYEQ;
 
 FillRender::FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density,
-                       ICCQueryFunc icc_query)
-    : gpu_(gpu), render_params_(render_params), pixel_density_(pixel_density), icc_query_(std::move(icc_query)) {
+                       ICCQueryFunc icc_query, HdrVividQueryFunc hdrvivid_query)
+    : gpu_(gpu), render_params_(render_params), pixel_density_(pixel_density), icc_query_(std::move(icc_query)),
+      hdrvivid_query_(std::move(hdrvivid_query)) {
   renderer_ = pl_renderer_create(log, gpu_);
   if (!renderer_) {
     throw std::runtime_error("Failed to create renderer");
@@ -197,9 +198,48 @@ void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], in
   // pl_render_image() performs the source interpretation and the HDR/gamut
   // mapping to the display-linear target. This is the "mapping completed"
   // point of the pipeline.
-  if (!pl_render_image(renderer_, src, &dst, params ? params : render_params_)) {
+  //
+  // Dynamic HDR (HDR Vivid) is applied by the same call through a render hook:
+  // the CUVA curve belongs to the source-mapping stage, so it is attached here,
+  // per source, and never copied into a second renderer. The shared render
+  // params are not mutated because Grid composes several videos into one pass
+  // and each cell needs its own hook.
+  ++mapping_pass_count_[video_id];
+  struct pl_render_params local_params;
+  const struct pl_hook *hooks[1] = {nullptr};
+  struct pl_frame local_src;
+  const struct pl_frame *effective_src = src;
+  const struct pl_render_params *effective_params = params ? params : render_params_;
+  const struct pl_hook *vivid_hook = hdrvivid_query_ ? hdrvivid_query_(video_id) : nullptr;
+  if (vivid_hook != nullptr) {
+    // The CUVA curve has already mapped this source to the common target peak,
+    // so the generic mapper must not tone-map it a second time. Declare the
+    // post-curve peak on a copy: the stored source metadata stays untouched and
+    // the public result stays free of the source's dynamic/mastering values.
+    local_src = *src;
+    local_src.color.hdr = mapping_target_.DisplayLinearColorSpace().hdr;
+    hooks[0] = vivid_hook;
+    local_params = *effective_params;
+    local_params.hooks = hooks;
+    local_params.num_hooks = 1;
+    effective_params = &local_params;
+    effective_src = &local_src;
+    ++hdrvivid_apply_count_;
+  }
+
+  if (!pl_render_image(renderer_, effective_src, &dst, effective_params)) {
     throw std::runtime_error("pl_render_image failed.");
   }
+}
+
+uint64_t FillRender::MappingPassCount(int video_id) const {
+  auto it = mapping_pass_count_.find(video_id);
+  return it == mapping_pass_count_.end() ? 0 : it->second;
+}
+
+void FillRender::ResetMappingCounts() {
+  mapping_pass_count_.clear();
+  hdrvivid_apply_count_ = 0;
 }
 
 void FillRender::AmplifyFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], const struct pl_frame *dis,

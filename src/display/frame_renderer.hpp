@@ -16,6 +16,7 @@ extern "C" {
 
 #include "canvas_geometry.hpp"
 #include "fill_render.hpp"
+#include "hdrvivid_shader.hpp"
 #include "mapping_target.hpp"
 #include "osd.hpp"
 #include "output_encode.hpp"
@@ -83,6 +84,18 @@ public:
   void SetMainSource(int id) { main_id_ = id; }
   void SetSdrWhiteOnHdr(float nits) { sdr_white_on_hdr_ = nits; }
   void SetTargetDisplayNits(double nits, bool override_enabled);
+
+  /*
+   * Enable GPU HDR Vivid dynamic tone mapping. When enabled, each fed source
+   * that carries CUVA HDR Vivid metadata is solved against the *common mapping
+   * target* (not a per-window target) and mapped by the single renderer through
+   * a PL_HOOK_RGB render hook. Sources without such metadata are untouched.
+   */
+  void SetHdrVividEnabled(bool enabled);
+  bool IsHdrVividEnabled() const { return hdrvivid_enabled_; }
+  // Frames that were solved from HDR Vivid metadata since construction.
+  uint64_t hdrvivid_frame_count() const { return hdrvivid_frame_count_; }
+  void ResetHdrVividCounters() { hdrvivid_frame_count_ = 0; }
 
   /*
    * Overrides the display mapping target used by the comparison core. The
@@ -172,6 +185,14 @@ public:
   WorkPrecision GetDisPrecision() const;
   WorkPrecision GetRefPrecision() const;
 
+  // Diagnostics: the number of source-mapping passes for a video and the number
+  // of those that attached the HDR Vivid hook since the last reset. The player
+  // does not use them; they make the "each compared source is mapped exactly
+  // once, the dynamic-HDR curve runs once" contract observable.
+  uint64_t MappingPassCount(int video_id) const;
+  uint64_t HdrVividApplyCount() const;
+  void ResetMappingCounts();
+
   void RecalibrateICCParams(const struct pl_color_space *target_color);
 
   OsdManager *GetOsdManager() { return osd_manager_.get(); }
@@ -180,6 +201,12 @@ public:
 private:
   void OpenICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id);
   void CloseICCProfiles();
+
+  // Re-solve the HDR Vivid curve for every source that carried dynamic metadata
+  // when it was fed. Called whenever the input changes and whenever the common
+  // mapping target changes, so the curve always targets the shared target.
+  void ResolveHdrVividParams();
+  const struct pl_hook *HdrVividHookForVideo(int video_id);
 
   // Explicit transfer encode into the presentation target. Returns false when
   // the target transfer is not PQ/BT.1886, in which case the color-managed
@@ -224,6 +251,17 @@ private:
   double target_display_nits_ = 1000.0;
   bool target_display_override_enabled_ = false; // opt-in max_luma override (explicit --target-display-nits)
   bool target_display_override_logged_ = false;  // one-time log for max_luma override
+
+  // Dynamic HDR (HDR Vivid). The shader instance is shared and its parameters
+  // are set immediately before the source mapping of one video; the mapping is
+  // not re-entrant, so that stays safe without a second renderer.
+  bool hdrvivid_enabled_ = false;
+  std::unique_ptr<HDRVividShader> hdrvivid_shader_;
+  std::map<int, HDRVividMetadata> hdrvivid_metadata_; // parsed dynamic metadata per source
+  std::map<int, double> hdrvivid_mastering_nits_;     // mastering peak per source
+  std::map<int, HDRVividShaderParams> hdrvivid_params_;
+  uint64_t hdrvivid_frame_count_ = 0;
+  bool hdrvivid_logged_ = false;
 
   std::map<int, VideoFrame> av_frames_;
   std::map<int, struct pl_frame *> pl_frames_;

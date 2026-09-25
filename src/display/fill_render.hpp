@@ -4,6 +4,7 @@
 #include <map>
 
 #include <libplacebo/colorspace.h>
+#include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/icc.h>
 #include <libplacebo/renderer.h>
 
@@ -30,9 +31,14 @@ namespace EYEQ {
 class FillRender {
 public:
   using ICCQueryFunc = std::function<pl_icc_object(int video_id)>;
+  // Returns the HDR Vivid hook already solved for this video (or nullptr to skip
+  // the dynamic tone mapping for that source). The hook maps the source to the
+  // same common MappingTarget the generic mapper uses, so a source with dynamic
+  // metadata still lands in the shared display-linear working space.
+  using HdrVividQueryFunc = std::function<const struct pl_hook *(int video_id)>;
 
   FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density = 1.0,
-             ICCQueryFunc icc_query = nullptr);
+             ICCQueryFunc icc_query = nullptr, HdrVividQueryFunc hdrvivid_query = nullptr);
   virtual ~FillRender();
 
   void SetMappingTarget(const MappingTarget &target, WorkPrecision precision);
@@ -75,6 +81,14 @@ public:
   // swapchain does, so an 8-bit sRGB target does not band on smooth gradients.
   void SetPresentDitherEnabled(bool enabled);
 
+  // Diagnostics: how many times the source mapping ran for @p video_id since the
+  // last ResetMappingCounts(), and how many of those attached an HDR Vivid hook.
+  // Used to prove that each compared source is mapped exactly once per compose
+  // and that the dynamic-HDR hook runs once per frame, never per output.
+  uint64_t MappingPassCount(int video_id) const;
+  uint64_t HdrVividApplyCount() const { return hdrvivid_apply_count_; }
+  void ResetMappingCounts();
+
   /*
    * Blends the text OSD overlay onto an already-encoded target. Kept separate
    * from the comparison geometry so the linear result stays OSD-free.
@@ -93,6 +107,10 @@ protected:
   struct pl_render_params present_params_;
   float pixel_density_;
   ICCQueryFunc icc_query_;
+  HdrVividQueryFunc hdrvivid_query_;
+  // Mapping-pass accounting (see MappingPassCount); test/diagnostic only.
+  std::map<int, uint64_t> mapping_pass_count_;
+  uint64_t hdrvivid_apply_count_ = 0;
 
   MappingTarget mapping_target_;
   WorkPrecision default_precision_ = WorkPrecision::F16;

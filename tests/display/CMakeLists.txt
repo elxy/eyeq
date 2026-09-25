@@ -18,6 +18,9 @@ set(_display_test_sources
   ${CMAKE_SOURCE_DIR}/src/display/render_util.cpp
   ${CMAKE_SOURCE_DIR}/src/display/mapping_target.cpp
   ${CMAKE_SOURCE_DIR}/src/display/output_encode.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_curve.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_meta.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_shader.cpp
   ${CMAKE_SOURCE_DIR}/src/display/vulkan_exts.cpp
   ${CMAKE_SOURCE_DIR}/src/display/platform_icc_stub.cpp
   ${CMAKE_SOURCE_DIR}/src/log.cpp
@@ -92,3 +95,51 @@ add_executable(canvas_geometry_test
 target_include_directories(canvas_geometry_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME canvas_geometry COMMAND canvas_geometry_test)
 set_tests_properties(canvas_geometry PROPERTIES TIMEOUT 60)
+
+# HDR Vivid / Dolby Vision CPU building blocks: the CUVA curve solver, the
+# metadata parser and the PQ transfer. Pure CPU, no GPU, no window, no SDK.
+add_executable(hdrvivid_cpu_test
+  hdrvivid_cpu_test.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_curve.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_meta.cpp)
+target_include_directories(hdrvivid_cpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(hdrvivid_cpu_test PRIVATE
+  spdlog::spdlog
+  FFmpeg::avcodec
+  FFmpeg::avformat
+  FFmpeg::avutil)
+add_test(NAME hdrvivid_cpu COMMAND hdrvivid_cpu_test)
+set_tests_properties(hdrvivid_cpu PROPERTIES TIMEOUT 120)
+
+# HDR Vivid / Dolby Vision integration on the real comparison renderer: the single
+# FrameRenderer maps both dynamic-HDR formats into the same common display-linear
+# target. Headless Vulkan device; no window, no SDK.
+add_executable(hdrvivid_dv_gpu_test
+  hdrvivid_dv_gpu_test.cpp
+  ${_display_test_sources})
+target_include_directories(hdrvivid_dv_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(hdrvivid_dv_gpu_test PRIVATE
+  spdlog::spdlog
+  Libplacebo::Libplacebo
+  SDL3::SDL3
+  SDL3_ttf::SDL3_ttf
+  FFmpeg::avcodec
+  FFmpeg::avformat
+  FFmpeg::avutil)
+add_test(NAME hdrvivid_dv_gpu COMMAND hdrvivid_dv_gpu_test)
+set_tests_properties(hdrvivid_dv_gpu PROPERTIES TIMEOUT 600)
+
+# Real-material probe (built, not registered as a test): documents what a real
+# file actually carries and what the common mapping produces. Run manually.
+add_executable(hdrvivid_real_probe
+  hdrvivid_real_probe.cpp
+  ${_display_test_sources})
+target_include_directories(hdrvivid_real_probe PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(hdrvivid_real_probe PRIVATE
+  spdlog::spdlog
+  Libplacebo::Libplacebo
+  SDL3::SDL3
+  SDL3_ttf::SDL3_ttf
+  FFmpeg::avcodec
+  FFmpeg::avformat
+  FFmpeg::avutil)

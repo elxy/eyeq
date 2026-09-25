@@ -17,6 +17,9 @@ set(_monitor_display_sources
   ${CMAKE_SOURCE_DIR}/src/display/render_util.cpp
   ${CMAKE_SOURCE_DIR}/src/display/mapping_target.cpp
   ${CMAKE_SOURCE_DIR}/src/display/output_encode.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_curve.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_meta.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_shader.cpp
   ${CMAKE_SOURCE_DIR}/src/display/vulkan_exts.cpp
   ${CMAKE_SOURCE_DIR}/src/display/platform_icc_stub.cpp
   ${CMAKE_SOURCE_DIR}/src/log.cpp

@@ -7,7 +7,7 @@ namespace EYEQ {
 class SlideRender : public FillRender {
 public:
   SlideRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density = 1.0,
-              ICCQueryFunc icc_query = nullptr);
+              ICCQueryFunc icc_query = nullptr, HdrVividQueryFunc hdrvivid_query = nullptr);
   ~SlideRender() override;
 
   void RenderLinear(int width, int height, const std::map<int, struct pl_frame *> &frames,

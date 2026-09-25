@@ -66,6 +66,7 @@ DisplayCoordinator::DisplayCoordinator(RenderContext &context, const Config &con
   renderer_->SetIccEnabled(icc_mode_ == IccMode::Enabled);
   renderer_->SetMappingTarget(mapping_target_, work_precision_);
   renderer_->SetValidateLinearResult(false);
+  renderer_->SetHdrVividEnabled(config.hdrvivid);
 
   if (icc_mode_ == IccMode::MonitoringDisabled) {
     Logger->info("Monitoring mode: all application ICC profiles are disabled (macOS system color management is "
@@ -132,6 +133,18 @@ void DisplayCoordinator::SetMonitorTarget(float peak_nits, float sdr_white_nits)
   mapping_target_.sdr_white_nits = sdr_white_nits;
   ValidateMappingTarget(mapping_target_);
   renderer_->SetMappingTarget(mapping_target_, work_precision_);
+  InvalidateScene();
+}
+
+void DisplayCoordinator::SetHdrVividEnabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (result_borrowed_) {
+    throw std::logic_error("DisplayCoordinator::SetHdrVividEnabled called while the result is borrowed");
+  }
+  if (renderer_->IsHdrVividEnabled() == enabled) {
+    return;
+  }
+  renderer_->SetHdrVividEnabled(enabled);
   InvalidateScene();
 }
 
@@ -217,6 +230,7 @@ uint64_t DisplayCoordinator::ComputeSceneKey(const DisplayState &state) const {
   h = HashMix(h, Quantize(mapping_target_.sdr_white_nits));
   h = HashMix(h, static_cast<uint64_t>(mapping_target_.primaries));
   h = HashMix(h, static_cast<uint64_t>(state.show_ref));
+  h = HashMix(h, renderer_->IsHdrVividEnabled() ? 1u : 0u);
   h = HashMix(h, state.ref_id.has_value() ? static_cast<uint64_t>(*state.ref_id) + 1 : 0);
   h = HashMix(h, static_cast<uint64_t>(state.fill.id) + 1);
   h = HashMix(h, static_cast<uint64_t>(state.slide.left_id) + 1);

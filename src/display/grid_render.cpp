@@ -16,8 +16,8 @@ using namespace EYEQ;
 static constexpr float kComparisonLineLightNorm = 0.5f;
 
 GridRender::GridRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density,
-                       ICCQueryFunc icc_query)
-    : FillRender(log, gpu, render_params, pixel_density, std::move(icc_query)) {
+                       ICCQueryFunc icc_query, HdrVividQueryFunc hdrvivid_query)
+    : FillRender(log, gpu, render_params, pixel_density, std::move(icc_query), std::move(hdrvivid_query)) {
 
   grid_dp_ = pl_dispatch_create(log, gpu_);
   for (int i = 0; i < PL_MAX_PLANES; i++) {
