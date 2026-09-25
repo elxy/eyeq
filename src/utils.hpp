@@ -36,6 +36,15 @@ public:
   texture_format_error(const char *what_arg) : std::runtime_error(what_arg) {}
 };
 
+// Thrown by VideoSource waits when Stop() was requested while the caller was
+// blocked. It lets the consumer distinguish a cancellation from a timeout or
+// from reaching a stream boundary.
+class stopped_error : public std::runtime_error {
+public:
+  stopped_error(const std::string &what_arg) : std::runtime_error(what_arg) {}
+  stopped_error(const char *what_arg) : std::runtime_error(what_arg) {}
+};
+
 /**
  * @brief Convert timeout to std::chrono::milliseconds
  *

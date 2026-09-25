@@ -92,7 +92,7 @@ public:
    */
   bool GetICCTargetColorSpace(struct pl_color_space *out) const;
 
-  std::vector<int> FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames);
+  std::vector<int> FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames);
   bool HasFrames() const { return !av_frames_.empty(); }
 
   /*

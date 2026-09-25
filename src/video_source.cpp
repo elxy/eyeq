@@ -1,5 +1,6 @@
 #include "video_source.hpp"
 
+#include <cmath>
 #include <limits>
 #include <set>
 
@@ -124,7 +125,6 @@ VideoSource::VideoSource(std::string filename, std::string filter_graph, int dec
   have_seeked_ = false;
   current_frame_serial_ = -1;
 }
-
 VideoSource::~VideoSource() {
   Stop();
 
@@ -182,8 +182,8 @@ void VideoSource::SetMaxCachedFrames(size_t max_cached_frames) {
 }
 
 int VideoSource::GetCurrentFrameSerial() {
-  if (!have_seeked_) {
-    return current_frame_serial_;
+  if (!have_seeked_.load()) {
+    return current_frame_serial_.load();
   }
 
   std::unique_lock<std::mutex> lock(buffer_mutex_);
@@ -209,7 +209,14 @@ int VideoSource::GetCurrentFrameSerial() {
 
 void VideoSource::SaveCurrentFrame(const std::filesystem::path &path) {
   std::unique_lock<std::mutex> lock(buffer_mutex_);
-  buffer_cv_.wait(lock, [this]() { return (int)frame_buffer_.size() > current_frame_index_ || eof_; });
+  buffer_cv_.wait(lock, [this]() {
+    return (int)frame_buffer_.size() > current_frame_index_ || eof_.load() || stop_requested_.load() ||
+           decode_failed_.load();
+  });
+  if (stop_requested_.load() || decode_failed_.load()) {
+    lock.unlock();
+    ThrowIfUnavailable();
+  }
   if ((int)frame_buffer_.size() <= current_frame_index_) {
     Logger->error("Current frame index {} out of range, please check bugs!", current_frame_index_);
     return;
@@ -233,6 +240,17 @@ void VideoSource::Start(size_t start_frame) {
   if (one_thread_.joinable()) {
     return;
   }
+
+  // Clear the cancellation/failure state and arm the decode loop before the
+  // thread exists, so a Stop() immediately after Start() cannot race the
+  // thread's own "decoding_active_ = true" and leave it spinning forever.
+  stop_requested_ = false;
+  decode_failed_ = false;
+  {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    decode_error_ = nullptr;
+  }
+  decoding_active_ = true;
 
   // Fast path: when seeking a large number of frames, build keyframe index and
   // seek directly to the nearest keyframe before the target, then only decode
@@ -265,10 +283,14 @@ void VideoSource::Start(size_t start_frame) {
     Logger->debug("Fast seek: target_serial={}, keyframe_serial={}, frames_to_skip={} (saved {} full decodes)",
                   target_serial, keyframe_serial, frames_to_skip, target_serial - frames_to_skip);
 
-    decode_start_pts_ = keyframe_pts;
-    start_frame_serial_ = frames_to_skip;
+    // The request is pending before the thread starts; the decode loop picks it
+    // up on its first iteration (no waiter because this is the initial seek).
+    {
+      std::lock_guard<std::mutex> lock(seek_mutex_);
+      seek_request_ =
+          SeekRequest{++seek_seq_, keyframe_pts, static_cast<size_t>(frames_to_skip), true, false, false, false, ""};
+    }
     have_seeked_ = true;
-    decode_need_reset_ = true;
   } else {
     start_frame_serial_ = start_frame;
     current_frame_serial_ = static_cast<int>(start_frame) - 1;
@@ -278,19 +300,76 @@ void VideoSource::Start(size_t start_frame) {
 }
 
 void VideoSource::Stop() {
-  decoding_active_ = false;
+  // Change the cancellation flag under the mutexes that guard the wait
+  // predicates, so a consumer cannot miss the wakeup between evaluating the
+  // predicate and enqueueing on the condition variable. Then wake all waiters
+  // and cancel any seek request that is still in flight.
+  {
+    std::lock_guard<std::mutex> buffer_lock(buffer_mutex_);
+    std::lock_guard<std::mutex> seek_lock(seek_mutex_);
+    stop_requested_ = true;
+    decoding_active_ = false;
+    if (seek_request_.pending) {
+      seek_request_.pending = false;
+      seek_request_.completed = true;
+      seek_request_.cancelled = true;
+    }
+  }
+  buffer_cv_.notify_all();
+  seek_cv_.notify_all();
 
   if (one_thread_.joinable()) {
     one_thread_.join();
   }
 }
 
+void VideoSource::Restart() {
+  // Make sure the old decode thread is gone before touching its state.
+  Stop();
+
+  {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    frame_buffer_.clear();
+    current_frame_index_ = -1;
+    current_frame_pts_ = start_pts_;
+    eof_ = false;
+    have_seeked_ = false;
+    current_frame_serial_ = -1;
+    decode_error_ = nullptr;
+  }
+  {
+    std::lock_guard<std::mutex> lock(seek_mutex_);
+    seek_request_ = SeekRequest{};
+  }
+  start_frame_serial_ = 0;
+  avfilter_graph_free(&graph_);
+  avcodec_flush_buffers(dec_ctx_);
+
+  // The demuxer stayed open across Stop(); rewind it so the new decode thread
+  // reads from the first frame again.
+  const int ret = av_seek_frame(fmt_ctx_, stream_index_, start_pts_, AVSEEK_FLAG_BACKWARD);
+  if (ret < 0) {
+    throw std::runtime_error(
+        fmt::format("could not rewind {} for restart, {}: {}", filename_, ret, ffmpeg_error_string(ret)));
+  }
+  Start(0);
+}
+
 std::shared_ptr<AVFrame> VideoSource::GetNextFrame(int timeout_ms) {
-  // Buffer must have enough frames, unless EOF has been reached
+  // Buffer must have enough frames, unless EOF has been reached or the source
+  // has been stopped / failed.
   std::unique_lock<std::mutex> lock(buffer_mutex_);
 
   std::chrono::milliseconds timeout = get_timeout(timeout_ms);
-  buffer_cv_.wait_for(lock, timeout, [this]() { return (int)frame_buffer_.size() > current_frame_index_ + 1 || eof_; });
+  buffer_cv_.wait_for(lock, timeout, [this]() {
+    return (int)frame_buffer_.size() > current_frame_index_ + 1 || eof_.load() || stop_requested_.load() ||
+           decode_failed_.load();
+  });
+
+  if (stop_requested_.load() || decode_failed_.load()) {
+    lock.unlock();
+    ThrowIfUnavailable();
+  }
 
   if ((int)frame_buffer_.size() <= current_frame_index_ + 1) {
     SPDLOG_LOGGER_TRACE(Logger, "frame_buffer_.size() {}, current_frame_index_ {}, eof_ {}", frame_buffer_.size(),
@@ -308,7 +387,7 @@ std::shared_ptr<AVFrame> VideoSource::GetNextFrame(int timeout_ms) {
   // Get current frame
   auto frame = frame_buffer_[current_frame_index_];
   current_frame_pts_ = frame->pts;
-  if (!have_seeked_) {
+  if (!have_seeked_.load()) {
     current_frame_serial_ += 1;
   }
 
@@ -320,31 +399,42 @@ std::shared_ptr<AVFrame> VideoSource::GetNextFrame(int timeout_ms) {
 }
 
 std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
-  std::shared_ptr<AVFrame> frame;
+  // The cache-hit fast path below is still a consumer operation; it must not
+  // hand out frames after Stop()/a decode failure.
+  if (stop_requested_.load() || decode_failed_.load()) {
+    ThrowIfUnavailable();
+  }
 
-  if (current_frame_index_ < 0) {
-    throw timeout_error("Get previous frame before any frame decoded, please wait for a moment");
-  } else if (current_frame_index_ > 0) {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    // Normal case: move back one frame
-    current_frame_index_--;
-    frame = frame_buffer_[current_frame_index_];
-    current_frame_pts_ = frame->pts;
-    if (!have_seeked_) {
-      current_frame_serial_ -= 1;
+  std::shared_ptr<AVFrame> frame;
+  int64_t current_pts = 0;
+  {
+    std::unique_lock<std::mutex> lock(buffer_mutex_);
+    if (current_frame_index_ < 0) {
+      throw timeout_error("Get previous frame before any frame decoded, please wait for a moment");
+    } else if (current_frame_index_ > 0) {
+      // Normal case: move back one frame
+      current_frame_index_--;
+      frame = frame_buffer_[current_frame_index_];
+      current_frame_pts_ = frame->pts;
+      if (!have_seeked_.load()) {
+        current_frame_serial_ -= 1;
+      }
+      SPDLOG_LOGGER_TRACE(Logger, "GetPrevFrame frame {}, pts {}. frame_buffer_.size() {}, current_frame_index_ {}",
+                          fmt::ptr(frame.get()), frame->pts, frame_buffer_.size(), current_frame_index_);
+      return frame;
     }
-    SPDLOG_LOGGER_TRACE(Logger, "GetPrevFrame frame {}, pts {}. frame_buffer_.size() {}, current_frame_index_ {}",
-                        fmt::ptr(frame.get()), frame->pts, frame_buffer_.size(), current_frame_index_);
-    return frame;
+    // Snapshot the cursor under the same lock that the decode thread uses before
+    // touching frame_buffer_ / current_frame_pts_.
+    current_pts = current_frame_pts_;
   }
 
   // If already at the first frame, cannot step back further; need to decode earlier frames
   // Check if we can re-decode earlier frames
-  int64_t target_pts = current_frame_pts_ - 1;
+  int64_t target_pts = current_pts - 1;
   int64_t keyframe_pts = FindNearestKeyframePts(target_pts);
   if (keyframe_pts < 0) {
-    throw std::out_of_range(fmt::format("No keyframe earlier than (pts {}, {:.3f}s) found", current_frame_pts_,
-                                        current_frame_pts_ * time_base_));
+    throw std::out_of_range(
+        fmt::format("No keyframe earlier than (pts {}, {:.3f}s) found", current_pts, current_pts * time_base_));
   }
   SPDLOG_LOGGER_TRACE(Logger, "Get previous keyframe pts {} ({:.3f} s) for target pts {}", keyframe_pts,
                       keyframe_pts * time_base_, target_pts);
@@ -352,7 +442,7 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
   // Calculate how many frames lie between the keyframe and the target
   size_t frames_to_skip = 0;
   {
-    int64_t diff_pts = current_frame_pts_ - keyframe_pts;
+    int64_t diff_pts = current_pts - keyframe_pts;
     int64_t interval_pts = static_cast<int64_t>(1. / (time_base_ * frame_rate_));
     size_t frames_in_gop = static_cast<size_t>(diff_pts / interval_pts);
     if (frames_in_gop > max_cached_frames_) {
@@ -364,20 +454,17 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
     }
   }
 
-  { // Request the decode thread to re-decode from the keyframe
-    decode_start_pts_ = keyframe_pts;
-    start_frame_serial_ = frames_to_skip;
-    decode_need_reset_ = true;
-
-    // Wait for the decode thread to finish seeking
-    std::unique_lock<std::mutex> lock(seek_mutex_);
-    seek_cv_.wait(lock);
-  }
+  // Request the decode thread to re-decode from the keyframe and wait for that
+  // exact request to be acknowledged (cancellable by Stop / decode failure).
+  IssueSeek(keyframe_pts, frames_to_skip, timeout_ms);
 
   // Wait for the decode thread to fill the buffer
   std::unique_lock<std::mutex> lock(buffer_mutex_);
   std::chrono::milliseconds timeout = get_timeout(timeout_ms);
   bool frame_found = buffer_cv_.wait_for(lock, timeout, [this, target_pts]() {
+    if (stop_requested_.load() || decode_failed_.load()) {
+      return true;
+    }
     if (frame_buffer_.empty()) {
       return false;
     } else if (frame_buffer_.size() >= max_cached_frames_) {
@@ -389,6 +476,10 @@ std::shared_ptr<AVFrame> VideoSource::GetPrevFrame(int timeout_ms) {
     return frame->pts >= target_pts;
   });
 
+  if (stop_requested_.load() || decode_failed_.load()) {
+    lock.unlock();
+    ThrowIfUnavailable();
+  }
   if (!frame_found) {
     throw timeout_error("VideoSource::GetPrevFrame() timed out");
   }
@@ -433,7 +524,7 @@ int VideoSource::TimeToFrameSerial(float time_s) {
     }
   }
 
-  int64_t target_pts = time_s / time_base_;
+  int64_t target_pts = static_cast<int64_t>(std::llround(static_cast<double>(time_s) / time_base_));
 
   // Find the frame serial closest to (but not exceeding) target_pts
   int target_serial = -1;
@@ -454,13 +545,8 @@ int VideoSource::SeekTo(float time_s, int timeout_ms) {
 
   if (target_serial < 0) {
     // Fallback: seek without frame skipping
-    int64_t target_pts = time_s / time_base_;
-    decode_start_pts_ = target_pts;
-    decode_need_reset_ = true;
-
-    std::unique_lock<std::mutex> lock(seek_mutex_);
-    std::chrono::milliseconds timeout = get_timeout(timeout_ms);
-    seek_cv_.wait_for(lock, timeout);
+    int64_t target_pts = static_cast<int64_t>(std::llround(static_cast<double>(time_s) / time_base_));
+    IssueSeek(target_pts, 0, timeout_ms);
     return -1;
   }
 
@@ -499,23 +585,52 @@ void VideoSource::SeekToFrameSerial(int target_serial, int timeout_ms) {
                       "SeekToFrameSerial: target_serial={}, keyframe_serial={}, keyframe_pts={}, frames_to_skip={}",
                       target_serial, keyframe_serial, keyframe_pts, frames_to_skip);
 
-  // 2. Notify the decode thread to seek to the keyframe and skip frames_to_skip frames
-  //    Reuse start_frame_serial_ mechanism: decode thread skips the specified number of frames (no filter, no buffer)
-  decode_start_pts_ = keyframe_pts;
-  start_frame_serial_ = frames_to_skip;
-  decode_need_reset_ = true;
+  IssueSeek(keyframe_pts, static_cast<size_t>(frames_to_skip), timeout_ms);
+}
 
-  // Wait for the decode thread to finish seeking
-  std::unique_lock<std::mutex> lock(seek_mutex_);
-  std::chrono::milliseconds timeout = get_timeout(timeout_ms);
-  seek_cv_.wait_for(lock, timeout);
+void VideoSource::IssueSeek(int64_t start_pts, size_t frames_to_skip, int timeout_ms) {
+  uint64_t seq = 0;
+  {
+    std::unique_lock<std::mutex> lock(seek_mutex_);
+    seq = ++seek_seq_;
+    seek_request_ = SeekRequest{seq, start_pts, frames_to_skip, true, false, false, false, ""};
+    // Wait until the decode thread acknowledges this exact sequence. The whole
+    // payload was published under the same lock, so the acknowledgement cannot
+    // belong to a different request.
+    seek_cv_.wait_for(lock, get_timeout(timeout_ms), [&]() {
+      return (seek_request_.seq == seq && seek_request_.completed) || stop_requested_.load() || decode_failed_.load();
+    });
+  }
+
+  bool completed = false;
+  bool failed = false;
+  std::string error;
+  {
+    std::lock_guard<std::mutex> lock(seek_mutex_);
+    completed = (seek_request_.seq == seq && seek_request_.completed);
+    failed = completed && seek_request_.failed;
+    error = seek_request_.error;
+  }
+  ThrowIfUnavailable();
+  if (!completed) {
+    throw timeout_error("VideoSource seek timed out waiting for the decode thread to acknowledge the request");
+  }
+  if (failed) {
+    throw std::runtime_error(error.empty() ? "VideoSource seek failed" : error);
+  }
 }
 
 void VideoSource::WaitForFrameAvailable(int timeout_ms) {
   std::unique_lock<std::mutex> lock(buffer_mutex_);
 
   std::chrono::milliseconds timeout = get_timeout(timeout_ms);
-  buffer_cv_.wait_for(lock, timeout, [this]() { return !frame_buffer_.empty(); });
+  buffer_cv_.wait_for(lock, timeout,
+                      [this]() { return !frame_buffer_.empty() || stop_requested_.load() || decode_failed_.load(); });
+
+  if (stop_requested_.load() || decode_failed_.load()) {
+    lock.unlock();
+    ThrowIfUnavailable();
+  }
 
   if ((int)frame_buffer_.size() <= current_frame_index_) {
     SPDLOG_LOGGER_TRACE(Logger, "frame_buffer_.size() {}, current_frame_index_ {}, eof_ {}", frame_buffer_.size(),
@@ -787,99 +902,169 @@ void VideoSource::AllInOneThread() {
   pthread_setname_np(pthread_self(), "VideoSource::AllInOneThread()");
 #endif
 
-  AVPacket *packet = av_packet_alloc();
-  AVFrame *frame = av_frame_alloc();
-  AVFrame *filt_frame = av_frame_alloc();
-  AVFrame *tmp_frame = av_frame_alloc();
+  AVPacket *packet = nullptr;
+  AVFrame *frame = nullptr;
+  AVFrame *filt_frame = nullptr;
+  AVFrame *tmp_frame = nullptr;
   bool packet_pending = false;
   int ret;
-  if (!packet || !frame || !filt_frame) {
-    throw std::runtime_error("Could not allocate frame or packet");
-  }
+  // Demuxers may position one frame before the requested keyframe (observed
+  // with the rawvideo/yuv4mpegpipe demuxer). Discard decoded frames whose PTS is
+  // still before the seek target before applying the frame-skip counter, so the
+  // first filtered frame is the requested one on every container.
+  bool waiting_min_pts = false;
+  int64_t min_pts = AV_NOPTS_VALUE;
 
-  decoding_active_ = true;
-  while (decoding_active_) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(kUpdateIntervalMS));
-    if (decode_need_reset_) {
-      // Reset decoder state
-      av_seek_frame(fmt_ctx_, stream_index_, decode_start_pts_.load(), AVSEEK_FLAG_BACKWARD);
-      avcodec_flush_buffers(dec_ctx_);
-      packet_pending = false;
-      eof_ = false;
-      decode_need_reset_ = false;
+  try {
+    packet = av_packet_alloc();
+    frame = av_frame_alloc();
+    filt_frame = av_frame_alloc();
+    tmp_frame = av_frame_alloc();
+    if (!packet || !frame || !filt_frame || !tmp_frame) {
+      throw std::runtime_error("Could not allocate frame or packet");
+    }
 
-      // Reset filter graph
-      avfilter_graph_free(&graph_);
+    while (decoding_active_) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kUpdateIntervalMS));
 
-      {
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
-        frame_buffer_.clear();
-        current_frame_index_ = -1;
-        current_frame_pts_ = 0;
-        have_seeked_ = true;
-      }
-
+      // Take a consistent snapshot of the pending seek request. The payload and
+      // the sequence number were published together under seek_mutex_, so the
+      // acknowledgement below belongs to exactly this request.
+      SeekRequest req;
       {
         std::lock_guard<std::mutex> lock(seek_mutex_);
-        seek_cv_.notify_all();
+        if (seek_request_.pending) {
+          req = seek_request_;
+        }
       }
+      if (req.pending) {
+        const int seek_ret = av_seek_frame(fmt_ctx_, stream_index_, req.start_pts, AVSEEK_FLAG_BACKWARD);
+        const bool failed = (seek_ret < 0);
+        std::string error;
+        if (failed) {
+          error = fmt::format("av_seek_frame failed, {}: {}", seek_ret, ffmpeg_error_string(seek_ret));
+          Logger->error("{}: {}", filename_, error);
+        } else {
+          // Reset decoder state only after a real seek succeeded.
+          avcodec_flush_buffers(dec_ctx_);
+          packet_pending = false;
+          eof_ = false;
+          avfilter_graph_free(&graph_);
+          {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            frame_buffer_.clear();
+            current_frame_index_ = -1;
+            current_frame_pts_ = 0;
+            have_seeked_ = true;
+          }
+          start_frame_serial_ = req.frames_to_skip;
+          min_pts = req.start_pts;
+          waiting_min_pts = true;
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(seek_mutex_);
+          if (seek_request_.seq == req.seq && seek_request_.pending) {
+            seek_request_.pending = false;
+            seek_request_.completed = true;
+            seek_request_.failed = failed;
+            seek_request_.error = error;
+          }
+        }
+        seek_cv_.notify_all();
+
+        if (failed) {
+          // Propagate the seek failure to every consumer instead of pretending
+          // the seek completed.
+          {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            decode_error_ = std::make_exception_ptr(std::runtime_error(error));
+            decode_failed_ = true;
+          }
+          buffer_cv_.notify_all();
+          decoding_active_ = false;
+          break;
+        }
+      }
+
+      if (eof_) {
+        continue;
+      }
+
+      // Check if buffer size is sufficient
+      size_t buffer_size;
+      {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        buffer_size = frame_buffer_.size();
+      }
+
+      // If buffer is full, wait
+      if (buffer_size >= max_cached_frames_) {
+        continue;
+      }
+
+      ret = DecodeNextFrame(frame, packet, packet_pending);
+      if (AVERROR_EOF == ret) {
+      } else if (ret < 0) {
+        throw std::runtime_error(fmt::format("Error in decoding, {}: {}", ret, ffmpeg_error_string(ret)));
+      }
+
+      // Drop frames that the demuxer returned before the requested keyframe.
+      if (waiting_min_pts) {
+        if (AVERROR_EOF != ret && frame->pts != AV_NOPTS_VALUE && frame->pts < min_pts) {
+          av_frame_unref(frame);
+          continue;
+        }
+        waiting_min_pts = false;
+      }
+
+      // Skip filter processing to speed up frame seeking
+      if (start_frame_serial_ > 0) {
+        if (AVERROR_EOF != ret) {
+          av_frame_unref(tmp_frame);
+          av_frame_move_ref(tmp_frame, frame);
+          start_frame_serial_--;
+          continue;
+        } else {
+          // If EOF is reached, stop skipping and keep the last frame for display
+          ret = 0;
+          av_frame_move_ref(frame, tmp_frame);
+          start_frame_serial_ = 0;
+        }
+      }
+
+      if (!graph_) {
+        CreateFilterGraph(frame);
+      }
+      ret = FilterNextFrame(filt_frame, AVERROR_EOF == ret ? nullptr : frame);
+      if (AVERROR_EOF == ret) {
+        Logger->trace("av_buffersink_get_frame() returned EOF");
+        eof_ = true;
+      } else if (ret < 0) {
+        throw std::runtime_error(fmt::format("Error in filtering, {}: {}", ret, ffmpeg_error_string(ret)));
+      } else if (0 <= ret) {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        // Frame may be shared across threads; use shared_ptr for management
+        frame_buffer_.push_back(std::shared_ptr<AVFrame>(filt_frame, AVFrameDeleter()));
+        filt_frame->opaque = stream_;
+        SPDLOG_LOGGER_TRACE(Logger, "pushed frame {} pts {}", fmt::ptr(filt_frame), filt_frame->pts);
+        buffer_cv_.notify_all(); // Notify waiting threads
+      }
+      filt_frame = av_frame_alloc();
     }
 
-    if (eof_) {
-      continue;
-    }
-
-    // Check if buffer size is sufficient
-    size_t buffer_size;
+  } catch (...) {
+    // Never let an exception escape the decode thread (std::terminate). Store
+    // it for the consumer and wake every waiter so they can observe the failure
+    // or the cancellation instead of blocking until timeout.
     {
       std::lock_guard<std::mutex> lock(buffer_mutex_);
-      buffer_size = frame_buffer_.size();
+      decode_error_ = std::current_exception();
+      decode_failed_ = true;
     }
-
-    // If buffer is full, wait
-    if (buffer_size >= max_cached_frames_) {
-      continue;
-    }
-
-    ret = DecodeNextFrame(frame, packet, packet_pending);
-    if (AVERROR_EOF == ret) {
-    } else if (ret < 0) {
-      throw std::runtime_error(fmt::format("Error in decoding, {}: {}", ret, ffmpeg_error_string(ret)));
-    }
-
-    // Skip filter processing to speed up frame seeking
-    if (start_frame_serial_ > 0) {
-      if (AVERROR_EOF != ret) {
-        av_frame_unref(tmp_frame);
-        av_frame_move_ref(tmp_frame, frame);
-        start_frame_serial_--;
-        continue;
-      } else {
-        // If EOF is reached, stop skipping and keep the last frame for display
-        ret = 0;
-        av_frame_move_ref(frame, tmp_frame);
-        start_frame_serial_ = 0;
-      }
-    }
-
-    if (!graph_) {
-      CreateFilterGraph(frame);
-    }
-    ret = FilterNextFrame(filt_frame, AVERROR_EOF == ret ? nullptr : frame);
-    if (AVERROR_EOF == ret) {
-      Logger->trace("av_buffersink_get_frame() returned EOF");
-      eof_ = true;
-    } else if (ret < 0) {
-      throw std::runtime_error(fmt::format("Error in filtering, {}: {}", ret, ffmpeg_error_string(ret)));
-    } else if (0 <= ret) {
-      std::lock_guard<std::mutex> lock(buffer_mutex_);
-      // Frame may be shared across threads; use shared_ptr for management
-      frame_buffer_.push_back(std::shared_ptr<AVFrame>(filt_frame, AVFrameDeleter()));
-      filt_frame->opaque = stream_;
-      SPDLOG_LOGGER_TRACE(Logger, "pushed frame {} pts {}", fmt::ptr(filt_frame), filt_frame->pts);
-      buffer_cv_.notify_all(); // Notify waiting threads
-    }
-    filt_frame = av_frame_alloc();
+    decoding_active_ = false;
+    buffer_cv_.notify_all();
+    seek_cv_.notify_all();
   }
 
   av_frame_free(&frame);
@@ -1087,12 +1272,14 @@ bool VideoSource::RequestFormatFallback() {
     return false;
   }
   // Already attempted fallback, do not retry
-  if (need_format_fallback_.load() || format_fallback_applied_) {
+  if (need_format_fallback_.load() || format_fallback_applied_.load()) {
     Logger->error("{}: format fallback already attempted, giving up", filename_);
     return false;
   }
   need_format_fallback_.store(true);
-  decode_need_reset_.store(true);
+  // The caller performs an explicit re-seek through IssueSeek after requesting
+  // the fallback, so the rebuilt filter graph produces frames at the current
+  // position instead of relying on a side-effect flag.
   return true;
 }
 
@@ -1131,4 +1318,20 @@ int64_t VideoSource::FindNearestKeyframePts(int64_t target_pts) {
   // Move backward to get the previous keyframe (PTS <= target)
   --it;
   return it->first;
+}
+
+void VideoSource::ThrowIfUnavailable() {
+  if (decode_failed_.load()) {
+    std::exception_ptr error;
+    {
+      std::lock_guard<std::mutex> lock(buffer_mutex_);
+      error = decode_error_;
+    }
+    if (error) {
+      std::rethrow_exception(error);
+    }
+  }
+  if (stop_requested_.load()) {
+    throw stopped_error(fmt::format("{}: stopped while waiting for frames", filename_));
+  }
 }

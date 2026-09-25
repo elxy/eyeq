@@ -358,6 +358,29 @@ static void fit_to_window(DisplayState &state, SyncPlayer &player, const Window 
 
 static void sigterm_handler([[maybe_unused]] int sig) { exit(123); }
 
+// Saves the frames the user is currently seeing. The serial in the file name
+// comes from the consumed snapshot, not from the mutating decode cursor, so the
+// saved file matches the displayed frame even if the player has moved on.
+static void save_snapshot_frames(const EyeQArgs &args, const FrameSnapshot &snapshot) {
+  for (const auto &[id, frame] : snapshot.frames) {
+    int serial = 0;
+    if (auto it = snapshot.metadata.find(id); it != snapshot.metadata.end()) {
+      serial = it->second.frame_serial;
+    }
+    std::filesystem::path filename(args.videos[id]);
+    std::filesystem::path path;
+    if (args.save_in_source) {
+      path = filename.parent_path();
+    }
+    path /= fmt::format("{:04d}.{}.{}.{}", serial, id, filename.filename().string(), args.save_format);
+    if (save_frame(frame.get(), path.string(), args.save_format) < 0) {
+      Logger->error("Failed to save frame to {}", path.string());
+    } else {
+      Logger->info("{} saved", path.string());
+    }
+  }
+}
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
   SetConsoleCP(CP_UTF8);
@@ -455,7 +478,14 @@ int main(int argc, char **argv) {
   }
   player.SetMainId(args.main_id);
   Logger->info("Main video is #{}: {}", args.main_id, args.videos[args.main_id]);
-  player.StartSources(args.seek_to, args.seek_to_frame);
+  try {
+    player.StartSources(args.seek_to, args.seek_to_frame);
+  } catch (const std::exception &e) {
+    Logger->critical("Failed to start sources: {}", e.what());
+    player.Stop();
+    SDL_Quit();
+    return 1;
+  }
 
   // Check if hardware decoding took effect for all videos
   if (args.hardware_decoder != HardwareDecoder::None) {
@@ -599,70 +629,73 @@ int main(int argc, char **argv) {
     return held_ids;
   };
   std::string title_;
-  player.SetFrameUpdateCallback([&player, &title_, &title, &window, &need_refresh, &state,
-                                 &args](std::map<int, std::shared_ptr<AVFrame>> &frames) {
-    // Collect OSD data and title before FeedFrames
-    // FeedFrames holds render_mutex_ internally; after release, the main thread may Render immediately,
-    // so OSD data must be updated before FeedFrames
-    std::string suffix = " ";
-    if (DisplayMode::Fill == args.display_mode) {
-      enum AVPictureType pict_type = frames[state.fill.id]->pict_type;
-      char type = av_get_picture_type_char(pict_type);
-      suffix += type;
-    }
-    title_ = title + " @ No." + std::to_string(player.GetCurrentFrameSerial()) + " frame" + suffix;
+  // The snapshot currently fed to the renderers; Ctrl+S / Ctrl+E use its serials
+  // so they match what the user sees. Owned by this (UI) thread.
+  std::shared_ptr<const FrameSnapshot> shown_snapshot;
+  // Set when the player reports an unrecoverable failure; the main loop then
+  // leaves through the normal cleanup path with a non-zero exit code.
+  bool fatal_exit = false;
+  int exit_code = 0;
+  std::string fatal_message;
+  // When a rendered-frame save is pending, the next render must consume the
+  // save request against the frames the user is looking at. Set on Ctrl+E and
+  // cleared after that render, so no new snapshot is fed in between.
+  bool hold_snapshot_for_save = false;
 
-    // Collect OSD data every frame so data is always ready when toggling with the I key
-    for (auto &[id, frame] : frames) {
-      OsdInfo info;
-      info.filename = std::filesystem::path(args.videos[id]).filename().string();
-      info.video_id = id;
-      info.pict_type = av_get_picture_type_char(frame->pict_type);
-      info.current_time_s = player.CurrentTime();
-      info.frame_serial = player.GetCurrentFrameSerial(id);
-      info.total_frames = player.GetTotalFrames(id);
-      state.osd_infos[id] = info;
-    }
-    {
-      float start = player.StartTime();
-      float end = player.EndTime();
-      float duration = end - start;
-      state.total_duration_s = duration;
-      if (duration > 0) {
-        state.playback_progress = (player.CurrentTime() - start) / duration;
-        state.playback_progress = std::clamp(state.playback_progress, 0.0f, 1.0f);
+  // Player-thread notifications consumed by the UI thread. No callback mutates
+  // DisplayState/title from the decode side.
+  auto consume_player_events = [&]() {
+    for (auto &outcome : player.TakeControlOutcomes()) {
+      const char *status = "unknown";
+      switch (outcome.status) {
+      case ControlStatus::Ok:
+        status = "ok";
+        break;
+      case ControlStatus::Boundary:
+        status = "boundary";
+        break;
+      case ControlStatus::Failed:
+        status = "failed";
+        break;
+      case ControlStatus::Cancelled:
+        status = "cancelled";
+        break;
+      case ControlStatus::Rejected:
+        status = "rejected";
+        break;
+      }
+      if (outcome.status == ControlStatus::Failed || outcome.status == ControlStatus::Rejected) {
+        Logger->error("Control request {} {}: {}", outcome.request_id, status, outcome.message);
+      } else {
+        Logger->debug("Control request {} {}: {}", outcome.request_id, status, outcome.message);
+      }
+      // A failed format fallback leaves the renderer without a usable mapping;
+      // stop instead of continuing to feed frames the renderer rejected.
+      if (outcome.kind == ControlKind::RequestFormatFallback && outcome.status == ControlStatus::Failed) {
+        Logger->critical("Texture format fallback failed: {}", outcome.message);
+        fatal_exit = true;
+        exit_code = 1;
       }
     }
-
-    // Update playback FPS
-    state.playback_fps = player.GetPlaybackFps();
-    state.main_fps = player.FrameRate();
-
-    auto failed_ids = window.FeedFrames(frames);
-    if (!failed_ids.empty()) {
-      for (int id : failed_ids) {
-        if (!player.GetVideoSource(id)->RequestFormatFallback()) {
-          Logger->critical("Video #{} ({}): texture format incompatible and auto fallback failed. "
-                           "Try manually specifying --filter format=rgb48le",
-                           id, args.videos[id]);
-          exit(1);
-        }
-      }
-      // Re-seek to current position to trigger filter graph rebuild in decode thread
-      player.SeekTo(player.CurrentTime());
-      return;
+    if (player.ConsumeFatalError(&fatal_message)) {
+      Logger->critical("Player stopped after an unrecoverable error: {}", fatal_message);
+      fatal_exit = true;
+      exit_code = 1;
     }
-    need_refresh = true;
-  });
-  player.SetFlickerCallback(args.flicker_interval, [&state, &need_refresh]() {
-    state.show_ref = !state.show_ref;
-    need_refresh = true;
-  });
-  player.SetResolutionChangedCallback([]() {
-    SDL_Event event;
-    event.type = SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
-    SDL_PushEvent(&event);
-  });
+    if (uint32_t flickers = player.ConsumeFlickerEvents(); flickers > 0) {
+      if (flickers % 2 == 1) {
+        state.show_ref = !state.show_ref;
+      }
+      need_refresh = true;
+    }
+    if (player.ConsumeResolutionChanged()) {
+      SDL_Event resize_event;
+      resize_event.type = SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
+      SDL_PushEvent(&resize_event);
+    }
+  };
+
+  player.SetFlickerInterval(args.flicker_interval);
 
   player.Start(true);
 
@@ -679,6 +712,60 @@ int main(int argc, char **argv) {
     while (!SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(kUpdateIntervalMS));
 
+      consume_player_events();
+      if (fatal_exit) {
+        goto exit;
+      }
+
+      // Feed the newest publication (coalesced single slot) and derive title/OSD
+      // from the same snapshot, so no cursor is queried after the frames arrived.
+      // While a save is pending, skip feeding so Render() saves exactly the
+      // frames named by the user's Ctrl+E.
+      if (!hold_snapshot_for_save) {
+        if (auto snapshot = player.TakeSnapshot()) {
+          auto failed_ids = window.FeedFrames(snapshot->frames);
+          if (!failed_ids.empty()) {
+            // The fallback runs through the player's control path (rebuild filter
+            // graph + re-seek); a failure is reported as a control outcome.
+            for (int id : failed_ids) {
+              Logger->warn("Video #{} ({}): texture format incompatible, requesting fallback", id, args.videos[id]);
+            }
+            player.RequestFormatFallback(failed_ids);
+          } else {
+            shown_snapshot = snapshot;
+            std::string suffix = " ";
+            if (DisplayMode::Fill == args.display_mode) {
+              if (auto it = snapshot->metadata.find(state.fill.id); it != snapshot->metadata.end()) {
+                suffix += it->second.pict_type;
+              }
+            }
+            if (auto main_it = snapshot->metadata.find(args.main_id); main_it != snapshot->metadata.end()) {
+              title_ = title + " @ No." + std::to_string(main_it->second.frame_serial) + " frame" + suffix;
+            }
+            state.osd_infos.clear();
+            for (const auto &[id, info] : snapshot->metadata) {
+              OsdInfo osd;
+              osd.filename = std::filesystem::path(args.videos[id]).filename().string();
+              osd.video_id = id;
+              osd.pict_type = info.pict_type;
+              osd.current_time_s = snapshot->current_time_s;
+              osd.frame_serial = info.frame_serial;
+              osd.total_frames = info.total_frames;
+              state.osd_infos[id] = osd;
+            }
+            float duration = snapshot->end_time_s - snapshot->start_time_s;
+            state.total_duration_s = duration;
+            if (duration > 0) {
+              state.playback_progress = (snapshot->current_time_s - snapshot->start_time_s) / duration;
+              state.playback_progress = std::clamp(state.playback_progress, 0.0f, 1.0f);
+            }
+            state.playback_fps = snapshot->playback_fps;
+            state.main_fps = snapshot->main_fps;
+            need_refresh = true;
+          }
+        }
+      }
+
       if (need_refresh) {
         // Update time corresponding to mouse position (for OSD bottom-right display)
         if (state.show_osd && state.total_duration_s > 0) {
@@ -691,6 +778,7 @@ int main(int argc, char **argv) {
           state.mouse_time_s = -1.0f;
         }
         window.Render(state);
+        hold_snapshot_for_save = false; // the pending rendered-frame save was consumed
         window.SetTitle(title_);
         need_refresh = false;
       }
@@ -724,7 +812,11 @@ int main(int argc, char **argv) {
       case SDLK_S:
         if (keymod & SDL_KMOD_CTRL) {
           Logger->debug("ctrl+s key pressed, save frames");
-          player.SaveCurrentFrames(args.save_in_source, args.save_format);
+          if (shown_snapshot) {
+            save_snapshot_frames(args, *shown_snapshot);
+          } else {
+            Logger->warn("ctrl+s ignored: no displayed frame yet");
+          }
         }
         break;
       case SDLK_E:
@@ -736,9 +828,17 @@ int main(int argc, char **argv) {
           if (args.save_in_source) {
             path = src.parent_path();
           }
-          const int serial = player.GetCurrentFrameSerial(id);
+          int serial = 0;
+          if (shown_snapshot) {
+            if (auto it = shown_snapshot->metadata.find(id); it != shown_snapshot->metadata.end()) {
+              serial = it->second.frame_serial;
+            }
+          }
           path /= fmt::format("render_{:04d}.{}.{}.{}", serial, id, src.filename().string(), args.save_render_format);
           window.RequestSaveRenderedFrame(path);
+          // Freeze snapshot feeding until the next Render() consumes the save
+          // request, so the saved bytes are the frames named above.
+          hold_snapshot_for_save = true;
           need_refresh = true; // force one render pass to consume the save request
         }
         break;
@@ -983,11 +1083,14 @@ int main(int argc, char **argv) {
       case SDLK_S:
         if (keymod & SDL_KMOD_SHIFT) {
           // Shift+S: seek to relative time at mouse X position
+          if (!shown_snapshot) {
+            break;
+          }
           float mouse_x, mouse_y;
           SDL_GetMouseState(&mouse_x, &mouse_y);
           float progress = mouse_x / static_cast<float>(window.Width());
-          float start = player.StartTime();
-          float end = player.EndTime();
+          float start = shown_snapshot->start_time_s;
+          float end = shown_snapshot->end_time_s;
           float target = start + progress * (end - start);
           Logger->debug("Shift+S: seek to {:.2f}s (progress {:.2f})", target, progress);
           player.SeekTo(target);
@@ -1030,27 +1133,31 @@ int main(int argc, char **argv) {
         } else {
           seek_offset_s = 60;
         }
-      do_seek: {
-        auto held = get_held_digits();
-        if (!held.empty()) {
-          for (int id : held) {
-            Logger->debug("{} + seek: video {} seek offset {:.0f}s", id, id, seek_offset_s);
-            digit_keys[id].used_as_modifier = true;
-            player.SeekOffsetSingle(id, seek_offset_s);
+      do_seek:
+        {
+          auto held = get_held_digits();
+          if (!held.empty()) {
+            for (int id : held) {
+              Logger->debug("{} + seek: video {} seek offset {:.0f}s", id, id, seek_offset_s);
+              digit_keys[id].used_as_modifier = true;
+              player.SeekOffsetSingle(id, seek_offset_s);
+            }
+          } else {
+            player.SeekOffset(seek_offset_s);
           }
-        } else {
-          player.SeekOffset(seek_offset_s);
+          break;
         }
-        break;
-      }
       }
       break;
     }
   }
 
 exit:
+  // Drop the UI-held snapshot before stopping/releasing the sources: a snapshot
+  // keeps AVFrame references whose opaque points at the VideoSource streams.
+  shown_snapshot.reset();
   player.Stop();
 
   SDL_Quit();
-  return 0;
+  return exit_code;
 }

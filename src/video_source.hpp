@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -133,6 +134,16 @@ public:
   void Stop();
 
   /**
+   * @brief Restart a source that was previously Stop()ed.
+   *
+   * Rewinds the demuxer, clears the consumption cursor and frame cache, and
+   * starts a fresh decode thread from the first frame, so SyncPlayer can run
+   * another playback session with the same source object. Throws when the
+   * demuxer cannot be rewound.
+   */
+  void Restart();
+
+  /**
    * @brief Get next frame
    * @param timeout_ms Timeout in ms; if <=0, waits indefinitely until a frame is returned
    * @return Frame pointer; memory is managed by shared_ptr, caller need not handle deallocation
@@ -212,14 +223,41 @@ private:
   std::string filter_graph_;
   AVFilterGraph *graph_;
   AVFilterContext *filt_in_, *filt_out_;
-  std::atomic<bool> need_format_fallback_{false}; // Signal decode thread to append format filter
-  bool format_fallback_applied_{false};           // Whether format fallback has been applied (decode thread only)
+  std::atomic<bool> need_format_fallback_{false};    // Signal decode thread to append format filter
+  std::atomic<bool> format_fallback_applied_{false}; // Whether format fallback has been applied (decode thread only)
 
   // Decoding state
   std::thread one_thread_;
-  std::atomic<bool> decoding_active_{false};   // Controls whether decoding is active
-  std::atomic<bool> decode_need_reset_{false}; // Whether decoding position needs to be reset
-  std::atomic<int64_t> decode_start_pts_{0};   // Decoding start timestamp
+  std::atomic<bool> decoding_active_{false}; // Controls whether decoding is active
+  std::atomic<bool> stop_requested_{false};  // Set by Stop() to cancel every blocking wait
+
+  // One consistent seek request at a time. The requester writes the whole
+  // payload and sequence number under seek_mutex_; the decode thread reads the
+  // same payload, executes it, and acknowledges that exact sequence. Splitting
+  // the payload across independent atomics allowed a newer request to be
+  // confirmed by an older decode iteration.
+  struct SeekRequest {
+    uint64_t seq = 0;
+    int64_t start_pts = 0;
+    size_t frames_to_skip = 0;
+    bool pending = false;
+    bool completed = false; // valid together with a matching seq
+    bool failed = false;
+    bool cancelled = false;
+    std::string error;
+  };
+  SeekRequest seek_request_; // guarded by seek_mutex_
+  uint64_t seek_seq_ = 0;    // guarded by seek_mutex_
+  std::mutex seek_mutex_;
+  std::condition_variable seek_cv_;
+
+  // Skip counter for the decode thread; set from the acknowledged seek request.
+  std::atomic<size_t> start_frame_serial_{0};
+
+  // Decode-thread failure, published to the waiting consumer instead of letting
+  // an exception escape the thread (which would call std::terminate).
+  std::atomic<bool> decode_failed_{false};
+  std::exception_ptr decode_error_; // guarded by buffer_mutex_
 
   std::atomic<bool> eof_{false};
   std::map<int64_t, int64_t> keyframe_index_;    // Keyframe PTS -> file position mapping (in bytes)
@@ -239,12 +277,14 @@ private:
   std::mutex buffer_mutex_;
   std::condition_variable buffer_cv_;
 
-  std::mutex seek_mutex_;
-  std::condition_variable seek_cv_;
+  std::atomic<bool> have_seeked_{false};      // True after any seek; switches serial source to pts_to_serial_
+  std::atomic<int> current_frame_serial_{-1}; // Incremental counter, used only before first seek
 
-  bool have_seeked_{false};       // True after any seek; switches serial source to pts_to_serial_
-  int current_frame_serial_ = -1; // Incremental counter, used only before first seek
-  size_t start_frame_serial_ = 0;
+  /**
+   * @brief Issue a seek request and wait until the decode thread acknowledges
+   *        that exact request. Throws on timeout, cancellation or seek failure.
+   */
+  void IssueSeek(int64_t start_pts, size_t frames_to_skip, int timeout_ms);
 
   /**
    * @brief Open video stream
@@ -299,6 +339,12 @@ private:
    * @return PTS of the nearest keyframe; returns -1 on failure
    */
   int64_t FindNearestKeyframePts(int64_t target_pts);
+
+  /**
+   * @brief Throw stopped_error / the stored decode failure when the decode side
+   *        is no longer able to serve a wait. Callers must NOT hold buffer_mutex_.
+   */
+  void ThrowIfUnavailable();
 };
 
 }; // namespace EYEQ

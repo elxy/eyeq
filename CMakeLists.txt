@@ -19,6 +19,7 @@ option(EYEQ_ENABLE_DECKLINK "Enable the DeckLink SDK backend (read-only catalog 
 option(EYEQ_BUILD_DECKLINK_TESTS "Build the DeckLink CPU/fake contract and backend tests (no GPU, no device)" OFF)
 option(EYEQ_BUILD_DECKLINK_GPU_TESTS "Build the GPU packing tests (needs libplacebo and a real Vulkan device at runtime; no SDK)" OFF)
 option(EYEQ_BUILD_DISPLAY_GPU_TESTS "Build the offscreen display/rendering tests (needs libplacebo and a real Vulkan device at runtime; no SDK, no window)" OFF)
+option(EYEQ_BUILD_PLAYER_TESTS "Build the SyncPlayer frame publication/control tests (CPU only, no GPU/SDK/window)" OFF)
 set(DECKLINK_SDK_ROOT "" CACHE PATH "Path to the Blackmagic DeckLink SDK root (read-only; used from phase 1-A)")
 
 # macOS requires Objective-C++ support (ICC profile auto-detection)
@@ -250,4 +251,14 @@ if(EYEQ_BUILD_DISPLAY_GPU_TESTS)
     message(FATAL_ERROR "EYEQ_BUILD_DISPLAY_GPU_TESTS=ON but tests/output/CMakeLists.txt is missing")
   endif()
   add_subdirectory(tests/output)
+endif()
+
+# Player frame publication/control tests. They run the real SyncPlayer and
+# VideoSource over locally synthesized YUV4MPEG2 files; no GPU, SDK, or window.
+if(EYEQ_BUILD_PLAYER_TESTS)
+  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/player/CMakeLists.txt")
+    message(FATAL_ERROR "EYEQ_BUILD_PLAYER_TESTS=ON but tests/player/CMakeLists.txt is missing")
+  endif()
+  enable_testing()
+  add_subdirectory(tests/player)
 endif()

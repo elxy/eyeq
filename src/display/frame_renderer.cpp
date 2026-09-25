@@ -205,7 +205,7 @@ const struct pl_frame *FrameRenderer::GetSourceFrame(int video_id) const {
   return it->second.GetPLFrame();
 }
 
-std::vector<int> FrameRenderer::FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames) {
+std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames) {
   std::vector<int> failed_ids;
   for (auto [i, frame] : frames) {
     try {

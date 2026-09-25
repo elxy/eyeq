@@ -276,6 +276,7 @@ Optional CMake switches (all default to `OFF`; the normal player build is unaffe
 | `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` and `decklink-test-signal` tools. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. The player is not wired to it yet, so `eyeq` still does not output video. |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Build the GPU packing tests: a CPU oracle, a real-GPU comparison/readback test and a lifecycle fault-injection test. Needs libplacebo and a working Vulkan device at runtime; no SDK and no DeckLink device. |
 | `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | Build the offscreen display/rendering tests: the real `RenderContext`/`FrameRenderer` on a headless Vulkan device, covering Fill/Slide/Grid, two-instance interleaving, HDR override, ICC isolation and OSD switches. Needs libplacebo and a working Vulkan device at runtime; no SDK, no window and no DeckLink device. |
+| `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | Build the CPU-only player tests: the real `SyncPlayer`/`VideoSource` over locally synthesized YUV4MPEG2 files, covering frame snapshot publication, serialized control completion, relative seeks, multi-source EOF alignment, bounded command work, stop cancellation and seek-failure propagation. No GPU, window, SDK or DeckLink device. |
 | `DECKLINK_SDK_ROOT` | *(empty)* | Path to the Blackmagic DeckLink SDK root (read-only); required by `EYEQ_ENABLE_DECKLINK`. Nothing is downloaded or modified. |
 
 Running the CPU/fake contract tests (no SDK required):
@@ -284,6 +285,14 @@ Running the CPU/fake contract tests (no SDK required):
 cmake -S . -B build -DEYEQ_BUILD_DECKLINK_TESTS=ON
 cmake --build build --target decklink_contract_test
 ctest --test-dir build --output-on-failure
+```
+
+Running the player frame/control tests (no GPU, window or SDK required):
+
+```sh
+cmake -S . -B build-player -DEYEQ_BUILD_PLAYER_TESTS=ON
+cmake --build build-player --target player_sync_test
+ctest --test-dir build-player -R player_sync --output-on-failure
 ```
 
 Building the read-only catalog backend and tool:

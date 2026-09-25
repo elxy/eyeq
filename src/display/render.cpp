@@ -36,7 +36,7 @@ void Window::InitRender(DisplayMode display_mode, ScaleMethod &scale_method, Sca
       *context_, config, [this](const struct pl_color_space *colorspace) { ColorspaceHint(colorspace); });
 }
 
-std::vector<int> Window::FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames) {
+std::vector<int> Window::FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames) {
   // render_mutex_ serializes FeedFrames (decode thread) against Render (main
   // thread) and covers the whole FrameRenderer state, including the colorspace
   // hint callback that touches the swapchain.

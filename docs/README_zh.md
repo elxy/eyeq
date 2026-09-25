@@ -274,6 +274,7 @@ DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默
 | `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog`、`decklink-test-signal` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。播放器尚未接入，`eyeq` 仍不能输出视频 |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 构建 GPU 打包测试：CPU oracle、真实 GPU 对比/读回测试、生命周期故障注入测试。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK，也不需要 DeckLink 设备 |
 | `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | 构建离屏显示/渲染测试：在无窗口的 headless Vulkan 设备上运行真实 `RenderContext`/`FrameRenderer`，覆盖 Fill/Slide/Grid、双实例交错、HDR override、ICC 隔离与 OSD 开关。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK、窗口或 DeckLink 设备 |
+| `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | 构建纯 CPU 播放器测试：用本地合成的 YUV4MPEG2 文件驱动真实 `SyncPlayer`/`VideoSource`，覆盖帧快照发布、控制完成顺序、相对 seek 累积、多源 EOF 对齐、有界命令预算、Stop 取消与 seek 失败传播。无需 GPU、窗口、SDK 或 DeckLink 设备 |
 | `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），`EYEQ_ENABLE_DECKLINK` 必需；不会下载或修改 |
 
 运行 CPU/fake 契约测试（无需 SDK）：
@@ -282,6 +283,14 @@ DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默
 cmake -S . -B build -DEYEQ_BUILD_DECKLINK_TESTS=ON
 cmake --build build --target decklink_contract_test
 ctest --test-dir build --output-on-failure
+```
+
+运行播放器帧/控制测试（无需 GPU、窗口或 SDK）：
+
+```sh
+cmake -S . -B build-player -DEYEQ_BUILD_PLAYER_TESTS=ON
+cmake --build build-player --target player_sync_test
+ctest --test-dir build-player -R player_sync --output-on-failure
 ```
 
 构建只读设备/模式查询后端与工具：

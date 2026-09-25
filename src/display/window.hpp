@@ -124,7 +124,7 @@ public:
    * @param frames Video frames
    * @return List of video IDs that failed due to incompatible texture format
    */
-  std::vector<int> FeedFrames(std::map<int, std::shared_ptr<AVFrame>> &frames);
+  std::vector<int> FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames);
   void Render(const DisplayState &state);
 
   /**
