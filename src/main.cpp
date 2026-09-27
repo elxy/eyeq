@@ -85,7 +85,7 @@ struct EyeQArgs {
   bool source_max_luma_set;              // Whether --source-max-luma was explicitly passed
 
 #ifdef EYEQ_ENABLE_DECKLINK
-  // Still-only monitoring (SDK-enabled builds only). --monitor-device enables it;
+  // External monitoring (SDK-enabled builds only). --monitor-device enables it;
   // --monitor-mode is then required. All values are validated before any output is
   // enabled. The monitor target is the comparison baseline and is the same
   // --target-display-nits peak used in every other mode.

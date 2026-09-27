@@ -67,9 +67,10 @@ public:
     // per render. This is a functional choice, never load-adaptive.
     WorkPrecision work_precision = WorkPrecision::F16;
     // NaN/Inf policy: validate the common display-linear result for the
-    // difference/high-precision path (a full-frame readback, acceptable while
-    // still-only). Plain desktop playback leaves this off to avoid the readback
-    // cost; the gate is always available through FrameRenderer.
+    // difference/high-precision path (a full-frame readback). The desktop playback
+    // path leaves this off to avoid the readback cost; the continuous monitor path
+    // enforces the same policy with the GPU-side FiniteGate instead (see
+    // output/monitor_output.hpp).
     bool validate_difference_result = true;
     // Fixed common mapping target owned by this layer. It is never re-derived
     // from the presentation target (V2-1 handoff #5).

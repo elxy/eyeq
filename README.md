@@ -221,7 +221,7 @@ After launching, the following keyboard and mouse controls are available:
 
 ### Monitoring Output (DeckLink)
 
-A build made with `-DEYEQ_ENABLE_DECKLINK=ON` and the DeckLink SDK can send the current comparison result to an external monitor. This is **still-only**: the player stays paused and pressing Space only logs that continuous playback is not supported. The desktop preview and the DeckLink output consume the same composed result, so toggling the desktop OSD or resizing the window never changes the packed output bytes. Without `--monitor-device` the default player is unchanged and does not link the DeckLink backend.
+A build made with `-DEYEQ_ENABLE_DECKLINK=ON` and the DeckLink SDK can send the current comparison result to an external monitor. While the player is paused the monitor shows the current still; while it plays, the monitor follows the desktop: it presents at its own display ticks (the `--monitor-mode` rate), skips frames instead of slowing down, repeats the last frame when none is ready, and freezes on the last frame when paused. The desktop preview and the DeckLink output consume the same composed result, so toggling the desktop OSD or resizing the window never changes the packed output bytes. Without `--monitor-device` the default player is unchanged and does not link the DeckLink backend.
 
 - `--monitor-device <selector>`: Enable monitoring on a DeckLink device. The selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`, including the macOS preview); the macOS system color management is untouched
 - `--monitor-mode <WxH@N|WxH@N/D>`: Native monitor mode as exact integer data, e.g. `3840x2160@50` or `3840x2160@30000/1001`. Required with `--monitor-device`; a mode the device does not natively support is rejected
@@ -230,7 +230,9 @@ A build made with `-DEYEQ_ENABLE_DECKLINK=ON` and the DeckLink SDK can send the 
 - `--monitor-color {sdr709,pq2020}`: Color target — `sdr709` (BT.709 / BT.1886) or `pq2020` (BT.2020 / PQ) (default `sdr709`)
 - `--monitor-sdr-white <nits>`: SDR white level of the common mapping target when monitoring (default 203 nits)
 
-A terminal monitor failure — a device error, a lost device, or a closed output — stops monitoring for the rest of the run: EyeQ logs the failure and keeps the desktop running, and monitoring only comes back after a player restart. A recoverable per-request failure (for example a `FramePacker` readback failure) is reported and the module keeps working; a failed request is not retried.
+A terminal monitor failure — a device error, a lost device, or a closed output — stops monitoring for the rest of the run: EyeQ logs the failure and keeps the desktop running, and monitoring only comes back after a player restart. A recoverable per-request failure (for example a `FramePacker` readback failure) is reported and the module keeps working; a failed request is not retried. A frame the sink reports as displayed late or dropped is normal pacing behaviour, not a failure: it is traced at `trace` level and the monitor continues with the newest frame.
+
+Known limitation: monitor stability is tied to the desktop (UI) thread. Monitor frames are composed and paced on the same UI thread that presents the desktop preview, so a desktop stall (for example a long window present or a GPU stall) can make the monitor skip frames. The output never slows down to compensate, and there is no independent render/pace worker yet.
 
 The monitor output quantizes the display-linear result directly to 10-bit without adding dither, so the output bytes are deterministic for tests and objective measurement; smooth gradients may show slight banding. `v210`'s 4:2:2 chroma subsampling comes with the format; `r210` (RGB 4:4:4) is the cleanest signal.
 
@@ -287,14 +289,14 @@ Migration from older builds: a source-peak override previously written as `--tar
 
 ## DeckLink Output
 
-The DeckLink SDI/HDMI output backend has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. A GPU frame packer (`src/output/frame_packer.hpp` / `.cpp`) converts nonlinear full-range float RGB into Video-range r210/v210 through an asynchronous readback ring. The `eyeq` player is wired to the packer for **still-only** external monitoring (see the Monitoring Output section above): the composition layer keeps a single renderer and hands the same composed result to both the desktop preview and the monitor output, but continuous hardware-clock playback is not implemented yet. Audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. A standalone `decklink-test-signal` tool renders a deterministic CPU pattern through the same backend and enables real hardware output when run. Automated validation exercises the native write path only against a fake SDK and the packer against a local GPU; that is the current verification status, not a runtime restriction.
+The DeckLink SDI/HDMI output backend has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. A GPU frame packer (`src/output/frame_packer.hpp` / `.cpp`) converts nonlinear full-range float RGB into Video-range r210/v210 through an asynchronous readback ring. The `eyeq` player is wired to the packer for external monitoring (see the Monitoring Output section above): the composition layer keeps a single renderer and hands the same composed result to both the desktop preview and the monitor output, and the monitor output paces frames to the mode clock while playing. Audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. A standalone `decklink-test-signal` tool renders a deterministic CPU pattern through the same backend and enables real hardware output when run. Automated validation exercises the native write path only against a fake SDK and the packer against a local GPU; the paced monitor path is verified with a scripted fake sink, not with real hardware. That is the current verification status, not a runtime restriction.
 
 Optional CMake switches (all default to `OFF`; the normal player build is unaffected):
 
 | Option | Default | Purpose |
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the CPU/fake contract tests and, with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection and output-backend tests. No GPU, no device. |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` and `decklink-test-signal` tools. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. It also wires the still-only external monitoring options into `eyeq`. |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | Build the SDK backend (read-only catalog plus the output backend) and the `decklink-catalog` and `decklink-test-signal` tools. Requires macOS on Apple Silicon and `DECKLINK_SDK_ROOT`. It also wires the external monitoring options into `eyeq`. |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Build the GPU packing tests: a CPU oracle, a real-GPU comparison/readback test and a lifecycle fault-injection test. Needs libplacebo and a working Vulkan device at runtime; no SDK and no DeckLink device. |
 | `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | Build the offscreen display/rendering tests: the real `RenderContext`/`FrameRenderer` on a headless Vulkan device, covering Fill/Slide/Grid, two-instance interleaving, HDR override, ICC isolation and OSD switches. Needs libplacebo and a working Vulkan device at runtime; no SDK, no window and no DeckLink device. |
 | `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | Build the CPU-only player tests: the real `SyncPlayer`/`VideoSource` over locally synthesized YUV4MPEG2 files, covering frame snapshot publication, serialized control completion, relative seeks, multi-source EOF alignment, bounded command work, stop cancellation and seek-failure propagation. No GPU, window, SDK or DeckLink device. |
@@ -378,7 +380,7 @@ nonlinear full-range float RGB texture (`RGBA16F`, `RGBA32F` or any float format
 at least 16-bit components) on the same `pl_gpu`, applies the frozen first-version
 policy (BT709/SDR-BT1886 or BT2020/PQ, Video range, Left chroma, no transfer/tonemap/
 ICC processing) and produces r210 (big-endian) or v210 (little-endian) bytes in a
-fixed four-slot ring backed by persistent mapped host buffers and asynchronous
+fixed staging ring (three slots) backed by persistent mapped host buffers and asynchronous
 `pl_tex_download` + `pl_buf_poll`. In monitoring mode the `eyeq` player sends the
 packer's output to an external monitor (see the Monitoring Output section above).
 
@@ -414,20 +416,24 @@ override, ICC isolation and the OSD enable/disable switch. They do not verify th
 window present path, desktop visual output or any hardware mapping; those remain
 manual/environment-limited.
 
-### Still monitor composition layer
+### Monitor composition layer
 
 `src/output/monitor_output.hpp` consumes the common display-linear result produced by
 the coordination layer (`src/display/display_coordinator.*`), encodes it into a fixed
 offscreen full-range RGB target in the selected output pixel format, packs it with
-`FramePacker` and hands the bytes to `FrameSink::DisplayStill`. It never owns a
-`FrameRenderer`. It owns the `FrameSink`; at most one request is in flight and main
-advances it on the same thread with `Tick()` (or the low-level `Submit()`/`Pump()`). A
-new request while one is in flight is reported as Busy and is not read or mapped.
-`Close()` drains the packer and closes the owned sink within one total deadline.
+`FramePacker` and hands the bytes to the `FrameSink`. It never owns a `FrameRenderer`.
+It owns the `FrameSink`; main advances it on the same thread with `Tick()` (or the
+low-level `Submit()`/`Pump()`). The still path keeps at most one request in flight and
+reports a request that arrives meanwhile as Busy without reading or mapping it. The
+paced playback path (enabled with `SetPlayback(true)`) pipelines new composed frames
+through the packer ring, schedules each at the next display tick and drops the oldest
+unscheduled frame on overflow. The GPU finite gate runs on both paths, so the
+playback path never performs a full-frame readback. `Close()` stops scheduled
+playback, drains the packer, and closes the owned sink within one total deadline.
 
-With `EYEQ_ENABLE_DECKLINK=ON` the `eyeq` player is wired to this layer for still-only
-external monitoring (see "Monitoring Output (DeckLink)"); continuous hardware-clock
-playback, audio and native HDR passthrough are still not implemented.
+With `EYEQ_ENABLE_DECKLINK=ON` the `eyeq` player is wired to this layer for external
+monitoring (see "Monitoring Output (DeckLink)"); audio and native HDR passthrough are
+still not implemented, and the paced path has not been validated on real hardware.
 
 The composition tests exercise the real layer against a headless Vulkan device and a
 scripted fake sink (which can really return Still Busy/DeviceError/Closed):
@@ -440,10 +446,13 @@ ctest --test-dir build-monitor -R monitor_output --output-on-failure
 
 They cover SDR/PQ with r210/v210 (including non-tight `row_bytes` padding), known
 black/colour/PQ-100-nit anchors, the CPU packing oracle, Fill/Slide/Grid/difference
-amplification, Busy/priority/cancel/close and terminal sink failures, and a
-fault-injected real readback failure. `monitor_output_fault_test` links a
-fault-injection build of the real `frame_packer.cpp`, so the injection cannot silently
-miss. These tests do not verify a window, real hardware frames or a DeckLink device.
+amplification, Busy/priority/cancel/close and terminal sink failures, a fault-injected
+real readback failure, the GPU finite gate, and paced playback (composition order,
+strictly increasing display ticks, per-frame bytes against the CPU oracle, queue
+overflow dropping the oldest unscheduled frame, pause/resume and the no-full-frame-
+readback assertion). `monitor_output_fault_test` links a fault-injection build of the
+real `frame_packer.cpp`, so the injection cannot silently miss. These tests do not
+verify a window, real hardware frames or a DeckLink device.
 
 The CPU-only known-answer and comparator-mutation tests belong to the CPU test suite
 and need no GPU:

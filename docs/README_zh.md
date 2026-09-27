@@ -219,7 +219,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ### 监看输出（DeckLink）
 
-用 `-DEYEQ_ENABLE_DECKLINK=ON` 加 DeckLink SDK 构建的版本可以把当前比较结果送到外接监视器。该模式为**静帧（still-only）**：播放器保持暂停，按空格只会提示暂不支持连续播放。桌面预览与监视器输出消费同一份合成结果，因此切换桌面 OSD 或改变窗口大小不会改变监视器输出的打包字节。不传 `--monitor-device` 时默认播放器不变，也不会链接 DeckLink 后端。
+用 `-DEYEQ_ENABLE_DECKLINK=ON` 加 DeckLink SDK 构建的版本可以把当前比较结果送到外接监视器。暂停时监视器显示当前静帧；播放时监视器与桌面行为一致：按自身显示节拍（`--monitor-mode` 帧率）呈现，宁可跳帧也绝不放慢，没有新帧就重复上一帧，暂停时冻结最后一帧。桌面预览与监视器输出消费同一份合成结果，因此切换桌面 OSD 或改变窗口大小不会改变监视器输出的打包字节。不传 `--monitor-device` 时默认播放器不变，也不会链接 DeckLink 后端。
 
 - `--monitor-device <selector>`：在指定 DeckLink 设备上开启监看。选择器必须显式：`index:<n>` 或 `id:<persistent-id>`。开启监看会禁用所有应用侧 ICC（global、`auto` 与 `N:path`，包含 macOS 预览）；macOS 系统色彩管理不受影响
 - `--monitor-mode <WxH@N|WxH@N/D>`：原生 mode，使用精确整数数据，例如 `3840x2160@50` 或 `3840x2160@30000/1001`。与 `--monitor-device` 搭配必填；设备原生不支持的 mode 会被拒绝
@@ -228,7 +228,9 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--monitor-color {sdr709,pq2020}`：色彩目标——`sdr709`（BT.709 / BT.1886）或 `pq2020`（BT.2020 / PQ）（默认 `sdr709`）
 - `--monitor-sdr-white <nits>`：监看时共同映射目标的 SDR 白电平（默认 203 nits）
 
-监视器输出的终止性失败——设备报错、设备丢失或输出已关闭——会在本次运行内停用监看：EyeQ 记录该失败并保持桌面继续运行，监看需重启播放器后恢复。可恢复的单次请求失败（例如打包器读回失败）会被上报，模块仍可继续使用；失败的请求不会重试。
+监视器输出的终止性失败——设备报错、设备丢失或输出已关闭——会在本次运行内停用监看：EyeQ 记录该失败并保持桌面继续运行，监看需重启播放器后恢复。可恢复的单次请求失败（例如打包器读回失败）会被上报，模块仍可继续使用；失败的请求不会重试。sink 报告“显示延迟（DisplayedLate）”或“丢弃（Dropped）”属于正常节拍行为，不算失败：以 `trace` 级别记录，监视器继续用最新帧输出。
+
+已知限制：监视器稳定性与桌面（UI）线程绑定。监视器帧在与桌面预览同一 UI 线程上合成与排程，因此桌面卡顿（例如一次长窗口 present 或 GPU 卡顿）可能导致监视器跳帧；输出不会为补偿而放慢，目前也没有独立的渲染/排程 worker。
 
 监视器输出把显示线性结果直接量化为 10-bit，不添加抖动，输出字节对测试与客观测量是确定性的；平滑渐变上可能出现轻微 banding。`v210` 的 4:2:2 色度子采样来自格式本身；追求更纯净的信号可用 `r210`（RGB 4:4:4）。
 
@@ -285,14 +287,14 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ## DeckLink 输出
 
-DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。GPU 打包器（`src/output/frame_packer.hpp` / `.cpp`）通过异步读回环把非线性 full-range 浮点 RGB 转成 Video range 的 r210/v210。`eyeq` 播放器已为**静帧监看**接入该链路（见上方“监看输出（DeckLink）”）：合成层只保留唯一渲染器，把同一份合成结果同时交给桌面预览与监视器输出，但硬件时钟连续播放尚未实现。音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。另有独立工具 `decklink-test-signal`，通过同一后端输出确定性 CPU 测试画面，运行时**会启用真实硬件输出**。自动化验证目前只在 fake SDK 上跑通原生写路径，打包器仅在本机 GPU 上验证；这是验证状态，不是运行行为限制。
+DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。GPU 打包器（`src/output/frame_packer.hpp` / `.cpp`）通过异步读回环把非线性 full-range 浮点 RGB 转成 Video range 的 r210/v210。`eyeq` 播放器已为监看接入该链路（见上方“监看输出（DeckLink）”）：合成层只保留唯一渲染器，把同一份合成结果同时交给桌面预览与监视器输出，播放时监视器输出按 mode 时钟排程。音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。另有独立工具 `decklink-test-signal`，通过同一后端输出确定性 CPU 测试画面，运行时**会启用真实硬件输出**。自动化验证目前只在 fake SDK 上跑通原生写路径，打包器仅在本机 GPU 上验证，paced 监看路径则用 scripted fake sink 验证；这些是验证状态，不是运行行为限制。
 
 可选 CMake 开关（默认全部为 `OFF`，不影响普通播放器构建）：
 
 | 开关 | 默认 | 用途 |
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试；配合 `EYEQ_ENABLE_DECKLINK` 还会构建确定性的 SDK 故障注入与输出后端测试。无需 GPU、设备 |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog`、`decklink-test-signal` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。同时为 `eyeq` 接入静帧监看选项 |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog`、`decklink-test-signal` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。同时为 `eyeq` 接入监看选项 |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 构建 GPU 打包测试：CPU oracle、真实 GPU 对比/读回测试、生命周期故障注入测试。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK，也不需要 DeckLink 设备 |
 | `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | 构建离屏显示/渲染测试：在无窗口的 headless Vulkan 设备上运行真实 `RenderContext`/`FrameRenderer`，覆盖 Fill/Slide/Grid、双实例交错、HDR override、ICC 隔离与 OSD 开关。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK、窗口或 DeckLink 设备 |
 | `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | 构建纯 CPU 播放器测试：用本地合成的 YUV4MPEG2 文件驱动真实 `SyncPlayer`/`VideoSource`，覆盖帧快照发布、控制完成顺序、相对 seek 累积、多源 EOF 对齐、有界命令预算、Stop 取消与 seek 失败传播。无需 GPU、窗口、SDK 或 DeckLink 设备 |
@@ -352,7 +354,7 @@ cmake --build build-sdk --target decklink-test-signal
 `eyeq_frame_packer` 实现了 `FramePacker` 接缝：接收同一 `pl_gpu` 上可采样的非线性
 full-range 浮点 RGB 纹理（`RGBA16F`、`RGBA32F` 或任意分量精度至少 16 位的浮点格式），
 按冻结的首版策略（BT709/SDR-BT1886 或 BT2020/PQ、Video range、Left 色度，不做传输/
-色调映射/ICC 处理），通过固定 4 槽环形缓冲、持久映射主机缓冲与异步
+色调映射/ICC 处理），通过固定 3 槽环形缓冲、持久映射主机缓冲与异步
 `pl_tex_download` + `pl_buf_poll` 输出 r210（大端）或 v210（小端）字节。在监看模式下
 `eyeq` 播放器把 packer 输出送到外接监视器（见上方“监看输出（DeckLink）”）。
 
@@ -383,17 +385,19 @@ renderer 的输出不受另一个影响、且另一个被销毁后仍可继续�
 目标局部 HDR nits override、ICC 隔离与 OSD 开关。它不验证窗口 present 路径、桌面视觉输出或任何
 硬件映射，这些仍属于人工/环境受限项。
 
-### 静帧监看组合层
+### 监看组合层
 
 `src/output/monitor_output.hpp` 消费由协调层（`src/display/display_coordinator.*`）产出的
 公共显示线性结果，把它编码为固定尺寸的离屏 full-range RGB 目标（输出像素格式），再用
-`FramePacker` 打包后交给 `FrameSink::DisplayStill`。它不再拥有 `FrameRenderer`。它自己拥有
-`FrameSink`；同一时刻只允许一个在途请求，main 在同一线程用 `Tick()`（或底层的
-`Submit()`/`Pump()`）推进。在途时新请求返回 Busy，不会被读取或映射。`Close()` 在同一个
-总 deadline 内排空 packer 并关闭自己拥有的 sink。
+`FramePacker` 打包后交给 `FrameSink`。它不再拥有 `FrameRenderer`。它自己拥有
+`FrameSink`；main 在同一线程用 `Tick()`（或底层的 `Submit()`/`Pump()`）推进。静帧路径同一
+时刻只允许一个在途请求，在途时新请求返回 Busy，不会被读取或映射。播放路径
+（`SetPlayback(true)`）把新合成帧通过 packer 环流水提交，每帧排到下一个显示节拍点，
+队列满时顶掉最旧的未排帧。两条路径都会经过 GPU 内 NaN/Inf 检查，因此播放路径每帧都不做
+全帧读回。`Close()` 在同一个总 deadline 内停止调度播放、排空 packer 并关闭自己拥有的 sink。
 
-配合 `EYEQ_ENABLE_DECKLINK=ON`，`eyeq` 播放器已为静帧监看接入该层（见“监看输出（DeckLink）”）；
-硬件时钟连续播放、音频与原生 HDR 直通仍未实现。
+配合 `EYEQ_ENABLE_DECKLINK=ON`，`eyeq` 播放器已为监看接入该层（见“监看输出（DeckLink）”）；
+音频与原生 HDR 直通仍未实现，paced 路径尚未在真实硬件上验证。
 
 组合测试在无窗口的 headless Vulkan 设备上运行真实组合层，配合可真正返回 Still
 Busy/DeviceError/Closed 的 scripted fake sink：
@@ -405,9 +409,11 @@ ctest --test-dir build-monitor -R monitor_output --output-on-failure
 ```
 
 覆盖 SDR/PQ 与 r210/v210（含非紧凑 `row_bytes` 补齐）、已知黑场/色块/PQ 100nit 锚点、CPU
-打包 oracle、Fill/Slide/Grid/差异放大、Busy/取消/关闭与终态 sink 故障，以及一次注入真实读回失败的
-故障测试。`monitor_output_fault_test` 链接的是带故障注入 hook 的真实 `frame_packer.cpp`，确保注入
-确实命中。这些测试不验证窗口、真实硬件帧或 DeckLink 设备。
+打包 oracle、Fill/Slide/Grid/差异放大、Busy/取消/关闭与终态 sink 故障、GPU 内 NaN 闸门，
+以及 paced 播放（合成顺序、显示节拍严格递增、逐帧字节对 CPU oracle、队列满顶旧、暂停/恢复、
+播放路径无全帧读回断言），再加上一次注入真实读回失败的故障测试。`monitor_output_fault_test`
+链接的是带故障注入 hook 的真实 `frame_packer.cpp`，确保注入确实命中。这些测试不验证窗口、
+真实硬件帧或 DeckLink 设备。
 
 纯 CPU 的已知答案与比较器突变测试属于 CPU 测试集，不需要 GPU：
 
