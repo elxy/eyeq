@@ -969,6 +969,8 @@ void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context, AVStream *stre
     Check(stats.mismatch == 0, "paced frame " + std::to_string(i) + " bytes match the CPU oracle");
   }
   Check(monitor.diagnostics().paced_submits == static_cast<uint64_t>(kFrames), "every composition was paced-submitted");
+  Check(monitor.diagnostics().finite_checks == static_cast<uint64_t>(kFrames),
+        "the GPU finite gate ran on every paced frame");
   Check(EYEQ::LinearTextureReadbackCount() == 0, "paced playback never does a full-frame readback");
   Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "paced monitor closed");
 }
