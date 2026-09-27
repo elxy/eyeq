@@ -4,7 +4,7 @@
 
 相比于[video-compare](https://github.com/pixop/video-compare)，主要增加了：
 
-1. 支持高位深、HDR10、Dolby Vision (Profile 5/8) 与 HDR Vivid
+1. 支持高位深、HDR10、Dolby Vision (Profile 5/8) 与HDR Vivid
 2. 支持ICC色彩管理，macOS下自动检测系统显示器ICC配置
 3. 支持1-10个视频同时对比，随时切换参考视频，便于评估保真度
 4. 三种显示模式：Fill(切换)、Slide(左右滑动)、Grid(网格)
@@ -83,13 +83,13 @@ eyeq --display-mode slide --ref <ref> <test_a> --main <test_b>
 eyeq --display-mode grid '<test_0>/*.jpg' '<test_1>/*.png' '<test_2>/*.jpg'
 ```
 
-图片序列由 FFmpeg 的 [image2 demuxer](https://ffmpeg.org/ffmpeg-formats.html#image2-1) 处理，支持以下路径模式：
-  - `'dir/*.jpg'` — glob 模式，匹配目录下所有 `.jpg` 文件（按文件名排序）。**必须加引号**，否则会被 shell 展开成多个参数，每个被当成独立视频源
-  - `dir/%04d.jpg` — 序号模式，匹配 `0000.jpg`、`0001.jpg`、`0002.jpg`……
+图片序列由FFmpeg的 [image2 demuxer](https://ffmpeg.org/ffmpeg-formats.html#image2-1) 处理，支持以下路径模式：
+  - `'dir/*.jpg'` — glob模式，匹配目录下所有`.jpg`文件（按文件名排序）。**必须加引号**，否则会被shell展开成多个参数，每个被当成独立视频源
+  - `dir/%04d.jpg` — 序号模式，匹配`0000.jpg`、`0001.jpg`、`0002.jpg`……
 
-这些模式在 `fill` 和 `slide` 模式下同样适用，不限于 `grid` 模式。不支持直接传入裸目录路径（如 `./images/`）。
+这些模式在`fill`和`slide`模式下同样适用，不限于`grid`模式。不支持直接传入裸目录路径（如`./images/`）。
 
-> **注意：** EyeQ 会探测所链接的 FFmpeg 实际支持哪种 `pattern_type` 并自动选择。旧语法 `dir/%*.jpg`（属于 FFmpeg 8.x 已移除的 `pattern_type=glob_sequence`）仍可接受，会被自动改写为普通 glob 并给出警告。若 FFmpeg 编译时未启用 glob 支持（`HAVE_GLOB`），EyeQ 会明确报告该原因，此时请改用序号模式。
+> **注意：** EyeQ会探测所链接的FFmpeg实际支持哪种`pattern_type`并自动选择。旧语法`dir/%*.jpg`（属于FFmpeg 8.x已移除的`pattern_type=glob_sequence`）仍可接受，会被自动改写为普通glob并给出警告。若FFmpeg编译时未启用glob支持（`HAVE_GLOB`），EyeQ会明确报告该原因，此时请改用序号模式。
 
 ### 滤镜
 
@@ -201,16 +201,16 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--filter <filter>`：指定视频滤镜，作为未单独指定滤镜的视频的默认滤镜，即[FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html)。也可以在视频路径后使用`@`分隔符为单个视频指定滤镜，如`video.mp4@"filter"`
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
 - `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
-- `--reference-white <nits>`：统一的SDR参考白电平（单位nits，默认203，ITU-R BT.2408）。主视频为HDR时用作SDR源的参考白，监看时用作映射/输出线的SDR白；纯SDR桌面不受影响。替代 `--sdr-white-on-hdr` 与 `--monitor-sdr-white`
-- `--target-display-nits <nits>`：映射目标的峰值亮度（nits）：普通播放时是显示映射目标（也是 `--hdrvivid-render` 下 Vivid 曲线的目标显示亮度），监看时即监视器峰值。`pq2020` 监看目标必填（物理监视器没有可猜的默认值），其余默认 1000。
-- `--source-max-luma <nits>`：可选的源 HDR mastering/内容峰值（`pl_color_space.hdr.max_luma`）覆盖，单位 nits。源峰值不可信时使用（HLG、DPX 读回）
-- `--hdrvivid-render`：启用 HDR Vivid 渲染。
+- `--reference-white <nits>`：统一的SDR参考白电平（单位nits，默认203，ITU-R BT.2408）。主视频为HDR时用作SDR源的参考白，监看时用作映射/输出线的SDR白；纯SDR桌面不受影响。替代`--sdr-white-on-hdr`与`--monitor-sdr-white`
+- `--target-display-nits <nits>`：映射目标的峰值亮度（nits）：普通播放时是显示映射目标（也是`--hdrvivid-render`下Vivid曲线的目标显示亮度），监看时即监视器峰值。`pq2020`监看目标必填（物理监视器没有可猜的默认值），其余默认1000。
+- `--source-max-luma <nits>`：可选的源HDR mastering/内容峰值（`pl_color_space.hdr.max_luma`）覆盖，单位nits。源峰值不可信时使用（HLG、DPX读回）
+- `--hdrvivid-render`：启用HDR Vivid渲染。
 - `--high-dpi {auto,yes,no}`：High-DPI模式，默认`auto`自动检测
 - `--scale-method <method>`：视频放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
 - `--seek-to <secs>`：播放起始时间，单位为秒
-- `--seek-to-frame <N>`：从第 N 帧开始播放（从 0 开始计数）
-- `--save-in-source`：设置后，`Ctrl + S` / `Ctrl + E` 保存的帧将输出到视频文件所在目录中
+- `--seek-to-frame <N>`：从第N帧开始播放（从0开始计数）
+- `--save-in-source`：设置后，`Ctrl + S` / `Ctrl + E`保存的帧将输出到视频文件所在目录中
 - `--save-format <format>`：帧保存格式，默认为`png`
 - `--save-render-format <format>`：渲染帧保存格式，默认为`dpx`
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`：硬件解码器，默认`auto`
@@ -219,10 +219,10 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--debug`：等同于`--loglevel debug`
 - `--monitor-status`：打印只读的DeckLink设备/mode目录（设备、能力、输出连接，以及每种连接/像素格式下的原生mode）后退出；不会开启任何输出
 - `--monitor-device <auto|selector>`：在DeckLink设备上开启监看。`auto`选取支持播放的设备，跳过被占用的（若全部失败则报告每个候选的原因）；否则选择器必须显式：`index:<n>`或`id:<persistent-id>`。开启监看会禁用所有应用侧ICC（global、`auto`与`N:path`）；macOS系统自身的色彩管理不受影响
-- `--monitor-mode <auto|WxH@N|WxH@N/D>`：监看mode。`auto`（默认）选取与主视频最接近的原生mode（优先精确帧率，其次取不低于源的最低帧率；同一帧率下取覆盖源的最小mode）。显式值为精确整数数据，例如`3840x2160@50`或`3840x2160@30000/1001`；设备原生不支持的 mode 会被拒绝
+- `--monitor-mode <auto|WxH@N|WxH@N/D>`：监看mode。`auto`（默认）选取与主视频最接近的原生mode（优先精确帧率，其次取不低于源的最低帧率；同一帧率下取覆盖源的最小mode）。显式值为精确整数数据，例如`3840x2160@50`或`3840x2160@30000/1001`；设备原生不支持的mode会被拒绝
 - `--monitor-connection {auto,sdi,hdmi}`：输出连接。`auto`（默认）跟随设备已激活的输出，设备报告SDI时优先SDI；不探测实际接线，若设备同时报告两者请显式指定
 - `--monitor-pixel-format {v210,r210}`：输出像素格式（默认`v210`）
-- `--monitor-color {auto,sdr709,pq2020}`：色彩目标。`auto`（默认）只看主视频的传输函数——PQ/HLG 选`pq2020`，其余（含P3等宽色域SDR）选`sdr709`。`sdr709`为BT.709 / BT.1886；`pq2020`为BT.2020 / PQ，且必须配合`--target-display-nits`
+- `--monitor-color {auto,sdr709,pq2020}`：色彩目标。`auto`（默认）只看主视频的传输函数——PQ/HLG选`pq2020`，其余（含P3等宽色域SDR）选`sdr709`。`sdr709`为BT.709 / BT.1886；`pq2020`为BT.2020 / PQ，且必须配合`--target-display-nits`
 
 ### 环境变量
 
@@ -262,7 +262,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 5. 如何回看`Ctrl + E`保存的DPX渲染帧？
 
-   DPX头部用SMPTE ST 268:2014的枚举值记录transfer/primaries（PQ=14、HLG=15、BT.2020=15），而FFmpeg的DPX解码器不认识这些值（transfer/colorimetric只映射到12/10），reference high quantity（HDR 峰值）也不会被读取。因此EyeQ拿到的是未知色彩空间、且没有`max_luma`——需用 `setparams` 滤镜恢复色彩空间，并用`--source-max-luma`提供色调映射所需的源峰值：
+   DPX头部用SMPTE ST 268:2014的枚举值记录transfer/primaries（PQ=14、HLG=15、BT.2020=15），而FFmpeg的DPX解码器不认识这些值（transfer/colorimetric只映射到12/10），reference high quantity（HDR峰值）也不会被读取。因此EyeQ拿到的是未知色彩空间、且没有`max_luma`——需用`setparams`滤镜恢复色彩空间，并用`--source-max-luma`提供色调映射所需的源峰值：
 
    ```
    eyeq --no-colorspace-hint --source-max-luma 1000 \
@@ -273,4 +273,4 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ## 许可证
 
-本软件基于 GNU 宽通用公共许可证 (LGPL) 2.1 或更高版本发布。详见 [LICENSE.md](../LICENSE.md)。
+本软件基于GNU宽通用公共许可证 (LGPL) 2.1或更高版本发布。详见 [LICENSE.md](../LICENSE.md)。
