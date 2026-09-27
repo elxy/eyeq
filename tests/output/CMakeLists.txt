@@ -50,6 +50,17 @@ target_include_directories(monitor_output_gpu_test PRIVATE ${_monitor_test_inclu
 target_link_libraries(monitor_output_gpu_test PRIVATE eyeq_frame_packer ${_monitor_test_libraries})
 add_test(NAME monitor_output_gpu COMMAND monitor_output_gpu_test)
 
+# Queue-order invariant sentinel: the encode dispatched by Submit must be
+# submitted before an immediate recomposition overwrites the borrowed common
+# result texture (the premise for dropping the borrow protocol).
+add_executable(queue_order_gpu_test
+  queue_order_gpu_test.cpp
+  ${CMAKE_SOURCE_DIR}/tests/decklink/fake_frame_sink.cpp
+  ${_monitor_display_sources})
+target_include_directories(queue_order_gpu_test PRIVATE ${_monitor_test_includes})
+target_link_libraries(queue_order_gpu_test PRIVATE eyeq_frame_packer ${_monitor_test_libraries})
+add_test(NAME queue_order_gpu COMMAND queue_order_gpu_test)
+
 # Fault-injection build of the real frame_packer.cpp with the test hooks. It must
 # NOT link eyeq_frame_packer, otherwise the injection would silently miss.
 add_executable(monitor_output_fault_test
@@ -75,4 +86,4 @@ target_include_directories(monitor_controller_gpu_test PRIVATE ${_monitor_test_i
 target_link_libraries(monitor_controller_gpu_test PRIVATE eyeq_frame_packer ${_monitor_test_libraries})
 add_test(NAME monitor_controller_gpu COMMAND monitor_controller_gpu_test)
 
-set_tests_properties(monitor_output_gpu monitor_output_fault monitor_controller_gpu PROPERTIES TIMEOUT 900)
+set_tests_properties(monitor_output_gpu monitor_output_fault monitor_controller_gpu queue_order_gpu PROPERTIES TIMEOUT 900)
