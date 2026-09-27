@@ -992,32 +992,25 @@ int main(int argc, char **argv) {
       }
 
       if (need_refresh) {
-        // While a monitor request is in flight the common result is borrowed. A
-        // real recomposition would overwrite the texture the monitor still reads,
-        // so defer it (keep need_refresh set) until the request drains. A pure UI
-        // change (resize/OSD) does not change the scene key and still presents.
-        bool monitor_blocks = false;
-#ifdef EYEQ_ENABLE_DECKLINK
-        monitor_blocks = monitor && !monitor->AcceptsRequests() && coordinator->WouldRecompose(state);
-#endif
-        if (!monitor_blocks) {
-          // Update time corresponding to mouse position (for OSD bottom-right display)
-          if (state.show_osd && state.total_duration_s > 0) {
-            float mx, my;
-            SDL_GetMouseState(&mx, &my);
-            float cx = 0.0f, cy = 0.0f;
-            window_to_canvas(mx, my, &cx, &cy);
-            float progress = cx / static_cast<float>(coordinator->canvas_width());
-            progress = std::clamp(progress, 0.0f, 1.0f);
-            state.mouse_time_s = progress * state.total_duration_s;
-          } else {
-            state.mouse_time_s = -1.0f;
-          }
-          window.Render(state);
-          hold_snapshot_for_save = false; // the pending rendered-frame save was consumed
-          window.SetTitle(title_);
-          need_refresh = false;
+        // Recomposition is always safe: MonitorOutput::Submit() encodes the common
+        // result into its own target before returning, so a later recomposition may
+        // overwrite the borrowed texture (invariant 1, queue_order_gpu test).
+        // Update time corresponding to mouse position (for OSD bottom-right display)
+        if (state.show_osd && state.total_duration_s > 0) {
+          float mx, my;
+          SDL_GetMouseState(&mx, &my);
+          float cx = 0.0f, cy = 0.0f;
+          window_to_canvas(mx, my, &cx, &cy);
+          float progress = cx / static_cast<float>(coordinator->canvas_width());
+          progress = std::clamp(progress, 0.0f, 1.0f);
+          state.mouse_time_s = progress * state.total_duration_s;
+        } else {
+          state.mouse_time_s = -1.0f;
         }
+        window.Render(state);
+        hold_snapshot_for_save = false; // the pending rendered-frame save was consumed
+        window.SetTitle(title_);
+        need_refresh = false;
       }
       pump_output();
       SDL_PumpEvents();

@@ -696,35 +696,17 @@ void TestPrecisionReconfigure(EYEQ::RenderContext &context, AVStream *stream) {
   const EYEQ::RenderedFrame &amp = coordinator->RenderScene(amp_state);
   Check(amp.precision == EYEQ::WorkPrecision::F32, "the difference path result is F32 even with the F16 preference");
 
-  // Immediate reconfiguration, then a deferred one while the result is borrowed.
-  Check(coordinator->ReconfigurePrecision(EYEQ::WorkPrecision::F32),
-        "reconfiguring while unborrowed applies immediately");
-  Check(coordinator->precision_reconfigure_count() == 1, "the immediate reconfiguration is counted");
-  // A precision change invalidated the cached scene, so compose again before a
-  // consumer may borrow the (now F32) result.
-  coordinator->RenderScene(state);
-  Check(!coordinator->WouldRecompose(state), "an unchanged scene would not recompose");
-  coordinator->AcquireResult();
-  EYEQ::DisplayState changed = state;
-  changed.scale = 1.9f;
-  bool recompose_threw = false;
-  try {
-    coordinator->RenderScene(changed);
-  } catch (const std::logic_error &) {
-    recompose_threw = true;
-  }
-  Check(coordinator->WouldRecompose(changed), "a changed scene would recompose");
-  Check(recompose_threw, "recomposing while the result is borrowed is rejected");
-  Check(coordinator->recompose_rejected_count() == 1, "the rejected recomposition is counted");
-  Check(!coordinator->ReconfigurePrecision(EYEQ::WorkPrecision::F16),
-        "reconfiguring while the result is borrowed is deferred");
-  Check(coordinator->work_precision() == EYEQ::WorkPrecision::F32, "the precision is unchanged while deferred");
-  Check(coordinator->has_pending_precision(), "the deferred precision is recorded");
-  coordinator->ReleaseResult();
+  // Reconfiguration applies immediately and invalidates the cached scene, so the
+  // next composition uses the new precision.
+  coordinator->ReconfigurePrecision(EYEQ::WorkPrecision::F32);
+  Check(coordinator->precision_reconfigure_count() == 1, "the reconfiguration is counted");
   const EYEQ::RenderedFrame &reconfigured = coordinator->RenderScene(state);
-  Check(coordinator->work_precision() == EYEQ::WorkPrecision::F16, "the deferred precision is applied after release");
-  Check(reconfigured.precision == EYEQ::WorkPrecision::F16, "the recomposed result uses the new precision");
-  Check(coordinator->precision_reconfigure_count() == 2, "the deferred reconfiguration is counted once applied");
+  Check(coordinator->work_precision() == EYEQ::WorkPrecision::F32, "the new precision is applied immediately");
+  Check(reconfigured.precision == EYEQ::WorkPrecision::F32, "the recomposed result uses the new precision");
+  coordinator->ReconfigurePrecision(EYEQ::WorkPrecision::F16);
+  Check(coordinator->precision_reconfigure_count() == 2, "a second reconfiguration is counted");
+  const EYEQ::RenderedFrame &back = coordinator->RenderScene(state);
+  Check(back.precision == EYEQ::WorkPrecision::F16, "switching back recomposes at F16");
 }
 
 // ---------------------------------------------------------------------------

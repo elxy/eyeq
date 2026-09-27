@@ -34,11 +34,21 @@ namespace EYEQ {
  * result when it is new, so the caller no longer needs a separate controller
  * object. The desktop keeps its own presentation path.
  *
+ * The borrowed common result carries no acquire/release protocol. The safety
+ * argument is two documented invariants, checked by the queue_order_gpu sentinel
+ * test:
+ *   1. Same pl_gpu and queue: Submit() dispatches the encode before returning, so
+ *     the borrowed RenderedFrame texture is finished with (read) before any later
+ *     recomposition can overwrite it. On one queue, submission order is execution
+ *     order, and the encode already copied the result into this object's own
+ *     target. The desktop present path relies on the same property.
+ *   2. Exit ordering: monitor.Close() (drains the packer and the sink) runs before
+ *     the coordinator releases its renderer textures, which runs before the
+ *     swapchain/context release.
+ *
  * Ownership:
  *   - The RenderContext and the DisplayCoordinator are borrowed. The caller keeps
- *     both alive for the whole lifetime of this object and must not compose a new
- *     scene or reconfigure the coordinator's precision while a request is in
- *     flight (AcceptsRequests() is the check).
+ *     both alive for the whole lifetime of this object.
  *   - This object owns the FrameSink, the fixed target texture, the output encoder
  *     and the packer.
  *   - It calls FrameSink::Close as part of its own Close(). Because it owns the
@@ -79,8 +89,9 @@ public:
     // The already-composed common result to encode and display. It must be a
     // valid display-linear frame whose size matches the resolved layout and whose
     // primaries match the output (the coordinator's mapping target is expected to
-    // be the output target). The frame is borrowed from the coordinator and must
-    // stay valid for the whole in-flight period.
+    // be the output target). The frame is borrowed from the coordinator and only
+    // has to stay valid until Submit() returns: the encode is dispatched inside
+    // Submit() (invariant 1), after which this object reads only its own target.
     RenderedFrame frame;
     SubmissionInfo info;
   };
@@ -161,9 +172,6 @@ public:
   // True after Tick() stopped scheduling because a request failed; the output is
   // kept but never restarted automatically.
   bool failed() const { return failed_; }
-  // True while Tick() holds the coordinator's common result for an in-flight
-  // request (removed together with the borrow protocol).
-  bool result_borrowed() const { return borrowed_; }
   const StepResult &last_result() const { return last_result_; }
   const std::string &close_reason() const { return close_reason_; }
   const Diagnostics &diagnostics() const { return diagnostics_; }
@@ -203,10 +211,8 @@ private:
   void RecordTerminalEvent(const OutputEvent &event);
   // Validates the borrowed common result against the resolved output.
   bool ValidateFrame(const Request &request, std::string *error) const;
-  // Tick() scheduling helpers.
+  // Tick() scheduling helper.
   void SubmitLatest(const RenderedFrame &frame);
-  void AcquireBorrow();
-  void ReleaseBorrow();
 
   RenderContext *context_ = nullptr;
   DisplayCoordinator *coordinator_ = nullptr;
@@ -237,7 +243,6 @@ private:
   Diagnostics diagnostics_{};
 
   // Tick() scheduling state.
-  bool borrowed_ = false;
   bool failed_ = false;
   uint64_t submit_id_ = 0;
   uint64_t last_submitted_render_id_ = 0;

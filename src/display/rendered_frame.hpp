@@ -28,10 +28,16 @@ struct RenderIdentity {
 
 /*
  * Lightweight description of one composed common result (V2.1 section 2.1:
- * "public result description"). It is a borrowed view: @p texture is owned by the
- * coordinator's renderer and stays valid only until the next composition or
- * FeedFrames call on the same coordinator. The consumer must finish using it
- * (and, for the monitor output, pack it) before asking for a new composition.
+ * "public result description"). @p texture is owned by the coordinator's renderer
+ * and is a borrow with *validity* semantics, not a reference-counted handle: it
+ * stays valid until the next composition or FeedFrames call on the same
+ * coordinator.
+ *
+ * There is no acquire/release protocol. A consumer that reads the texture
+ * synchronously (the monitor output encodes it into its own target inside
+ * Submit) is safe against a later recomposition: on one pl_gpu there is one
+ * queue, submission order is execution order, and the read was submitted first.
+ * The desktop present path has always relied on the same property.
  *
  * It is intentionally not a bare pl_tex and does not promise RGBA32F: the storage
  * precision is carried explicitly.

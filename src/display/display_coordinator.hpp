@@ -126,22 +126,13 @@ public:
   // Explicitly replaces the fixed mapping target (invalidates the cached scene).
   void SetMappingTarget(const MappingTarget &target);
 
-  /*
-   * True when the given state would force a new composition (different scene key
-   * or no usable cached result). The caller uses this to avoid asking for a
-   * recomposition while a consumer holds the common result (the monitor borrow),
-   * which the assertions below reject.
-   */
-  bool WouldRecompose(const DisplayState &state) const;
-
   WorkPrecision work_precision() const { return work_precision_; }
   /*
-   * Safe functional precision reconfiguration. If a consumer currently holds the
-   * common result it is deferred until ReleaseResult(); returns true when the
-   * change was applied immediately. The precision never changes with load.
+   * Functional precision reconfiguration. It applies immediately (the precision
+   * never changes with load); the cached scene is invalidated so the next
+   * RenderScene() recomposes at the new precision.
    */
-  bool ReconfigurePrecision(WorkPrecision precision);
-  bool has_pending_precision() const { return pending_precision_.has_value(); }
+  void ReconfigurePrecision(WorkPrecision precision);
 
   void SetCanvasSize(int width, int height);
   bool has_canvas() const { return canvas_w_ > 0 && canvas_h_ > 0; }
@@ -171,22 +162,12 @@ public:
   // No-op in monitoring mode (no application ICC is loaded).
   void RecalibrateICC(const struct pl_color_space *target_color);
 
-  // Borrow management: a consumer marks the result borrowed while it uses it
-  // (for example the monitor output encoding/packing it) so a precision
-  // reconfiguration waits for the drain. While borrowed, asking for a different
-  // scene or a mapping-target change is rejected (fail-fast) instead of
-  // overwriting the texture the consumer is still reading.
-  void AcquireResult();
-  void ReleaseResult();
-  bool result_borrowed() const { return result_borrowed_; }
-
   // ---- diagnostics ---------------------------------------------------------
   const RenderedFrame &result() const { return result_; }
   uint64_t feed_count() const { return feed_count_; }
   uint64_t scene_render_count() const { return scene_render_count_; }
   uint64_t present_count() const { return present_count_; }
   uint64_t precision_reconfigure_count() const { return precision_reconfigure_count_; }
-  uint64_t recompose_rejected_count() const { return recompose_rejected_count_; }
   uint64_t scene_revision() const { return scene_revision_; }
 
 private:
@@ -215,15 +196,12 @@ private:
   uint64_t feed_generation_ = 0;
   uint64_t scene_revision_ = 0;
 
-  bool result_borrowed_ = false;
   bool validate_difference_result_ = true;
-  std::optional<WorkPrecision> pending_precision_;
 
   uint64_t feed_count_ = 0;
   uint64_t scene_render_count_ = 0;
   uint64_t present_count_ = 0;
   uint64_t precision_reconfigure_count_ = 0;
-  uint64_t recompose_rejected_count_ = 0;
 };
 
 } // namespace EYEQ

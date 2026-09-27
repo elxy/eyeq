@@ -431,10 +431,9 @@ void MonitorOutput::Tick() {
   if (request_in_flight_) {
     const StepResult step = Pump();
     if (request_in_flight_) {
-      // Still draining; the borrow must stay until the packer reclaims the slot.
+      // Still draining; pump it again next turn.
       return;
     }
-    ReleaseBorrow();
     switch (step.outcome) {
     case Outcome::Displayed:
       Logger->debug("Monitor output displayed request {} (serial {})", step.submit_id, step.source_frame_serial);
@@ -452,11 +451,6 @@ void MonitorOutput::Tick() {
     return;
   }
 
-  if (borrowed_) {
-    // Should not happen (the borrow is released with the terminating request), but
-    // never leave the coordinator stuck if it does.
-    ReleaseBorrow();
-  }
   if (failed_ || !AcceptsRequests()) {
     return;
   }
@@ -474,8 +468,6 @@ void MonitorOutput::Tick() {
 }
 
 void MonitorOutput::SubmitLatest(const RenderedFrame &frame) {
-  AcquireBorrow();
-
   Request request;
   request.frame = frame;
   request.info.submit_id = ++submit_id_;
@@ -489,27 +481,10 @@ void MonitorOutput::SubmitLatest(const RenderedFrame &frame) {
     return;
   }
 
-  ReleaseBorrow();
   Logger->error("Monitor output submit rejected (outcome {}): stage '{}': {}", static_cast<int>(outcome),
                 last_result_.stage, last_result_.reason);
   // Never silently restart a failed output: keep the desktop running and report.
   failed_ = true;
-}
-
-void MonitorOutput::AcquireBorrow() {
-  if (borrowed_) {
-    return;
-  }
-  coordinator_->AcquireResult();
-  borrowed_ = true;
-}
-
-void MonitorOutput::ReleaseBorrow() {
-  if (!borrowed_) {
-    return;
-  }
-  coordinator_->ReleaseResult();
-  borrowed_ = false;
 }
 
 CloseStatus MonitorOutput::Close(int drain_timeout_ms) {

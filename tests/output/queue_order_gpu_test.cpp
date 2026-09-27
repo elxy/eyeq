@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern "C" {
@@ -245,12 +247,15 @@ std::string ColorString(const Color &c) {
   return buf;
 }
 
+// Pump() is deliberately non-blocking; yield so a bounded poll loop actually
+// gives the GPU time to finish instead of spinning out its iteration bound.
 MonitorOutput::StepResult Drive(MonitorOutput &monitor, int max_pumps = 50000) {
   for (int i = 0; i < max_pumps; ++i) {
     const MonitorOutput::StepResult step = monitor.Pump();
     if (step.outcome != MonitorOutput::Outcome::None) {
       return step;
     }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   throw std::runtime_error("monitor did not finish within the pump bound");
 }

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern "C" {
@@ -310,12 +312,17 @@ std::string ColorString(const Color &c) {
   return buf;
 }
 
+// Pump() is deliberately non-blocking, so a tight spin can exhaust a test's
+// iteration bound before the GPU readback completes. Yield between polls.
+void YieldToGpu() { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+
 MonitorOutput::StepResult Drive(MonitorOutput &monitor, int max_pumps = 50000) {
   for (int i = 0; i < max_pumps; ++i) {
     const MonitorOutput::StepResult step = monitor.Pump();
     if (step.outcome != MonitorOutput::Outcome::None) {
       return step;
     }
+    YieldToGpu();
   }
   throw std::runtime_error("monitor did not finish within the pump bound");
 }
@@ -505,6 +512,7 @@ void TestStillBusy(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     if (step.outcome != MonitorOutput::Outcome::None) {
       break;
     }
+    YieldToGpu();
   }
   Check(sinks.fake.still_display_count() == 0, "sink consumed nothing while Busy");
   Check(monitor.diagnostics().still_busy == 3, "three Still Busy outcomes observed");
@@ -560,14 +568,17 @@ void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 602, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "cancel-busy request accepted");
-    // Pump until the sink has been offered the bytes (scripted Busy).
+    // Pump until the sink has been offered the bytes (scripted Busy). Pump() is
+    // non-blocking, so yield to the GPU between polls; a tight spin can exhaust
+    // its bound before the readback completes.
     int guard = 0;
-    while (sinks.scripted->still_calls() == 0 && guard < 10000) {
+    while (sinks.scripted->still_calls() == 0 && guard < 20000) {
       const auto step = monitor.Pump();
       ++guard;
       if (step.outcome != MonitorOutput::Outcome::None) {
         break;
       }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     Check(sinks.scripted->still_calls() >= 1, "the sink was offered the bytes while Busy");
     const int calls_before_cancel = sinks.scripted->still_calls();
@@ -810,6 +821,7 @@ int DriveController(MonitorOutput &controller, int max_ticks = 100000) {
     if (!controller.in_flight()) {
       return i + 1;
     }
+    YieldToGpu();
   }
   return -1;
 }
@@ -838,7 +850,6 @@ void TestSharedResultAndResubmit(EYEQ::RenderContext &context, AVStream *stream)
   const std::vector<uint8_t> *bytes_after_first = fake_ptr->copy(1);
   Check(bytes_after_first != nullptr && !bytes_after_first->empty(), "the sink captured the packed bytes");
   const std::vector<uint8_t> first_bytes = bytes_after_first != nullptr ? *bytes_after_first : std::vector<uint8_t>{};
-  Check(!controller->result_borrowed(), "the borrow is released after the request terminates");
   Check(coordinator->result().texture == shared, "the monitor consumed the same common result texture");
   Check(!controller->in_flight(), "no request is in flight afterwards");
 
@@ -866,15 +877,14 @@ void TestSharedResultAndResubmit(EYEQ::RenderContext &context, AVStream *stream)
   Check(bytes_after_change != nullptr && *bytes_after_change != first_bytes, "the new scene changes the packed bytes");
 
   controller->Close(1000);
-  Check(!controller->result_borrowed(), "a clean close releases the borrow");
   controller->Tick();
   Check(controller->submit_count() == 2, "Tick after close does nothing");
 
   pl_tex_destroy(context.gpu(), &desktop.tex);
 }
 
-void TestBorrowRejectsRecompose(EYEQ::RenderContext &context, AVStream *stream) {
-  std::fprintf(stdout, "[borrow rejects recompose and defers precision]\n");
+void TestRecomposeWhileInFlight(EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[recompose while a monitor request is in flight]\n");
   const int w = 64;
   const int h = 48;
   auto resolved = BuildResolved(w, h, EYEQ::PixelFormat::V210, false, 100.0, 0);
@@ -889,50 +899,27 @@ void TestBorrowRejectsRecompose(EYEQ::RenderContext &context, AVStream *stream) 
   Feed(*coordinator, stream, w, h);
   auto desktop = CreateTarget(context.gpu(), w, h, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
   coordinator->PresentTo(desktop.frame, state);
+  const uint64_t first_render = coordinator->result().identity.render_id;
 
   controller->Tick(); // submits and stays in flight
   Check(controller->in_flight(), "the request is in flight");
-  Check(controller->result_borrowed(), "the common result is borrowed while in flight");
 
+  // Without a borrow protocol the coordinator must accept a real recomposition
+  // while the request is still in flight; the encode already copied the result
+  // into the monitor's own target (queue_order_gpu sentinel test).
   EYEQ::DisplayState changed = state;
   changed.scale = 1.7f;
   changed.offset_x = 3.0f;
   changed.window_attached = false;
-  Check(coordinator->WouldRecompose(changed), "the coordinator reports the changed scene would recompose");
-
-  bool threw = false;
-  try {
-    coordinator->RenderScene(changed);
-  } catch (const std::logic_error &) {
-    threw = true;
-  }
-  Check(threw, "RenderScene rejects a recomposition while the result is borrowed");
-  Check(coordinator->recompose_rejected_count() == 1, "the rejected recomposition is counted");
-
-  bool set_threw = false;
-  try {
-    coordinator->SetMappingTarget(coordinator->mapping_target());
-  } catch (const std::logic_error &) {
-    set_threw = true;
-  }
-  Check(set_threw, "SetMappingTarget is rejected while the result is borrowed");
-  bool canvas_threw = false;
-  try {
-    coordinator->SetCanvasSize(w + 1, h);
-  } catch (const std::logic_error &) {
-    canvas_threw = true;
-  }
-  Check(canvas_threw, "SetCanvasSize is rejected while the result is borrowed");
-
-  Check(!coordinator->ReconfigurePrecision(EYEQ::WorkPrecision::F32), "a precision change while borrowed is deferred");
-  Check(coordinator->has_pending_precision(), "the precision change is pending");
-
-  Check(DriveController(*controller) > 0, "the request drains");
-  Check(!controller->result_borrowed(), "the borrow is released after draining");
-  // The deferred precision change is applied on the next composition.
   coordinator->RenderScene(changed);
-  Check(!coordinator->has_pending_precision(), "the pending precision change was applied after release");
-  Check(coordinator->work_precision() == EYEQ::WorkPrecision::F32, "the precision is now F32");
+  Check(coordinator->result().identity.render_id != first_render,
+        "a recomposition while a request is in flight is accepted");
+
+  // The in-flight request still terminates, then the new scene is submitted.
+  Check(DriveController(*controller) > 0, "the in-flight request drains");
+  Check(DriveController(*controller) > 0, "the recomposed scene is submitted and drains");
+  Check(controller->submit_count() == 2, "the recomposed scene was resubmitted");
+  Check(controller->diagnostics().displayed == 2, "both requests were displayed");
 
   controller->Close(1000);
   pl_tex_destroy(context.gpu(), &desktop.tex);
@@ -962,7 +949,6 @@ void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
     Check(DriveController(*controller) > 0, "cancel case: the request drains");
     Check(controller->last_result().outcome == MonitorOutput::Outcome::Cancelled,
           "cancel case: the request is cancelled");
-    Check(!controller->result_borrowed(), "cancel case: the borrow is released");
     Check(fake_ptr->still_display_count() == 0, "cancel case: DisplayStill was never reached");
     controller->Close(1000);
     pl_tex_destroy(context.gpu(), &desktop.tex);
@@ -984,7 +970,6 @@ void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
           "sink failure case: the failure is published");
     Check(controller->failed(), "sink failure case: the controller stops scheduling");
     Check(controller->terminal_failed(), "sink failure case: the failure is terminal");
-    Check(!controller->result_borrowed(), "sink failure case: the borrow is released");
     const uint64_t submits = controller->submit_count();
     controller->Tick();
     controller->Tick();
@@ -1007,10 +992,9 @@ void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
     controller->Tick();
     Check(controller->in_flight(), "close case: the request is in flight");
     // The still-busy sink still owns the request's staging slot, so the packer
-    // cannot drain within the deadline and the borrow must be retained.
+    // cannot drain within the deadline.
     const EYEQ::CloseStatus status = controller->Close(0);
     Check(status == EYEQ::CloseStatus::DrainTimeout, "close case: the deadline is reported as DrainTimeout");
-    Check(controller->result_borrowed(), "close case: the borrow is retained after a drain timeout");
     pl_tex_destroy(context.gpu(), &desktop.tex);
   }
 }
@@ -1061,7 +1045,7 @@ int main() {
     TestIsolation(gpu, context, owner.stream);
     TestUhdOnce(gpu, context, owner.stream);
     TestSharedResultAndResubmit(context, owner.stream);
-    TestBorrowRejectsRecompose(context, owner.stream);
+    TestRecomposeWhileInFlight(context, owner.stream);
     TestCancelFailureClose(context, owner.stream);
     TestInitFailureRollback(context);
   } catch (const std::exception &e) {

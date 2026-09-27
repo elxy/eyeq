@@ -3,6 +3,7 @@
 // link eyeq_frame_packer), so the injected readback failure really hits the packer
 // used by MonitorOutput.
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -11,6 +12,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern "C" {
@@ -148,12 +150,17 @@ EYEQ::MonitorOutput::Request MakeRequest(EYEQ::DisplayCoordinator &coordinator,
   return request;
 }
 
+// Pump() is deliberately non-blocking; yield so a bounded poll loop actually
+// gives the GPU time to finish instead of spinning out its iteration bound.
+void YieldToGpu() { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+
 MonitorOutput::StepResult Drive(MonitorOutput &monitor, int max_pumps = 50000) {
   for (int i = 0; i < max_pumps; ++i) {
     const MonitorOutput::StepResult step = monitor.Pump();
     if (step.outcome != MonitorOutput::Outcome::None) {
       return step;
     }
+    YieldToGpu();
   }
   throw std::runtime_error("monitor did not finish within the pump bound");
 }
@@ -214,6 +221,7 @@ int main() {
         break;
       }
       ++drain_guard;
+      YieldToGpu();
     }
     Check(!regressed, "the failed request never regresses to Pending while draining");
     Check(monitor.AcceptsRequests(), "the failed request's resources are reclaimed before the next submit");
