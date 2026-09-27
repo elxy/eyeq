@@ -202,33 +202,33 @@ int save_render_frame(const float *rgba, int width, int height, enum pl_color_tr
 
   // File information header
   std::memcpy(buf.data(), "SDPX", 4);
-  put32(buf, 4, kDpxDataOffset);          // offset to image data
+  put32(buf, 4, kDpxDataOffset); // offset to image data
   std::memcpy(buf.data() + 8, "V1.0", 4);
-  put32(buf, 20, 1);                      // new image
-  put32(buf, 24, kDpxGenericHeaderSize);  // generic header size
-  put32(buf, 660, 0xFFFFFFFF);            // unencrypted
+  put32(buf, 20, 1);                     // new image
+  put32(buf, 24, kDpxGenericHeaderSize); // generic header size
+  put32(buf, 660, 0xFFFFFFFF);           // unencrypted
 
   // Image information header
-  put16(buf, 768, 0);                    // orientation: left-to-right, top-to-bottom
-  put16(buf, 770, 1);                    // number of elements
+  put16(buf, 768, 0); // orientation: left-to-right, top-to-bottom
+  put16(buf, 770, 1); // number of elements
   put32(buf, 772, static_cast<uint32_t>(width));
   put32(buf, 776, static_cast<uint32_t>(height));
-  buf[800] = 50;                         // descriptor: RGB
-  buf[801] = dpx_transfer(trc);          // transfer characteristic
-  buf[802] = dpx_colorimetric(prim);     // colorimetric specification
+  buf[800] = 50;                     // descriptor: RGB
+  buf[801] = dpx_transfer(trc);      // transfer characteristic
+  buf[802] = dpx_colorimetric(prim); // colorimetric specification
   buf[803] = static_cast<uint8_t>(bit_depth);
   put16(buf, 804, bit_depth == 10 ? 1 : 0); // packing: filled for 10-bit, packed otherwise
-  put32(buf, 808, kDpxDataOffset);       // data offset
+  put32(buf, 808, kDpxDataOffset);          // data offset
 
   // Reference data/quantity mapping (SMPTE ST 268). Quantity is in nits so that
   // downstream tools can recover the HDR peak luminance.
-  put32(buf, 784, 0);                    // Reference Low Data
-  put_f32(buf, 788, 0.0f);               // Reference Low Quantity (nits)
+  put32(buf, 784, 0);                     // Reference Low Data
+  put_f32(buf, 788, 0.0f);                // Reference Low Quantity (nits)
   put32(buf, 792, (1u << bit_depth) - 1); // Reference High Data (max code value)
-  put_f32(buf, 796, max_luma);           // Reference High Quantity (nits)
+  put_f32(buf, 796, max_luma);            // Reference High Quantity (nits)
 
-  put32(buf, 1628, 1);                   // pixel aspect ratio numerator
-  put32(buf, 1632, 1);                   // pixel aspect ratio denominator
+  put32(buf, 1628, 1); // pixel aspect ratio numerator
+  put32(buf, 1632, 1); // pixel aspect ratio denominator
 
   // Pixel data
   uint8_t *dst = buf.data() + kDpxDataOffset;
