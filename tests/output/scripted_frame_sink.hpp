@@ -31,6 +31,14 @@ public:
     }
   }
   void ScriptEvent(const EYEQ::OutputEvent &event) { event_script_.push_back(event); }
+  // Script TrySchedule outcomes (Busy/Rejected/DeviceError/Closed) that are returned
+  // WITHOUT forwarding, so a scripted Busy really models "the sink consumed nothing".
+  void ScriptSchedule(EYEQ::ScheduleOutcome outcome, int times = 1) {
+    for (int i = 0; i < times; ++i) {
+      schedule_script_.push_back(outcome);
+    }
+  }
+  void ClearScheduleScript() { schedule_script_.clear(); }
 
   // Inspection of the DisplayStill calls the composition layer made.
   int still_calls() const { return still_calls_; }
@@ -39,9 +47,37 @@ public:
   const std::vector<uint8_t> &last_bytes() const { return last_bytes_; }
   const EYEQ::SubmissionInfo &last_info() const { return last_info_; }
 
+  // One recorded TrySchedule attempt (the bytes are copied because the view is
+  // transient). Used by the paced playback tests to assert order and display times.
+  struct ScheduledCall {
+    EYEQ::SubmissionInfo info;
+    int64_t display_time = 0;
+    int64_t display_duration = 0;
+    EYEQ::ScheduleOutcome outcome = EYEQ::ScheduleOutcome::Rejected;
+    std::vector<uint8_t> bytes;
+  };
+  const std::vector<ScheduledCall> &schedule_calls() const { return schedule_calls_; }
+  void ClearScheduleCalls() { schedule_calls_.clear(); }
+
   EYEQ::ScheduleOutcome TrySchedule(const EYEQ::PackedFrameView &view, const EYEQ::SubmissionInfo &info,
                                     int64_t display_time, int64_t display_duration) override {
-    return inner_->TrySchedule(view, info, display_time, display_duration);
+    EYEQ::ScheduleOutcome outcome;
+    if (!schedule_script_.empty()) {
+      outcome = schedule_script_.front();
+      schedule_script_.pop_front();
+    } else {
+      outcome = inner_->TrySchedule(view, info, display_time, display_duration);
+    }
+    ScheduledCall call;
+    call.info = info;
+    call.display_time = display_time;
+    call.display_duration = display_duration;
+    call.outcome = outcome;
+    if (view.data != nullptr && view.size > 0) {
+      call.bytes.assign(view.data, view.data + view.size);
+    }
+    schedule_calls_.push_back(std::move(call));
+    return outcome;
   }
 
   EYEQ::StillOutcome DisplayStill(const EYEQ::PackedFrameView &view, const EYEQ::SubmissionInfo &info) override {
@@ -88,7 +124,15 @@ public:
     return inner_->StartScheduled(start_time, error);
   }
   bool StopScheduled(int64_t stop_at, int64_t *actual_stop, std::string *error) override {
-    return inner_->StopScheduled(stop_at, actual_stop, error);
+    const bool ok = inner_->StopScheduled(stop_at, actual_stop, error);
+    if (ok) {
+      // Model the SDK's stopped notification so the composition layer can wait for
+      // confirmed-idle before it attempts a still frame again.
+      EYEQ::OutputEvent event{};
+      event.kind = EYEQ::OutputEvent::Kind::PlaybackStopped;
+      event_script_.push_back(event);
+    }
+    return ok;
   }
   bool QueryClock(int64_t time_scale, int64_t *stream_time, double *speed, std::string *error) override {
     return inner_->QueryClock(time_scale, stream_time, speed, error);
@@ -99,6 +143,8 @@ private:
   std::deque<EYEQ::StillOutcome> still_script_;
   std::deque<EYEQ::CloseStatus> close_script_;
   std::deque<EYEQ::OutputEvent> event_script_;
+  std::deque<EYEQ::ScheduleOutcome> schedule_script_;
+  std::vector<ScheduledCall> schedule_calls_;
 
   int still_calls_ = 0;
   int still_forwarded_ = 0;

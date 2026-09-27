@@ -32,6 +32,10 @@ public:
   // Test helpers: fault injection and inspection only. They never drive frame
   // accounting; budget is returned exclusively through PollEvent.
   void fail_next_before_consumption() { fail_before_consumption_ = true; }
+  // Test-only clock control (the real sink advances it from the hardware clock).
+  void set_clock(int64_t clock) { clock_ = clock; }
+  void advance_clock(int64_t delta) { clock_ += delta; }
+  bool playback_running() const { return running_; }
   State state() const { return state_; }
   int pool_slots() const { return pool_slots_; }
   int free_slots() const { return free_slots_; }

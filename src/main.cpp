@@ -264,8 +264,8 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
 
 #ifdef EYEQ_ENABLE_DECKLINK
   app.add_option("--monitor-device", args.monitor_device,
-                 "Enable still-only monitoring on a DeckLink device; the external monitor becomes the comparison "
-                 "target. Selector is explicit: index:<n> or id:<persistent-id>");
+                 "Enable monitoring on a DeckLink device; the external monitor becomes the comparison target. "
+                 "Selector is explicit: index:<n> or id:<persistent-id>");
   app.add_option("--monitor-mode", args.monitor_mode,
                  "Native monitor mode as exact integer data: WxH@N or WxH@N/D (e.g. 3840x2160@50 or "
                  "3840x2160@30000/1001). Required with --monitor-device");
@@ -503,7 +503,7 @@ static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, Displ
     throw std::runtime_error("failed to open the DeckLink output: " + error);
   }
   Logger->info("Monitoring enabled: mode {} connection {} pixel format {} color target {} monitor peak {:.1f} nits, "
-               "SDR white {:.1f} nits (still-only)",
+               "SDR white {:.1f} nits (paced playback in sync with the desktop)",
                FormatMonitorMode(resolved.mode), args.monitor_connection, args.monitor_pixel_format,
                MonitorColorTargetLabel(color_target), args.target_display_nits, args.monitor_sdr_white);
   return std::make_unique<MonitorOutput>(context, coordinator, std::move(backend), resolved);
@@ -910,9 +910,12 @@ int main(int argc, char **argv) {
 
 #ifdef EYEQ_ENABLE_DECKLINK
   // One bounded output step per event-loop turn, so continuous UI events (which
-  // skip the idle inner loop) cannot starve the monitor pump.
+  // skip the idle inner loop) cannot starve the monitor pump. The player's play
+  // state drives the monitor's paced playback mode; a paused/stopped player keeps
+  // the still path.
   auto pump_output = [&]() {
     if (monitor) {
+      monitor->SetPlayback(player.State() == SyncPlayer::PlayState::kPlaying);
       monitor->Tick();
     }
   };
@@ -1290,12 +1293,6 @@ int main(int argc, char **argv) {
         need_refresh = true;
         break;
       case SDLK_SPACE:
-        if (monitoring) {
-          // Still-only boundary: monitoring never starts continuous playback, and
-          // DisplayStill is never looped to fake it (V2.1 section 5.2 / V2-3).
-          Logger->info("Monitoring mode is still-only; continuous playback is not supported (Play ignored)");
-          break;
-        }
         Logger->debug("space key pressed, switch pause state");
         player.InvertPause();
         break;

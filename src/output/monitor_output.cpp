@@ -19,6 +19,12 @@ constexpr int kDefaultCloseTimeoutMs = 5000;
 // DisplayStill attempt to the next Pump instead of bypassing a possible queued
 // fatal event or turning Pump into an unbounded drain loop.
 constexpr int kMaxSinkEventsPerPump = 8;
+// Frames of lead time added to the query clock before choosing the next display
+// tick. The packer benchmark puts submit->ready p95 at <= 3.7 ms (UHD) and the sink
+// copy is a few ms, both well inside one 20 ms frame at 50 fps, so one frame of lead
+// is enough to land the reference frame on time; anything later is dropped by the
+// sink (DisplayedLate/Dropped) rather than slowing the monitor down.
+constexpr int kSubmitLeadFrames = 1;
 
 using Clock = std::chrono::steady_clock;
 
@@ -251,6 +257,52 @@ void MonitorOutput::RecordTerminalEvent(const OutputEvent &event) {
   }
 }
 
+void MonitorOutput::RecordCompletion(const OutputEvent &event) {
+  if (event.kind != OutputEvent::Kind::FrameCompleted) {
+    return;
+  }
+  switch (event.result) {
+  case CompletionResult::Completed:
+    ++diagnostics_.paced_completed;
+    break;
+  case CompletionResult::DisplayedLate:
+    ++diagnostics_.paced_late;
+    SPDLOG_LOGGER_TRACE(Logger, "Monitor output frame {} was displayed late (dropped-frame semantics)",
+                        event.submit_id);
+    break;
+  case CompletionResult::Dropped:
+    ++diagnostics_.paced_sink_dropped;
+    SPDLOG_LOGGER_TRACE(Logger, "Monitor output frame {} was dropped by the sink (dropped-frame semantics)",
+                        event.submit_id);
+    break;
+  case CompletionResult::Flushed:
+    ++diagnostics_.paced_flushed;
+    SPDLOG_LOGGER_TRACE(Logger, "Monitor output frame {} was flushed by the sink", event.submit_id);
+    break;
+  }
+}
+
+int MonitorOutput::DrainSinkEvents() {
+  int events_drained = 0;
+  OutputEvent event{};
+  while (events_drained < kMaxSinkEventsPerPump) {
+    if (!sink_->PollEvent(&event)) {
+      break;
+    }
+    ++events_drained;
+    if (event.kind == OutputEvent::Kind::Error || event.kind == OutputEvent::Kind::DeviceLost) {
+      RecordTerminalEvent(event);
+      break;
+    }
+    if (event.kind == OutputEvent::Kind::PlaybackStopped) {
+      stop_pending_ = false;
+      continue;
+    }
+    RecordCompletion(event);
+  }
+  return events_drained;
+}
+
 MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
   if (closed_) {
     SetResult(Outcome::Failed, "submit", "monitor output is closed");
@@ -278,47 +330,72 @@ MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
   }
 
   // GPU-side NaN/Inf gate: no full-frame host readback. A non-finite common result
-  // is a hard error, never encoded and never silently clamped.
-  try {
-    finite_gate_->Validate(request.frame.texture);
-    ++diagnostics_.finite_checks;
-  } catch (const std::exception &e) {
-    ++diagnostics_.finite_failures;
-    SetResult(Outcome::Failed, "finite", e.what());
+  // is a hard error, never encoded and never silently clamped. EncodeAndPack runs it
+  // so both the still and the paced path are covered.
+  std::string stage;
+  std::string reason;
+  StagingSlot *packed_slot = nullptr;
+  if (!EncodeAndPack(request.frame, in_flight_info_, &packed_slot, &stage, &reason)) {
+    SetResult(Outcome::Failed, stage.c_str(), std::move(reason));
     return SubmitOutcome::Failed;
   }
-
-  try {
-    // Encode the common display-linear result into the wire transfer. Transfer
-    // only: the primaries already match (validated above), no tone/gamut mapping
-    // runs here.
-    EncodeParams params;
-    params.transfer =
-        output_.color.encoding.transfer == ColorTransfer::PQ ? OutputTransfer::PQ : OutputTransfer::SDR_BT1886;
-    params.sdr_white_nits = request.frame.sdr_white_nits;
-    params.black_nits = request.frame.black_nits;
-    encoder_->Encode(target_.tex, request.frame.texture, params);
-  } catch (const std::exception &e) {
-    SetResult(Outcome::Failed, "render", e.what());
-    return SubmitOutcome::Failed;
-  } catch (...) {
-    SetResult(Outcome::Failed, "render", "unknown encode failure");
-    return SubmitOutcome::Failed;
-  }
-  ++diagnostics_.render_count;
-
-  slot_ = packer_->Submit(target_.tex, in_flight_info_.submit_id);
-  ++diagnostics_.pack_submit_count;
-  if (slot_ == nullptr) {
-    SetResult(Outcome::Failed, "pack", "FramePacker::Submit returned nullptr (ring full or shutting down)");
-    return SubmitOutcome::Failed;
-  }
+  slot_ = packed_slot;
 
   request_in_flight_ = true;
   drain_pending_ = false;
   cancel_requested_ = false;
   SetResult(Outcome::None, "", "");
   return SubmitOutcome::Accepted;
+}
+
+bool MonitorOutput::EncodeAndPack(const RenderedFrame &frame, const SubmissionInfo &info, StagingSlot **slot,
+                                  std::string *stage, std::string *reason) {
+  *slot = nullptr;
+
+  // GPU-side NaN/Inf gate: the only readback is a single flag word, so continuous
+  // playback never downloads a full frame. A non-finite result is a hard error.
+  try {
+    finite_gate_->Validate(frame.texture);
+    ++diagnostics_.finite_checks;
+  } catch (const std::exception &e) {
+    ++diagnostics_.finite_failures;
+    *stage = "finite";
+    *reason = e.what();
+    return false;
+  }
+
+  try {
+    // Encode the common display-linear result into the wire transfer. Transfer
+    // only: the primaries already match (validated by the caller), no tone/gamut
+    // mapping runs here.
+    EncodeParams params;
+    params.transfer =
+        output_.color.encoding.transfer == ColorTransfer::PQ ? OutputTransfer::PQ : OutputTransfer::SDR_BT1886;
+    params.sdr_white_nits = frame.sdr_white_nits;
+    params.black_nits = frame.black_nits;
+    encoder_->Encode(target_.tex, frame.texture, params);
+  } catch (const std::exception &e) {
+    *stage = "render";
+    *reason = e.what();
+    return false;
+  } catch (...) {
+    *stage = "render";
+    *reason = "unknown encode failure";
+    return false;
+  }
+  ++diagnostics_.render_count;
+
+  StagingSlot *packed = packer_->Submit(target_.tex, info.submit_id);
+  ++diagnostics_.pack_submit_count;
+  if (packed == nullptr) {
+    // Ring full or shutting down. The paced caller treats this as transient and
+    // drops the oldest unscheduled frame; the still caller reports it as a failure.
+    *stage = "pack";
+    *reason = "FramePacker::Submit returned nullptr (ring full or shutting down)";
+    return false;
+  }
+  *slot = packed;
+  return true;
 }
 
 void MonitorOutput::Cancel() {
@@ -338,18 +415,7 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
 
   // Handle a bounded number of non-blocking sink events BEFORE any DisplayStill, so
   // an already-queued Error/DeviceLost can never be hidden by a display.
-  int events_drained = 0;
-  OutputEvent event{};
-  while (events_drained < kMaxSinkEventsPerPump) {
-    if (!sink_->PollEvent(&event)) {
-      break;
-    }
-    ++events_drained;
-    if (event.kind == OutputEvent::Kind::Error || event.kind == OutputEvent::Kind::DeviceLost) {
-      RecordTerminalEvent(event);
-      break;
-    }
-  }
+  const int events_drained = DrainSinkEvents();
   const bool event_cap_reached = events_drained == kMaxSinkEventsPerPump;
 
   if (!request_in_flight_) {
@@ -439,8 +505,29 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
 }
 
 void MonitorOutput::Tick() {
-  if (closed_ || closing_) {
+  if (closed_ || closing_ || terminal_failed_ || failed_) {
     return;
+  }
+  if (playback_started_ || playback_requested_) {
+    TickPaced();
+    return;
+  }
+  TickStill();
+}
+
+void MonitorOutput::TickStill() {
+  // DisplayStill is only legal once scheduled playback is confirmed idle (the SDK
+  // forbids the two from coexisting). Wait for the PlaybackStopped event; the gap is
+  // not a failure.
+  if (stop_pending_) {
+    DrainSinkEvents();
+    if (stop_pending_ || terminal_failed_) {
+      return;
+    }
+    // The session is idle now. Force exactly one still display of the current frame
+    // so the monitor freezes on the last composed result instead of depending on the
+    // unverified run-empty hold behavior.
+    last_submitted_render_id_ = 0;
   }
 
   if (request_in_flight_) {
@@ -502,6 +589,206 @@ void MonitorOutput::SubmitLatest(const RenderedFrame &frame) {
   failed_ = true;
 }
 
+// ---------------------------------------------------------------------------
+// Playback (paced) path
+// ---------------------------------------------------------------------------
+
+void MonitorOutput::SetPlayback(bool enabled) {
+  if (playback_requested_ == enabled) {
+    return;
+  }
+  playback_requested_ = enabled;
+  if (enabled) {
+    Logger->info("Monitor output playback enabled (paced to the output mode clock)");
+  } else {
+    // Stop enqueuing new frames. The already-queued ones drain in TickPaced; the
+    // session is stopped and the still path takes over once the queue is empty, so
+    // pause freezes the last frame and a subsequent seek can still be displayed.
+    Logger->info("Monitor output playback paused; draining the queued frames");
+  }
+}
+
+bool MonitorOutput::EnsurePlaybackStarted(std::string *error) {
+  if (playback_started_) {
+    return true;
+  }
+  if (!sink_->StartScheduled(0, error)) {
+    return false;
+  }
+  playback_started_ = true;
+  stop_pending_ = false;
+  last_scheduled_display_time_ = -1;
+  Logger->debug("Monitor output scheduled playback started");
+  return true;
+}
+
+int64_t MonitorOutput::NextDisplayTick(int64_t clock) const {
+  const int64_t frame_duration = output_.mode.frame_duration;
+  // A valid mode always has a positive frame duration (validated at construction).
+  const int64_t base = clock + static_cast<int64_t>(kSubmitLeadFrames) * frame_duration;
+  int64_t tick = (base / frame_duration) * frame_duration;
+  if (tick < base) {
+    tick += frame_duration;
+  }
+  // Never reuse or go back: display times must be strictly increasing per session.
+  if (tick <= last_scheduled_display_time_) {
+    tick = last_scheduled_display_time_ + frame_duration;
+  }
+  return tick;
+}
+
+void MonitorOutput::DropPacedFront() {
+  if (paced_.empty()) {
+    return;
+  }
+  StagingSlot *slot = paced_.front().slot;
+  paced_.pop_front();
+  if (slot != nullptr) {
+    packer_->Abort(slot);
+  }
+}
+
+void MonitorOutput::SubmitPacedLatest() {
+  const RenderedFrame &frame = coordinator_->result();
+  if (!frame.IsValid()) {
+    return;
+  }
+  if (frame.identity.render_id == last_paced_render_id_) {
+    return;
+  }
+
+  // The paced queue is bounded by the packer ring. On overflow the oldest
+  // unscheduled frame is dropped so the newest one wins (desktop mailbox semantics).
+  while (paced_.size() >= static_cast<std::size_t>(FramePacker::kRingCapacity)) {
+    ++diagnostics_.paced_dropped;
+    DropPacedFront();
+  }
+
+  const uint64_t render_id = frame.identity.render_id;
+  SubmissionInfo info;
+  // Share submit_id_ with the still path so SubmissionInfo identities stay unique
+  // across a session that mixes still and paced frames.
+  info.submit_id = ++submit_id_;
+  info.source_frame_serial = frame.identity.source_serials;
+
+  std::string stage;
+  std::string reason;
+  StagingSlot *slot = nullptr;
+  if (!EncodeAndPack(frame, info, &slot, &stage, &reason)) {
+    if (stage == "pack") {
+      // Ring still full after dropping the oldest frame (its GPU work has not been
+      // reclaimed yet). Drop this composition too and retry with the next one.
+      ++diagnostics_.paced_dropped;
+      return;
+    }
+    // Encode failure is a per-frame hard failure, like the still path.
+    SetResult(Outcome::Failed, stage.c_str(), std::move(reason));
+    failed_ = true;
+    return;
+  }
+
+  paced_.push_back(PacedFrame{slot, info});
+  last_paced_render_id_ = render_id;
+  ++diagnostics_.paced_submits;
+}
+
+void MonitorOutput::StopPlaybackSession() {
+  if (!playback_started_) {
+    return;
+  }
+  std::string error;
+  int64_t actual_stop = 0;
+  if (!sink_->StopScheduled(0, &actual_stop, &error)) {
+    terminal_failed_ = true;
+    terminal_reason_ = "StopScheduledPlayback failed: " + error;
+    SetResult(Outcome::Failed, "stop", terminal_reason_);
+    playback_started_ = false;
+    return;
+  }
+  playback_started_ = false;
+  stop_pending_ = true;
+  Logger->debug("Monitor output scheduled playback stopped");
+}
+
+void MonitorOutput::TickPaced() {
+  const int drained = DrainSinkEvents();
+  if (terminal_failed_) {
+    // The paced frames cannot succeed. Publish the terminal failure; the slots stay
+    // alive until Close() reclaims them.
+    SetResult(Outcome::Failed, "event", terminal_reason_);
+    return;
+  }
+  if (drained == kMaxSinkEventsPerPump) {
+    // A fatal event may still be queued; do not schedule more work this turn.
+    return;
+  }
+
+  // Paused: once every already-queued frame has been scheduled, stop the session so
+  // the still path can take over (pause freezes the last frame).
+  if (!playback_requested_ && paced_.empty()) {
+    StopPlaybackSession();
+    return;
+  }
+
+  if (!playback_started_) {
+    std::string error;
+    if (!EnsurePlaybackStarted(&error)) {
+      terminal_failed_ = true;
+      terminal_reason_ = "StartScheduledPlayback failed: " + error;
+      SetResult(Outcome::Failed, "start", terminal_reason_);
+      return;
+    }
+  }
+
+  if (!paced_.empty()) {
+    PacedFrame &head = paced_.front();
+    const PackPoll poll = packer_->Poll(head.slot);
+    if (poll == PackPoll::Failed) {
+      // A pack readback failure drops this frame; it does not poison the session.
+      ++diagnostics_.pack_failed;
+      ++diagnostics_.paced_dropped;
+      SPDLOG_LOGGER_TRACE(Logger, "Monitor output paced frame {} failed to pack; dropped", head.info.submit_id);
+      DropPacedFront();
+      return;
+    }
+    if (poll == PackPoll::Ready) {
+      int64_t clock = 0;
+      std::string error;
+      if (!sink_->QueryClock(output_.mode.time_scale, &clock, nullptr, &error)) {
+        terminal_failed_ = true;
+        terminal_reason_ = "QueryClock failed: " + error;
+        SetResult(Outcome::Failed, "clock", terminal_reason_);
+        return;
+      }
+      const int64_t display_time = NextDisplayTick(clock);
+      PackedFrameView view{packer_->Bytes(head.slot), packer_->Size(head.slot)};
+      const ScheduleOutcome outcome = sink_->TrySchedule(view, head.info, display_time, output_.mode.frame_duration);
+      if (outcome == ScheduleOutcome::Accepted) {
+        ++diagnostics_.paced_scheduled;
+        last_scheduled_display_time_ = display_time;
+        Logger->debug("Monitor output scheduled paced frame {} at {}, serial {}", head.info.submit_id, display_time,
+                      head.info.source_frame_serial);
+        packer_->Reap(head.slot);
+        paced_.pop_front();
+      } else if (outcome == ScheduleOutcome::Busy) {
+        // Device frame pool full: NOTHING was consumed. Keep this frame at the head
+        // and still consider newer compositions, so overflow drops the oldest
+        // unscheduled frame instead of stalling the newest one (newest wins).
+      } else {
+        terminal_failed_ = true;
+        terminal_reason_ =
+            outcome == ScheduleOutcome::Closed ? "sink closed while scheduling" : "sink rejected a scheduled frame";
+        SetResult(Outcome::Failed, "schedule", terminal_reason_);
+        return;
+      }
+    }
+  }
+
+  if (playback_requested_) {
+    SubmitPacedLatest();
+  }
+}
+
 CloseStatus MonitorOutput::Close(int drain_timeout_ms) {
   if (closed_) {
     return CloseStatus::Closed;
@@ -518,6 +805,37 @@ CloseStatus MonitorOutput::Close(int drain_timeout_ms) {
     }
     return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
   };
+
+  // 0. Stop a live scheduled session first: nothing new may be scheduled after a
+  //    Close started. StopScheduled is idempotent (the backend reports Idle as a
+  //    no-op), so a retried Close is safe.
+  if (playback_started_) {
+    std::string stop_error;
+    int64_t actual_stop = 0;
+    sink_->StopScheduled(0, &actual_stop, &stop_error);
+    playback_started_ = false;
+  }
+  playback_requested_ = false;
+
+  // 0b. Drop every paced frame so the packer can reach Idle. A Ready paced slot is
+  //     owned by us (Abort frees it); a Pending one becomes Aborted and is cancelled
+  //     by Shutdown.
+  while (!paced_.empty()) {
+    StagingSlot *slot = paced_.front().slot;
+    paced_.pop_front();
+    if (slot != nullptr) {
+      packer_->Abort(slot);
+    }
+  }
+
+  // 0c. Drain the queued sink events so completed frames return their device frame
+  //     budget before the sink is asked to Close. The real backend also reconciles
+  //     internally; the scripted/fake sinks need the events consumed.
+  {
+    OutputEvent ignored{};
+    while (sink_->PollEvent(&ignored)) {
+    }
+  }
 
   // 1. Reclaim our own Ready slot (including a slot the sink left Busy) BEFORE
   //    Shutdown; otherwise the packer would keep reporting TimedOut forever. A
