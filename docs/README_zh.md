@@ -381,10 +381,10 @@ renderer 的输出不受另一个影响、且另一个被销毁后仍可继续�
 
 `src/output/monitor_output.hpp` 消费由协调层（`src/display/display_coordinator.*`）产出的
 公共显示线性结果，把它编码为线缆传输函数并写入固定尺寸的离屏 full-range RGB 目标，再用
-`FramePacker` 打包后交给 `FrameSink::DisplayStill`。它不再拥有 `FrameRenderer`。同一时刻只允许
-一个在途请求，由调用方在同一线程用 `Pump()` 推进；main 通过 `src/output/monitor_controller.*`
-驱动它，由后者拥有 sink 与借用配对。在途时新请求返回 Busy，不会被读取或映射。`Close()` 在同一个
-总 deadline 内排空 packer 并关闭借用的 sink。
+`FramePacker` 打包后交给 `FrameSink::DisplayStill`。它不再拥有 `FrameRenderer`。它自己拥有
+`FrameSink` 与借用配对；同一时刻只允许一个在途请求，main 在同一线程用 `Tick()`（或底层的
+`Submit()`/`Pump()`）推进。在途时新请求返回 Busy，不会被读取或映射。`Close()` 在同一个
+总 deadline 内排空 packer 并关闭自己拥有的 sink。
 
 配合 `EYEQ_ENABLE_DECKLINK=ON`，`eyeq` 播放器已为静帧外监接入该层（见“监看输出（DeckLink）”）；
 硬件时钟连续播放、音频与原生 HDR 直通仍未实现。

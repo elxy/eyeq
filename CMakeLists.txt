@@ -208,7 +208,6 @@ endif()
 # user passes --monitor-device. With EYEQ_ENABLE_DECKLINK=OFF none of these sources
 # or symbols are compiled or linked into the default player.
 if(EYEQ_ENABLE_DECKLINK)
-  target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/src/output/monitor_controller.cpp)
   target_compile_definitions(${PROJECT_NAME} PRIVATE EYEQ_ENABLE_DECKLINK=1)
   target_link_libraries(${PROJECT_NAME} PRIVATE
     eyeq_monitor_output

@@ -39,7 +39,7 @@ extern "C" {
 #include "output/decklink/monitor_mode.hpp"
 #include "output/decklink_backend.hpp"
 #include "output/monitor_cli.hpp"
-#include "output/monitor_controller.hpp"
+#include "output/monitor_output.hpp"
 #endif
 
 #include <libplacebo/colorspace.h>
@@ -452,8 +452,8 @@ static void save_snapshot_frames(const EyeQArgs &args, const FrameSnapshot &snap
 // Every parse/validation/catalog/open failure throws with a message: an
 // unsupported request is rejected, never silently downgraded to SDR, and no
 // device configuration is written (the catalog query and Open only read).
-static std::unique_ptr<MonitorController> SetupMonitor(RenderContext &context, DisplayCoordinator &coordinator,
-                                                       const EyeQArgs &args) {
+static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, DisplayCoordinator &coordinator,
+                                                   const EyeQArgs &args) {
   std::string error;
   DeviceId selector;
   if (!ParseDeviceSelector(*args.monitor_device, &selector, &error)) {
@@ -502,7 +502,7 @@ static std::unique_ptr<MonitorController> SetupMonitor(RenderContext &context, D
                "SDR white {:.1f} nits (still-only)",
                FormatMonitorMode(resolved.mode), args.monitor_connection, args.monitor_pixel_format,
                MonitorColorTargetLabel(color_target), args.monitor_target_nits, args.monitor_sdr_white);
-  return std::make_unique<MonitorController>(context, coordinator, std::move(backend), resolved);
+  return std::make_unique<MonitorOutput>(context, coordinator, std::move(backend), resolved);
 }
 #endif
 
@@ -752,7 +752,7 @@ int main(int argc, char **argv) {
   coordinator->SetMainSource(args.main_id);
 
 #ifdef EYEQ_ENABLE_DECKLINK
-  std::unique_ptr<MonitorController> monitor;
+  std::unique_ptr<MonitorOutput> monitor;
   if (monitoring) {
     // The external monitor target is the comparison baseline (V2.1 section 8.2).
     // --target-display-nits keeps its historical source max_luma override meaning
@@ -998,7 +998,7 @@ int main(int argc, char **argv) {
         // change (resize/OSD) does not change the scene key and still presents.
         bool monitor_blocks = false;
 #ifdef EYEQ_ENABLE_DECKLINK
-        monitor_blocks = monitor && !monitor->accepts_requests() && coordinator->WouldRecompose(state);
+        monitor_blocks = monitor && !monitor->AcceptsRequests() && coordinator->WouldRecompose(state);
 #endif
         if (!monitor_blocks) {
           // Update time corresponding to mouse position (for OSD bottom-right display)

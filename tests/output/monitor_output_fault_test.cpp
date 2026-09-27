@@ -151,7 +151,7 @@ EYEQ::MonitorOutput::Request MakeRequest(EYEQ::DisplayCoordinator &coordinator,
 MonitorOutput::StepResult Drive(MonitorOutput &monitor, int max_pumps = 50000) {
   for (int i = 0; i < max_pumps; ++i) {
     const MonitorOutput::StepResult step = monitor.Pump();
-    if (step.status != MonitorOutput::Status::Pending) {
+    if (step.outcome != MonitorOutput::Outcome::None) {
       return step;
     }
   }
@@ -178,14 +178,14 @@ int main() {
 
     const EYEQ::ResolvedOutput resolved = BuildResolved(64, 54);
     EYEQ::test::FakeFrameSink fake(1);
-    eyeq_test::ScriptedFrameSink scripted(fake);
+    auto scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(fake);
 
     // Fail exactly the first readback, then forward to the real implementation.
     g_remaining_download_failures = 1;
     EYEQ::frame_packer_test::MutableHooks().tex_download = &HookDownload;
 
     auto coordinator = MakeCoordinator(context, resolved);
-    MonitorOutput monitor(context, resolved, scripted);
+    MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
 
     auto frame = MakeSolidFrame(stream, 64, 54, 0.3f);
     EYEQ::DisplayState request_state = EYEQ::DisplayState{};
@@ -196,7 +196,7 @@ int main() {
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "fault request accepted");
 
     const auto failed = Drive(monitor);
-    Check(failed.status == MonitorOutput::Status::Failed, "injected readback failure reports Failed");
+    Check(failed.outcome == MonitorOutput::Outcome::Failed, "injected readback failure reports Failed");
     Check(failed.stage == "pack" && !failed.reason.empty(), "failure reports stage pack and a reason");
     Check(fake.still_display_count() == 0, "a failed pack is never displayed");
     Check(monitor.diagnostics().pack_failed >= 1,
@@ -209,7 +209,7 @@ int main() {
     int drain_guard = 0;
     while (!monitor.AcceptsRequests() && drain_guard < 50000) {
       const auto step = monitor.Pump();
-      if (step.status != MonitorOutput::Status::Failed) {
+      if (step.outcome != MonitorOutput::Outcome::Failed) {
         regressed = true;
         break;
       }
@@ -217,7 +217,8 @@ int main() {
     }
     Check(!regressed, "the failed request never regresses to Pending while draining");
     Check(monitor.AcceptsRequests(), "the failed request's resources are reclaimed before the next submit");
-    Check(monitor.status() == MonitorOutput::Status::Failed, "status still reports the failure after draining");
+    Check(monitor.last_result().outcome == MonitorOutput::Outcome::Failed,
+          "last_result still reports the failure after draining");
 
     // A new explicit request (not an automatic restart) succeeds once the injection
     // is exhausted, proving the failure did not silently poison the module.
@@ -229,7 +230,7 @@ int main() {
     auto next = MakeRequest(*coordinator, {{5, second}}, next_state, 5, 2002);
     Check(monitor.Submit(next) == MonitorOutput::SubmitOutcome::Accepted, "request after failure accepted");
     const auto displayed = Drive(monitor);
-    Check(displayed.status == MonitorOutput::Status::Displayed, "request after failure displays");
+    Check(displayed.outcome == MonitorOutput::Outcome::Displayed, "request after failure displays");
     Check(fake.still_display_count() == 1, "the successful request displays exactly once");
 
     Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "fault monitor closed");
@@ -241,13 +242,13 @@ int main() {
     // overwrite them, instead of reporting Pending forever.
     {
       EYEQ::test::FakeFrameSink gpu_fake(1);
-      eyeq_test::ScriptedFrameSink gpu_scripted(gpu_fake);
+      auto gpu_scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(gpu_fake);
       g_remaining_download_failures = 0;
       g_gpu_lost = true;
       EYEQ::frame_packer_test::MutableHooks().gpu_is_failed = &HookGpuIsFailed;
 
       auto coordinator = MakeCoordinator(context, resolved);
-      MonitorOutput gpu_monitor(context, resolved, gpu_scripted);
+      MonitorOutput gpu_monitor(context, *coordinator, std::move(gpu_scripted), resolved);
       auto gpu_frame = MakeSolidFrame(stream, 64, 54, 0.3f);
       EYEQ::DisplayState gpu_request_state = EYEQ::DisplayState{};
       gpu_request_state.ids = {5};
@@ -257,9 +258,10 @@ int main() {
       Check(gpu_monitor.Submit(gpu_request) == MonitorOutput::SubmitOutcome::Accepted, "gpu-lost request accepted");
 
       const auto first = gpu_monitor.Pump();
-      Check(first.status == MonitorOutput::Status::Failed, "gpu-lost failure is reported immediately as Failed");
+      Check(first.outcome == MonitorOutput::Outcome::Failed, "gpu-lost failure is reported immediately as Failed");
       Check(first.stage == "pack" && !first.reason.empty(), "gpu-lost failure carries stage and reason");
-      Check(gpu_monitor.status() == MonitorOutput::Status::Failed, "status is Failed, not Pending");
+      Check(gpu_monitor.last_result().outcome == MonitorOutput::Outcome::Failed,
+            "the failure is published, not left pending");
       Check(!gpu_monitor.AcceptsRequests(), "gpu-lost module refuses new requests while resources are retained");
       Check(gpu_monitor.diagnostics().pack_failed >= 1, "the failure reached the real hooked packer");
 
@@ -268,7 +270,7 @@ int main() {
       bool stayed_failed = true;
       for (int i = 0; i < 5; ++i) {
         const auto step = gpu_monitor.Pump();
-        if (step.status != MonitorOutput::Status::Failed || step.stage != "pack" || step.reason.empty()) {
+        if (step.outcome != MonitorOutput::Outcome::Failed || step.stage != "pack" || step.reason.empty()) {
           stayed_failed = false;
         }
       }
@@ -288,11 +290,11 @@ int main() {
       // Recover the (test-only) device signal so the retained slot can drain.
       g_gpu_lost = false;
       const auto drained = Drive(gpu_monitor);
-      Check(drained.status == MonitorOutput::Status::Failed, "the drained failure still reports Failed");
+      Check(drained.outcome == MonitorOutput::Outcome::Failed, "the drained failure still reports Failed");
       Check(gpu_monitor.AcceptsRequests(), "module accepts requests after the resources are reclaimed");
       Check(gpu_monitor.Submit(gpu_second) == MonitorOutput::SubmitOutcome::Accepted,
             "an explicit request after the drain is accepted");
-      Check(Drive(gpu_monitor).status == MonitorOutput::Status::Displayed,
+      Check(Drive(gpu_monitor).outcome == MonitorOutput::Outcome::Displayed,
             "the explicit request after the drain displays");
       Check(gpu_fake.still_display_count() == 1, "the recovered request displayed exactly once");
       Check(gpu_monitor.Close(2000) == EYEQ::CloseStatus::Closed, "gpu-lost monitor closed");
@@ -305,20 +307,21 @@ int main() {
     // leaving status()/last_result() on Idle with an empty stage.
     {
       EYEQ::test::FakeFrameSink event_fake(1);
-      eyeq_test::ScriptedFrameSink event_scripted(event_fake);
+      auto event_scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(event_fake);
       EYEQ::OutputEvent device_lost{};
       device_lost.kind = EYEQ::OutputEvent::Kind::DeviceLost;
       std::snprintf(device_lost.message, sizeof(device_lost.message), "%s", "scripted device lost");
-      event_scripted.ScriptEvent(device_lost);
+      event_scripted->ScriptEvent(device_lost);
 
       auto coordinator = MakeCoordinator(context, resolved);
-      MonitorOutput event_monitor(context, resolved, event_scripted);
+      MonitorOutput event_monitor(context, *coordinator, std::move(event_scripted), resolved);
       const auto step = event_monitor.Pump();
-      Check(step.status == MonitorOutput::Status::Failed && step.stage == "event",
+      Check(step.outcome == MonitorOutput::Outcome::Failed && step.stage == "event",
             "idle DeviceLost event publishes Failed at stage event");
       Check(!step.reason.empty(), "idle DeviceLost failure carries a reason");
-      Check(event_monitor.status() == MonitorOutput::Status::Failed, "status reflects the idle device event");
-      Check(event_monitor.last_result().status == MonitorOutput::Status::Failed &&
+      Check(event_monitor.last_result().outcome == MonitorOutput::Outcome::Failed,
+            "last_result reflects the idle device event");
+      Check(event_monitor.last_result().outcome == MonitorOutput::Outcome::Failed &&
                 event_monitor.last_result().stage == "event",
             "last_result is updated for an idle device event");
       Check(!event_monitor.AcceptsRequests(), "an idle terminal event stops accepting requests");
@@ -339,9 +342,10 @@ int main() {
     // previous Displayed result instead of leaving it in place.
     {
       EYEQ::test::FakeFrameSink post_fake(1);
-      eyeq_test::ScriptedFrameSink post_scripted(post_fake);
+      auto post_scripted_holder = std::make_unique<eyeq_test::ScriptedFrameSink>(post_fake);
+      eyeq_test::ScriptedFrameSink *post_scripted = post_scripted_holder.get();
       auto coordinator = MakeCoordinator(context, resolved);
-      MonitorOutput post_monitor(context, resolved, post_scripted);
+      MonitorOutput post_monitor(context, *coordinator, std::move(post_scripted_holder), resolved);
       auto post_frame = MakeSolidFrame(stream, 64, 54, 0.5f);
       EYEQ::DisplayState post_request_state = EYEQ::DisplayState{};
       post_request_state.ids = {5};
@@ -350,20 +354,21 @@ int main() {
       auto post_request = MakeRequest(*coordinator, {{5, post_frame}}, post_request_state, 5, 3201);
       Check(post_monitor.Submit(post_request) == MonitorOutput::SubmitOutcome::Accepted,
             "post-completion request accepted");
-      Check(Drive(post_monitor).status == MonitorOutput::Status::Displayed, "post-completion request displayed");
-      Check(post_monitor.last_result().status == MonitorOutput::Status::Displayed,
+      Check(Drive(post_monitor).outcome == MonitorOutput::Outcome::Displayed, "post-completion request displayed");
+      Check(post_monitor.last_result().outcome == MonitorOutput::Outcome::Displayed,
             "post-completion result starts as Displayed");
 
       EYEQ::OutputEvent post_lost{};
       post_lost.kind = EYEQ::OutputEvent::Kind::DeviceLost;
       std::snprintf(post_lost.message, sizeof(post_lost.message), "%s", "scripted post-completion device lost");
-      post_scripted.ScriptEvent(post_lost);
+      post_scripted->ScriptEvent(post_lost);
 
       const auto step = post_monitor.Pump();
-      Check(step.status == MonitorOutput::Status::Failed && step.stage == "event",
+      Check(step.outcome == MonitorOutput::Outcome::Failed && step.stage == "event",
             "post-completion DeviceLost publishes Failed at stage event");
-      Check(post_monitor.status() == MonitorOutput::Status::Failed, "post-completion event updates status");
-      Check(post_monitor.last_result().status == MonitorOutput::Status::Failed &&
+      Check(post_monitor.last_result().outcome == MonitorOutput::Outcome::Failed,
+            "post-completion event updates last_result");
+      Check(post_monitor.last_result().outcome == MonitorOutput::Outcome::Failed &&
                 post_monitor.last_result().stage == "event",
             "post-completion event overwrites the previous Displayed last_result");
       Check(!post_monitor.AcceptsRequests(), "post-completion terminal event stops accepting requests");

@@ -24,8 +24,12 @@ using Clock = std::chrono::steady_clock;
 
 } // namespace
 
-MonitorOutput::MonitorOutput(RenderContext &context, const ResolvedOutput &output, FrameSink &sink)
-    : context_(&context), sink_(&sink), output_(output) {
+MonitorOutput::MonitorOutput(RenderContext &context, DisplayCoordinator &coordinator, std::unique_ptr<FrameSink> sink,
+                             const ResolvedOutput &output)
+    : context_(&context), coordinator_(&coordinator), sink_(std::move(sink)), output_(output) {
+  if (sink_ == nullptr) {
+    throw std::invalid_argument("MonitorOutput requires a FrameSink");
+  }
   if (!context.HasDevice()) {
     throw std::invalid_argument("MonitorOutput requires a RenderContext with a created device");
   }
@@ -67,7 +71,8 @@ MonitorOutput::MonitorOutput(RenderContext &context, const ResolvedOutput &outpu
 
   pl_gpu gpu = context.gpu();
   // Only resources this constructor acquired are cleaned up on failure. The
-  // borrowed context and sink are never closed or destroyed here.
+  // borrowed context/coordinator are never touched; the owned sink is destroyed
+  // by sink_ because construction failed.
   try {
     pl_fmt format = pl_find_named_fmt(gpu, "rgba32f");
     const auto needed =
@@ -152,19 +157,12 @@ MonitorOutput::~MonitorOutput() {
   encoder_.reset();
 }
 
-void MonitorOutput::SetResult(Status status, const char *stage, std::string reason) {
-  status_ = status;
-  last_result_.status = status;
+void MonitorOutput::SetResult(Outcome outcome, const char *stage, std::string reason) {
+  last_result_.outcome = outcome;
   last_result_.submit_id = in_flight_info_.submit_id;
   last_result_.source_frame_serial = in_flight_info_.source_frame_serial;
   last_result_.stage = stage != nullptr ? stage : "";
   last_result_.reason = std::move(reason);
-}
-
-MonitorOutput::StepResult MonitorOutput::MakeResult(Status status) const {
-  StepResult result = last_result_;
-  result.status = status;
-  return result;
 }
 
 bool MonitorOutput::ValidateFrame(const Request &request, std::string *error) const {
@@ -251,15 +249,15 @@ void MonitorOutput::RecordTerminalEvent(const OutputEvent &event) {
 
 MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
   if (closed_) {
-    SetResult(Status::Closed, "submit", "monitor output is closed");
+    SetResult(Outcome::Failed, "submit", "monitor output is closed");
     return SubmitOutcome::Closed;
   }
   if (closing_) {
-    SetResult(Status::Closed, "submit", "monitor output is closing");
+    SetResult(Outcome::Failed, "submit", "monitor output is closing");
     return SubmitOutcome::Closed;
   }
   if (terminal_failed_) {
-    SetResult(Status::Failed, "submit", terminal_reason_);
+    SetResult(Outcome::Failed, "submit", terminal_reason_);
     return SubmitOutcome::Failed;
   }
   if (request_in_flight_) {
@@ -271,7 +269,7 @@ MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
 
   std::string frame_error;
   if (!ValidateFrame(request, &frame_error)) {
-    SetResult(Status::Failed, "config", std::move(frame_error));
+    SetResult(Outcome::Failed, "config", std::move(frame_error));
     return SubmitOutcome::Failed;
   }
 
@@ -286,10 +284,10 @@ MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
     params.black_nits = request.frame.black_nits;
     encoder_->Encode(target_.tex, request.frame.texture, params);
   } catch (const std::exception &e) {
-    SetResult(Status::Failed, "render", e.what());
+    SetResult(Outcome::Failed, "render", e.what());
     return SubmitOutcome::Failed;
   } catch (...) {
-    SetResult(Status::Failed, "render", "unknown encode failure");
+    SetResult(Outcome::Failed, "render", "unknown encode failure");
     return SubmitOutcome::Failed;
   }
   ++diagnostics_.render_count;
@@ -297,14 +295,14 @@ MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
   slot_ = packer_->Submit(target_.tex, in_flight_info_.submit_id);
   ++diagnostics_.pack_submit_count;
   if (slot_ == nullptr) {
-    SetResult(Status::Failed, "pack", "FramePacker::Submit returned nullptr (ring full or shutting down)");
+    SetResult(Outcome::Failed, "pack", "FramePacker::Submit returned nullptr (ring full or shutting down)");
     return SubmitOutcome::Failed;
   }
 
   request_in_flight_ = true;
   drain_pending_ = false;
   cancel_requested_ = false;
-  SetResult(Status::Pending, "", "");
+  SetResult(Outcome::None, "", "");
   return SubmitOutcome::Accepted;
 }
 
@@ -316,11 +314,11 @@ void MonitorOutput::Cancel() {
 
 MonitorOutput::StepResult MonitorOutput::Pump() {
   if (closed_) {
-    return MakeResult(Status::Closed);
+    return last_result_;
   }
   if (closing_) {
     // Close() owns the packer/sink from here; do not poll handles it may recycle.
-    return MakeResult(Status::Pending);
+    return last_result_;
   }
 
   // Handle a bounded number of non-blocking sink events BEFORE any DisplayStill, so
@@ -342,17 +340,16 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
   if (!request_in_flight_) {
     if (terminal_failed_) {
       // Publish the terminal reason even when there was no request in flight, so
-      // status()/last_result() never keep reporting the previous Idle/success.
-      SetResult(Status::Failed, "event", terminal_reason_);
-      return last_result_;
+      // last_result() never keeps reporting the previous success.
+      SetResult(Outcome::Failed, "event", terminal_reason_);
     }
-    return MakeResult(Status::Idle);
+    return last_result_;
   }
 
   if (terminal_failed_) {
     // The in-flight request cannot succeed. Publish the failure now and keep
     // draining its slot; the resources stay alive until the packer allows the reclaim.
-    SetResult(Status::Failed, "event", terminal_reason_);
+    SetResult(Outcome::Failed, "event", terminal_reason_);
     const bool drained = AdvanceAndReapSlot();
     request_in_flight_ = !drained;
     drain_pending_ = !drained;
@@ -361,7 +358,7 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
 
   if (drain_pending_) {
     // The failure was already published; only finish reclaiming the resources.
-    // Never fall back to Pending/Busy while a failed request still owns GPU work.
+    // Never fall back to a pending result while a failed request still owns GPU work.
     const bool drained = AdvanceAndReapSlot();
     request_in_flight_ = !drained;
     drain_pending_ = !drained;
@@ -370,7 +367,7 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
 
   if (event_cap_reached) {
     // The queue may still hold a fatal event; defer the display to the next Pump.
-    return MakeResult(Status::Pending);
+    return last_result_;
   }
 
   const PackPoll poll = packer_->Poll(slot_);
@@ -378,14 +375,14 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
     ++diagnostics_.pack_failed;
     // Publish the failure immediately even if the slot cannot be reclaimed yet:
     // "Failed" means the request failed, not that its resources are free.
-    SetResult(Status::Failed, "pack", "packer slot reported a failure");
+    SetResult(Outcome::Failed, "pack", "packer slot reported a failure");
     const bool drained = ReapSlotIfPossible();
     request_in_flight_ = !drained;
     drain_pending_ = !drained;
     return last_result_;
   }
   if (poll == PackPoll::NotReady) {
-    return MakeResult(Status::Pending);
+    return last_result_;
   }
 
   // The packed bytes are Ready.
@@ -394,7 +391,7 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
     ReapSlotIfPossible();
     request_in_flight_ = false;
     drain_pending_ = false;
-    SetResult(Status::Cancelled, "cancel", "request cancelled before display");
+    SetResult(Outcome::Cancelled, "cancel", "request cancelled before display");
     return last_result_;
   }
 
@@ -404,14 +401,14 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
   if (outcome == StillOutcome::Busy) {
     ++diagnostics_.still_busy;
     // Keep the SAME ready slot, bytes and SubmissionInfo; retry on the next Pump.
-    return MakeResult(Status::Pending);
+    return last_result_;
   }
   if (outcome == StillOutcome::Displayed) {
     ++diagnostics_.displayed;
     ReapSlotIfPossible();
     request_in_flight_ = false;
     drain_pending_ = false;
-    SetResult(Status::Displayed, "still", "");
+    SetResult(Outcome::Displayed, "still", "");
     return last_result_;
   }
 
@@ -419,11 +416,100 @@ MonitorOutput::StepResult MonitorOutput::Pump() {
   // the failure and never retry the sink as Busy.
   terminal_failed_ = true;
   terminal_reason_ = outcome == StillOutcome::Closed ? "sink is closed" : "sink reported a device error";
-  SetResult(Status::Failed, "still", terminal_reason_);
+  SetResult(Outcome::Failed, "still", terminal_reason_);
   const bool drained = ReapSlotIfPossible();
   request_in_flight_ = !drained;
   drain_pending_ = !drained;
   return last_result_;
+}
+
+void MonitorOutput::Tick() {
+  if (closed_ || closing_) {
+    return;
+  }
+
+  if (request_in_flight_) {
+    const StepResult step = Pump();
+    if (request_in_flight_) {
+      // Still draining; the borrow must stay until the packer reclaims the slot.
+      return;
+    }
+    ReleaseBorrow();
+    switch (step.outcome) {
+    case Outcome::Displayed:
+      Logger->debug("Monitor output displayed request {} (serial {})", step.submit_id, step.source_frame_serial);
+      break;
+    case Outcome::Cancelled:
+      Logger->info("Monitor output cancelled request {}", step.submit_id);
+      break;
+    case Outcome::Failed:
+      failed_ = true;
+      Logger->error("Monitor output request {} failed at stage '{}': {}", step.submit_id, step.stage, step.reason);
+      break;
+    case Outcome::None:
+      break;
+    }
+    return;
+  }
+
+  if (borrowed_) {
+    // Should not happen (the borrow is released with the terminating request), but
+    // never leave the coordinator stuck if it does.
+    ReleaseBorrow();
+  }
+  if (failed_ || !AcceptsRequests()) {
+    return;
+  }
+
+  const RenderedFrame &frame = coordinator_->result();
+  if (!frame.IsValid()) {
+    return;
+  }
+  // resize/OSD do not change render_id, so they never resubmit and never change
+  // the packed bytes; a real scene change composes again and gets a new render_id.
+  if (frame.identity.render_id == last_submitted_render_id_) {
+    return;
+  }
+  SubmitLatest(frame);
+}
+
+void MonitorOutput::SubmitLatest(const RenderedFrame &frame) {
+  AcquireBorrow();
+
+  Request request;
+  request.frame = frame;
+  request.info.submit_id = ++submit_id_;
+  request.info.source_frame_serial = frame.identity.source_serials;
+
+  const SubmitOutcome outcome = Submit(request);
+  if (outcome == SubmitOutcome::Accepted) {
+    last_submitted_render_id_ = frame.identity.render_id;
+    Logger->debug("Monitor output submitted request {} (scene {}, render {}, serial {})", request.info.submit_id,
+                  frame.identity.scene_revision, frame.identity.render_id, frame.identity.source_serials);
+    return;
+  }
+
+  ReleaseBorrow();
+  Logger->error("Monitor output submit rejected (outcome {}): stage '{}': {}", static_cast<int>(outcome),
+                last_result_.stage, last_result_.reason);
+  // Never silently restart a failed output: keep the desktop running and report.
+  failed_ = true;
+}
+
+void MonitorOutput::AcquireBorrow() {
+  if (borrowed_) {
+    return;
+  }
+  coordinator_->AcquireResult();
+  borrowed_ = true;
+}
+
+void MonitorOutput::ReleaseBorrow() {
+  if (!borrowed_) {
+    return;
+  }
+  coordinator_->ReleaseResult();
+  borrowed_ = false;
 }
 
 CloseStatus MonitorOutput::Close(int drain_timeout_ms) {
@@ -468,13 +554,12 @@ CloseStatus MonitorOutput::Close(int drain_timeout_ms) {
     drain_pending_ = false;
   }
 
-  // 3. Close the borrowed sink with whatever budget is left.
+  // 3. Close the owned sink with whatever budget is left.
   const CloseStatus sink_status = sink_->Close(remaining_ms());
 
   // Only a truly idle packer and a closed sink complete the shutdown.
   if (drain == PackDrain::Idle && sink_status == CloseStatus::Closed) {
     closed_ = true;
-    status_ = Status::Closed;
     close_reason_ = "closed";
     return CloseStatus::Closed;
   }

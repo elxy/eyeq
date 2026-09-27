@@ -413,12 +413,11 @@ manual/environment-limited.
 `src/output/monitor_output.hpp` consumes the common display-linear result produced by
 the coordination layer (`src/display/display_coordinator.*`), encodes it to the wire
 transfer into a fixed offscreen full-range RGB target, packs it with `FramePacker` and
-hands the bytes to `FrameSink::DisplayStill`. It never owns a `FrameRenderer`. At most
-one request is in flight and the caller advances it on the same thread with `Pump()`;
-main drives this through `src/output/monitor_controller.*`, which owns the sink and the
-borrow pairing. A new request while one is in flight is reported as Busy and is not
-read or mapped. `Close()` drains the packer and closes the borrowed sink within one
-total deadline.
+hands the bytes to `FrameSink::DisplayStill`. It never owns a `FrameRenderer`. It owns
+the `FrameSink` and the borrow pairing; at most one request is in flight and main
+advances it on the same thread with `Tick()` (or the low-level `Submit()`/`Pump()`). A
+new request while one is in flight is reported as Busy and is not read or mapped.
+`Close()` drains the packer and closes the owned sink within one total deadline.
 
 With `EYEQ_ENABLE_DECKLINK=ON` the `eyeq` player is wired to this layer for still-only
 external monitoring (see "Monitoring Output (DeckLink)"); continuous hardware-clock

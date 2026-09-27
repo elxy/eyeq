@@ -248,7 +248,7 @@ std::string ColorString(const Color &c) {
 MonitorOutput::StepResult Drive(MonitorOutput &monitor, int max_pumps = 50000) {
   for (int i = 0; i < max_pumps; ++i) {
     const MonitorOutput::StepResult step = monitor.Pump();
-    if (step.status != MonitorOutput::Status::Pending) {
+    if (step.outcome != MonitorOutput::Outcome::None) {
       return step;
     }
   }
@@ -257,8 +257,9 @@ MonitorOutput::StepResult Drive(MonitorOutput &monitor, int max_pumps = 50000) {
 
 struct SinkPair {
   EYEQ::test::FakeFrameSink fake{1};
-  eyeq_test::ScriptedFrameSink scripted{fake};
-  EYEQ::FrameSink &sink() { return scripted; }
+  std::unique_ptr<eyeq_test::ScriptedFrameSink> scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(fake);
+  // Hands the owned sink to MonitorOutput; @p fake stays alive for inspection.
+  std::unique_ptr<EYEQ::FrameSink> take() { return std::move(scripted); }
 };
 
 // Compares the sink's stored bytes for @p submit_id against the independent CPU
@@ -290,7 +291,7 @@ void TestEncodeBeforeImmediateRecompose(pl_gpu gpu, EYEQ::RenderContext &context
   const EYEQ::ResolvedOutput resolved = BuildResolved(w, h, EYEQ::PixelFormat::R210, false, 203.0);
   SinkPair sinks;
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
-  MonitorOutput monitor(context, resolved, sinks.sink());
+  MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
 
   const Color scene_a{0.8f, 0.15f, 0.1f};
   const Color scene_b{0.1f, 0.15f, 0.8f};
@@ -316,7 +317,7 @@ void TestEncodeBeforeImmediateRecompose(pl_gpu gpu, EYEQ::RenderContext &context
   // Scene A must survive the immediate overwrite: drive it to the sink and check
   // its bytes against an oracle built from the target that encode A produced.
   const auto step_a = Drive(monitor);
-  Check(step_a.status == MonitorOutput::Status::Displayed, "scene A request displayed after the overwrite");
+  Check(step_a.outcome == MonitorOutput::Outcome::Displayed, "scene A request displayed after the overwrite");
   {
     const std::vector<float> rgb_a = DownloadTargetRgb(gpu, monitor);
     Check(Close(AtRgb(rgb_a, w, w / 2, h / 2), scene_a, 0.05f),
@@ -328,7 +329,7 @@ void TestEncodeBeforeImmediateRecompose(pl_gpu gpu, EYEQ::RenderContext &context
   // Scene B is submitted and displayed with its own bytes.
   Check(monitor.Submit(request_b) == MonitorOutput::SubmitOutcome::Accepted, "scene B request accepted");
   const auto step_b = Drive(monitor);
-  Check(step_b.status == MonitorOutput::Status::Displayed, "scene B request displayed");
+  Check(step_b.outcome == MonitorOutput::Outcome::Displayed, "scene B request displayed");
   {
     const std::vector<float> rgb_b = DownloadTargetRgb(gpu, monitor);
     Check(Close(AtRgb(rgb_b, w, w / 2, h / 2), scene_b, 0.05f),
