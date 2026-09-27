@@ -60,44 +60,12 @@ find_package(Libplacebo REQUIRED)
 find_package(SDL3_ttf REQUIRED)
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avfilter avformat avutil swscale)
 
-# CPU-only output contract library: public headers plus pure helpers. It has no SDK
-# dependency and does not use the GPU; libplacebo is linked PUBLIC only because
-# frame_packer.hpp declares pl_tex/pl_gpu parameters. It also carries the pure
-# monitor mode helpers and the strict monitor CLI parsing so the player and the
-# tools share exactly one implementation (no duplicated selector parser).
-add_library(eyeq_output_contract STATIC
-  ${CMAKE_SOURCE_DIR}/src/output/pixel_format.cpp
-  ${CMAKE_SOURCE_DIR}/src/output/output_profile.cpp
-  ${CMAKE_SOURCE_DIR}/src/output/monitor_cli.cpp
-  ${CMAKE_SOURCE_DIR}/src/output/decklink/monitor_mode.cpp)
-target_include_directories(eyeq_output_contract PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(eyeq_output_contract PUBLIC Libplacebo::Libplacebo)
-
-# GPU frame packer: nonlinear full-range float RGB -> r210/v210 Video-range bytes,
-# with a fixed staging ring and asynchronous pl_tex_download + pl_buf_poll readback.
-# It only needs libplacebo and a caller-provided pl_gpu; the player is not wired to
-# it yet and the DeckLink SDK is not a dependency. EXCLUDE_FROM_ALL keeps the default
-# player build unaffected; the GPU tests pull it in when they are enabled.
-add_library(eyeq_frame_packer STATIC EXCLUDE_FROM_ALL
-  ${CMAKE_SOURCE_DIR}/src/output/frame_packer.cpp)
-target_include_directories(eyeq_frame_packer PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(eyeq_frame_packer PUBLIC eyeq_output_contract Libplacebo::Libplacebo)
-
-# Still-only monitor composition layer: FrameRenderer -> FramePacker ->
-# FrameSink::DisplayStill. EXCLUDE_FROM_ALL keeps it out of the default player
-# build. It intentionally does NOT link eyeq_frame_packer so a test can substitute
-# the fault-injection build of frame_packer.cpp; the final linkable must provide the
-# FramePacker symbols.
-add_library(eyeq_monitor_output STATIC EXCLUDE_FROM_ALL
-  ${CMAKE_SOURCE_DIR}/src/output/monitor_output.cpp)
-target_include_directories(eyeq_monitor_output PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(eyeq_monitor_output PUBLIC
-  eyeq_output_contract
-  Libplacebo::Libplacebo
-  SDL3::SDL3
-  SDL3_ttf::SDL3_ttf
-  FFmpeg::avutil
-  spdlog::spdlog)
+# src/output/ is built by its own library targets, defined next to the sources in
+# src/output/CMakeLists.txt. They are production code shared by the player, the
+# tools/ executables and the tests, so they must stay available with the test
+# switches off. This must run before the DeckLink backend block below, which links
+# eyeq_output_contract.
+add_subdirectory(src/output)
 
 # Optional DeckLink SDK backend. Phase 1A-1 builds only the read-only catalog and
 # mode query; it never enables video output. The SDK is an external, read-only tree
@@ -151,7 +119,8 @@ endif()
 # Collect source files
 file(GLOB_RECURSE C_SOURCES "${CMAKE_SOURCE_DIR}/src/*.c")
 file(GLOB_RECURSE CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/*.cpp")
-# src/output/ is built by its own library targets; never compile it into the player.
+# src/output/ is built by its own library targets (src/output/CMakeLists.txt); never
+# compile it into the player.
 list(FILTER CXX_SOURCES EXCLUDE REGEX "/src/output/")
 
 # Platform-specific source files
