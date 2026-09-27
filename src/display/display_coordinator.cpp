@@ -121,17 +121,14 @@ void DisplayCoordinator::SetSdrWhiteOnHdr(float nits) {
   renderer_->SetSdrWhiteOnHdr(nits);
 }
 
-void DisplayCoordinator::SetTargetDisplayNits(double nits, bool override_enabled) {
+void DisplayCoordinator::SetSourceMaxLuma(double nits) {
   AssertUiThread();
-  // Historical, opt-in override of the source HDR max_luma. It never changes the
-  // monitor/comparison target: the renderer's setter also nudges its own default
-  // mapping target, so the coordinator re-applies the mapping target it owns.
-  renderer_->SetTargetDisplayNits(nits, override_enabled);
-  renderer_->SetMappingTarget(mapping_target_, work_precision_);
+  // Source-only correction: the mapping target is not re-applied.
+  renderer_->SetSourceMaxLuma(nits);
   InvalidateScene();
 }
 
-void DisplayCoordinator::SetMonitorTarget(float peak_nits, float sdr_white_nits) {
+void DisplayCoordinator::SetTargetPeakNits(float peak_nits, float sdr_white_nits) {
   AssertUiThread();
   mapping_target_.peak_nits = peak_nits;
   mapping_target_.sdr_white_nits = sdr_white_nits;

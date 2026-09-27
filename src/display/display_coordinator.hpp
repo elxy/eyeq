@@ -106,7 +106,9 @@ public:
 
   void SetMainSource(int id);
   void SetSdrWhiteOnHdr(float nits);
-  void SetTargetDisplayNits(double nits, bool override_enabled);
+  // Opt-in source HDR max_luma correction (--source-max-luma). Source-only: it
+  // never moves the mapping target.
+  void SetSourceMaxLuma(double nits);
 
   /*
    * Enable or disable HDR Vivid dynamic tone mapping on the single renderer.
@@ -117,11 +119,9 @@ public:
    */
   void SetHdrVividEnabled(bool enabled);
   bool hdrvivid_enabled() const { return renderer_->IsHdrVividEnabled(); }
-  // Sets the monitor/comparison target peak and SDR white explicitly. Used when
-  // monitoring is enabled, where the external monitor target is the comparison
-  // baseline (V2.1 section 8.2); --target-display-nits keeps its historical
-  // source-max_luma override meaning and never becomes the monitor target.
-  void SetMonitorTarget(float peak_nits, float sdr_white_nits);
+  // Sets the fixed mapping target peak and SDR white explicitly (the comparison
+  // baseline, i.e. the outside monitor when monitoring is enabled, V2.1 8.2).
+  void SetTargetPeakNits(float peak_nits, float sdr_white_nits);
 
   const MappingTarget &mapping_target() const { return mapping_target_; }
   // Explicitly replaces the fixed mapping target (invalidates the cached scene).

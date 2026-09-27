@@ -82,7 +82,14 @@ public:
 
   void SetMainSource(int id) { main_id_ = id; }
   void SetSdrWhiteOnHdr(float nits) { sdr_white_on_hdr_ = nits; }
-  void SetTargetDisplayNits(double nits, bool override_enabled);
+  /*
+   * Opt-in override of the source HDR mastering/content peak
+   * (pl_color_space.hdr.max_luma) applied when a source is fed. It is a source
+   * metadata correction only: it never moves the mapping target, and the bitstream
+   * carries no dynamic metadata. Sources handled by the HDR Vivid curve keep the
+   * curve's own target handling, so their tml/rml anchors are not rewritten.
+   */
+  void SetSourceMaxLuma(double nits);
 
   /*
    * Enable GPU HDR Vivid dynamic tone mapping. When enabled, each fed source
@@ -247,9 +254,10 @@ private:
   int scene_width_ = 0;
   int scene_height_ = 0;
 
-  double target_display_nits_ = 1000.0;
-  bool target_display_override_enabled_ = false; // opt-in max_luma override (explicit --target-display-nits)
-  bool target_display_override_logged_ = false;  // one-time log for max_luma override
+  // Opt-in source max_luma override (--source-max-luma); disabled when not set.
+  bool source_max_luma_enabled_ = false;
+  double source_max_luma_nits_ = 0.0;
+  bool source_max_luma_logged_ = false; // one-time log for the max_luma override
 
   // Dynamic HDR (HDR Vivid). The shader instance is shared and its parameters
   // are set immediately before the source mapping of one video; the mapping is

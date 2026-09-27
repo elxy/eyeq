@@ -710,8 +710,8 @@ void TestPrecisionReconfigure(EYEQ::RenderContext &context, AVStream *stream) {
 }
 
 // ---------------------------------------------------------------------------
-// Target semantics: --target-display-nits is the historical opt-in source
-// max_luma override and never moves the mapping/monitor target (V2.1 8.2).
+// Target semantics: --source-max-luma is a source-only override and never moves
+// the mapping target; --target-display-nits is the single mapping/monitor peak.
 // ---------------------------------------------------------------------------
 void TestTargetSemantics(EYEQ::RenderContext &context, AVStream *stream) {
   std::fprintf(stdout, "[target semantics]\n");
@@ -722,17 +722,17 @@ void TestTargetSemantics(EYEQ::RenderContext &context, AVStream *stream) {
   EYEQ::DisplayState state = MakeState({5}, 5);
   coordinator->RenderScene(state);
 
-  coordinator->SetTargetDisplayNits(800.0, true);
+  coordinator->SetSourceMaxLuma(800.0);
   Check(std::fabs(coordinator->mapping_target().peak_nits - 600.0f) < 0.5f,
-        "--target-display-nits does not change the mapping target peak");
+        "--source-max-luma does not change the mapping target peak");
   coordinator->SetSdrWhiteOnHdr(120.0f);
   Check(std::fabs(coordinator->mapping_target().sdr_white_nits - PL_COLOR_SDR_WHITE) < 0.5f,
         "--sdr-white-on-hdr does not change the mapping target SDR white");
-  coordinator->SetMonitorTarget(500.0f, 100.0f);
+  coordinator->SetTargetPeakNits(500.0f, 100.0f);
   Check(std::fabs(coordinator->mapping_target().peak_nits - 500.0f) < 0.5f,
-        "SetMonitorTarget sets the comparison-baseline peak");
+        "SetTargetPeakNits sets the comparison-baseline peak");
   Check(std::fabs(coordinator->mapping_target().sdr_white_nits - 100.0f) < 0.5f,
-        "SetMonitorTarget sets the comparison-baseline SDR white");
+        "SetTargetPeakNits sets the comparison-baseline SDR white");
 }
 
 // ---------------------------------------------------------------------------

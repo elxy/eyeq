@@ -79,21 +79,21 @@ struct EyeQArgs {
   std::vector<std::string> icc_profiles; // ICC profile specifications
   float sdr_white_on_hdr;                // SDR white level (nits) when rendering under HDR
   bool hdrvivid_render;                  // Apply HDR Vivid 1.0 dynamic metadata on the GPU
-  double target_display_nits;            // Target display peak luminance (nits); overrides HDR max_luma when passed
+  double target_display_nits;            // Comparison mapping target peak luminance (nits), all modes
   bool target_display_set;               // Whether --target-display-nits was explicitly passed
+  double source_max_luma;                // Opt-in source HDR max_luma override (nits)
+  bool source_max_luma_set;              // Whether --source-max-luma was explicitly passed
 
 #ifdef EYEQ_ENABLE_DECKLINK
   // Still-only monitoring (SDK-enabled builds only). --monitor-device enables it;
-  // --monitor-mode is then required. All values are validated before any output
-  // is enabled; the monitor target is the comparison baseline and is never
-  // derived from --target-display-nits.
+  // --monitor-mode is then required. All values are validated before any output is
+  // enabled. The monitor target is the comparison baseline and is the same
+  // --target-display-nits peak used in every other mode.
   std::optional<std::string> monitor_device; // index:<n> or id:<persistent-id>
   std::optional<std::string> monitor_mode;   // WxH@N or WxH@N/D (exact integer rate)
   std::string monitor_connection = "sdi";
   std::string monitor_pixel_format = "v210";
   std::string monitor_color_target = "sdr709"; // sdr709 or pq2020
-  double monitor_target_nits = 0.0;            // monitor peak (comparison baseline)
-  bool monitor_target_nits_set = false;
   double monitor_sdr_white = PL_COLOR_SDR_WHITE;
 #endif
 };
@@ -194,8 +194,14 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   app.add_flag("--hdrvivid-render", args.hdrvivid_render,
                "Apply HDR Vivid 1.0 dynamic metadata to the common display mapping target on the GPU");
   app.add_option("--target-display-nits", args.target_display_nits,
-                 "Target display peak luminance (nits); when passed, overrides the peak (max_luma) of all HDR "
-                 "content");
+                 "Comparison mapping target peak luminance (nits), the single entry for every mode and the "
+                 "Vivid curve's target display luminance. For a pq2020 monitor target it is required (no HDR "
+                 "monitor peak is guessed); otherwise it defaults to 1000");
+  app.add_option("--source-max-luma", args.source_max_luma,
+                 "Override the source HDR mastering/content peak (max_luma) to this value in nits. Opt-in "
+                 "correction for untrusted source metadata (HLG/DPX read-back); it never changes the "
+                 "mapping target and does not rewrite bitstream dynamic metadata")
+      ->check(CLI::PositiveNumber);
   std::map<std::string, HighDpiMode> hdpi_map{
       {"auto", HighDpiMode::Auto}, {"yes", HighDpiMode::Yes}, {"no", HighDpiMode::No}};
   app.add_option("--high-dpi", args.high_dpi_mode, "High DPI mode")
@@ -268,10 +274,6 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
                  "Monitor pixel format: v210 or r210 (default: v210)");
   app.add_option("--monitor-color", args.monitor_color_target,
                  "Monitor color target: sdr709 (BT.709/BT.1886) or pq2020 (BT.2020/PQ) (default: sdr709)");
-  app.add_option("--monitor-target-nits", args.monitor_target_nits,
-                 "Monitor peak luminance (nits), i.e. the comparison baseline. Required for a pq2020 target; it is "
-                 "never derived from --target-display-nits, whose source-max_luma override meaning is unchanged")
-      ->check(CLI::PositiveNumber);
   app.add_option("--monitor-sdr-white", args.monitor_sdr_white,
                  "SDR white level (nits) of the common mapping target when monitoring (default: 203)");
 #endif
@@ -286,11 +288,13 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
     args.log_level = LoggingLevel::DEBUG;
   }
 
-  // Overriding HDR max_luma is opt-in: only when the user explicitly passes --target-display-nits.
+  // Both overrides are opt-in: the mapping target peak only changes when the user
+  // explicitly passes --target-display-nits, and the source max_luma only when the
+  // user explicitly passes --source-max-luma.
   args.target_display_set = app.count("--target-display-nits") > 0;
+  args.source_max_luma_set = app.count("--source-max-luma") > 0;
 
 #ifdef EYEQ_ENABLE_DECKLINK
-  args.monitor_target_nits_set = app.count("--monitor-target-nits") > 0;
   if (args.monitor_device.has_value() && !args.monitor_mode.has_value()) {
     Logger->critical("--monitor-mode is required with --monitor-device");
     exit(1);
@@ -300,8 +304,8 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
     exit(1);
   }
   // A PQ monitor peak cannot be guessed; refuse instead of defaulting to 1000.
-  if (args.monitor_device.has_value() && !args.monitor_target_nits_set && args.monitor_color_target == "pq2020") {
-    Logger->critical("--monitor-target-nits is required for a pq2020 monitor target (no HDR monitor peak is guessed)");
+  if (args.monitor_device.has_value() && args.monitor_color_target == "pq2020" && !args.target_display_set) {
+    Logger->critical("--target-display-nits is required for a pq2020 monitor target (no HDR monitor peak is guessed)");
     exit(1);
   }
 #endif
@@ -488,7 +492,7 @@ static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, Displ
   }
 
   OutputRequest request;
-  if (!BuildMonitorOutputRequest(selector, selected, connection, pixel_format, color_target, args.monitor_target_nits,
+  if (!BuildMonitorOutputRequest(selector, selected, connection, pixel_format, color_target, args.target_display_nits,
                                  &request, &error)) {
     throw std::runtime_error("invalid monitor output request: " + error);
   }
@@ -501,7 +505,7 @@ static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, Displ
   Logger->info("Monitoring enabled: mode {} connection {} pixel format {} color target {} monitor peak {:.1f} nits, "
                "SDR white {:.1f} nits (still-only)",
                FormatMonitorMode(resolved.mode), args.monitor_connection, args.monitor_pixel_format,
-               MonitorColorTargetLabel(color_target), args.monitor_target_nits, args.monitor_sdr_white);
+               MonitorColorTargetLabel(color_target), args.target_display_nits, args.monitor_sdr_white);
   return std::make_unique<MonitorOutput>(context, coordinator, std::move(backend), resolved);
 }
 #endif
@@ -535,6 +539,8 @@ int main(int argc, char **argv) {
       .hdrvivid_render = false,
       .target_display_nits = 1000.0,
       .target_display_set = false,
+      .source_max_luma = 0.0,
+      .source_max_luma_set = false,
   };
 
   parse_args(args, argc, argv);
@@ -542,6 +548,11 @@ int main(int argc, char **argv) {
 
   if (args.target_display_set && (args.target_display_nits <= 0.0 || args.target_display_nits > 10000.0)) {
     Logger->critical("--target-display-nits must be in the range (0, 10000] nits");
+    return 1;
+  }
+
+  if (args.source_max_luma_set && (args.source_max_luma <= 0.0 || args.source_max_luma > 10000.0)) {
+    Logger->critical("--source-max-luma must be in the range (0, 10000] nits");
     return 1;
   }
 
@@ -683,12 +694,6 @@ int main(int argc, char **argv) {
   bool monitoring = false;
 #ifdef EYEQ_ENABLE_DECKLINK
   monitoring = args.monitor_device.has_value();
-  if (monitoring && !args.monitor_target_nits_set) {
-    // A pq2020 target already required --monitor-target-nits in parse_args; this
-    // only fills the documented SDR default.
-    args.monitor_target_nits = 100.0;
-    Logger->info("Monitoring: using the SDR default monitor peak of 100 nits; pass --monitor-target-nits to override");
-  }
 #endif
 
   DisplayCoordinator::Config coordinator_config;
@@ -702,12 +707,10 @@ int main(int argc, char **argv) {
   coordinator_config.work_precision = WorkPrecision::F16;
   coordinator_config.hdrvivid = args.hdrvivid_render;
   coordinator_config.mapping_target.primaries = PL_COLOR_PRIM_BT_2020;
+  const float mapping_peak = static_cast<float>(args.target_display_nits);
 #ifdef EYEQ_ENABLE_DECKLINK
-  const float mapping_peak =
-      monitoring ? static_cast<float>(args.monitor_target_nits) : static_cast<float>(args.target_display_nits);
   const float mapping_sdr_white = monitoring ? static_cast<float>(args.monitor_sdr_white) : PL_COLOR_SDR_WHITE;
 #else
-  const float mapping_peak = static_cast<float>(args.target_display_nits);
   const float mapping_sdr_white = PL_COLOR_SDR_WHITE;
 #endif
   coordinator_config.mapping_target.peak_nits = mapping_peak;
@@ -719,7 +722,9 @@ int main(int argc, char **argv) {
       window.context(), coordinator_config,
       [&window](const struct pl_color_space *csp) { window.PresenterColorspaceHint(csp); });
   window.SetCoordinator(coordinator.get());
-  coordinator->SetTargetDisplayNits(args.target_display_nits, args.target_display_set);
+  if (args.source_max_luma_set) {
+    coordinator->SetSourceMaxLuma(args.source_max_luma);
+  }
 
   // Load ICC profiles
   for (const auto &spec : args.icc_profiles) {
@@ -754,16 +759,8 @@ int main(int argc, char **argv) {
 #ifdef EYEQ_ENABLE_DECKLINK
   std::unique_ptr<MonitorOutput> monitor;
   if (monitoring) {
-    // The external monitor target is the comparison baseline (V2.1 section 8.2).
-    // --target-display-nits keeps its historical source max_luma override meaning
-    // and never doubles as the monitor target.
-    coordinator->SetMonitorTarget(static_cast<float>(args.monitor_target_nits),
-                                  static_cast<float>(args.monitor_sdr_white));
-    if (args.target_display_set) {
-      Logger->info("--target-display-nits {:.1f} keeps its historical source max_luma override meaning and does NOT "
-                   "change the monitor/comparison target ({:.1f} nits)",
-                   args.target_display_nits, args.monitor_target_nits);
-    }
+    // The external monitor target is the same --target-display-nits peak used in
+    // every other mode (applied through the coordinator's mapping target above).
     try {
       monitor = SetupMonitor(window.context(), *coordinator, args);
     } catch (const std::exception &e) {

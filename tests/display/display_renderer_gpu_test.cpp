@@ -843,7 +843,7 @@ int main() {
       // must not change B's mapped metadata: the override is target-local.
       EYEQ::FrameRenderer renderer_a(context, fill_config);
       EYEQ::FrameRenderer renderer_b(context, fill_config);
-      renderer_a.SetTargetDisplayNits(800.0, true);
+      renderer_a.SetSourceMaxLuma(800.0);
       renderer_a.SetMainSource(0);
       renderer_b.SetMainSource(0);
 

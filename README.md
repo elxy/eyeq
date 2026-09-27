@@ -203,8 +203,9 @@ After launching, the following keyboard and mouse controls are available:
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
 - `--no-colorspace-hint`: Disable video color space hinting; uses the default color space instead. Enable this for tone mapping when the display does not support HDR
 - `--sdr-white-on-hdr <nits>`: Set the SDR reference white level (in nits) when the main video is HDR. By default, SDR videos are mapped using the standard reference white of 203 nits (ITU-R BT.2408). This option only takes effect when the main video is HDR and the target video is SDR
-- `--target-display-nits <nits>`: Target display peak luminance in nits. When passed, it overrides the peak (`max_luma`) of all HDR content (HLG, DPX read-back) to this value. It does not set the monitoring target; use `--monitor-target-nits` for that
-- `--hdrvivid-render`: Apply HDR Vivid 1.0 dynamic metadata with a GPU tone-mapping curve. Each frame that carries CUVA metadata is mapped to the common display mapping target (the monitor target while monitoring, otherwise `--target-display-nits`) through the same single renderer every other source uses, so Vivid and Dolby Vision are compared in one display-linear space. Sources without Vivid metadata are left untouched, and the source's mastering/dynamic metadata is never rewritten into the public result
+- `--target-display-nits <nits>`: Comparison mapping target peak luminance in nits. This is the single entry for the comparison baseline in every mode: it is the common display mapping target (and therefore the Vivid curve's target display luminance) and the external monitor peak when monitoring. For a `pq2020` monitor target it is required (a physical monitor has no guessable default); otherwise it defaults to 1000. It no longer overrides the source HDR `max_luma` — that role moved to `--source-max-luma`, with no compatibility mapping (an intentional behavior fix)
+- `--source-max-luma <nits>`: Opt-in override of the source HDR mastering/content peak (`pl_color_space.hdr.max_luma`) in nits. Use it when the source peak is untrusted (HLG, DPX read-back); it affects only sources that go through libplacebo's normal tone mapping, never rewrites the bitstream's dynamic metadata (the Vivid tml/rml anchors are part of the stream and stay untouched), and is decoupled from the mapping target
+- `--hdrvivid-render`: Apply HDR Vivid 1.0 dynamic metadata with a GPU tone-mapping curve. Each frame that carries CUVA metadata is mapped to the common display mapping target (`--target-display-nits`, or the external monitor peak when monitoring) through the same single renderer every other source uses, so Vivid and Dolby Vision are compared in one display-linear space. Sources without Vivid metadata are left untouched, and the source's mastering/dynamic metadata is never rewritten into the public result
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
 - `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
@@ -227,14 +228,15 @@ A build made with `-DEYEQ_ENABLE_DECKLINK=ON` and the DeckLink SDK can send the 
 - `--monitor-connection {sdi,hdmi}`: Output connection (default `sdi`)
 - `--monitor-pixel-format {v210,r210}`: Output pixel format (default `v210`)
 - `--monitor-color {sdr709,pq2020}`: Color target — `sdr709` (BT.709 / BT.1886) or `pq2020` (BT.2020 / PQ) (default `sdr709`)
-- `--monitor-target-nits <nits>`: Monitor peak luminance in nits, i.e. the comparison target. Required for a `pq2020` target and never derived from `--target-display-nits`. For an `sdr709` target it defaults to 100 nits when omitted
 - `--monitor-sdr-white <nits>`: SDR white level of the common mapping target when monitoring (default 203 nits)
 
 A terminal output failure — the sink reports an error, loses the device, or closes — stops monitoring for the rest of the run. EyeQ logs the failure and keeps the desktop running, but there is no automatic restart: **restart the player to recover monitoring**. Non-terminal per-request failures (for example a `FramePacker` readback failure) are reported and the module keeps working; a failed request is never retried silently.
 
 The wire encode is intentionally **dither-free**: the display-linear result is quantized to 10-bit without dithering so the output bytes stay deterministic for tests and objective measurement. Banding in smooth gradients is a known, accepted consequence. Use `r210` (RGB 4:4:4) for the cleanest signal; `v210`'s 4:2:2 chroma is a property of the format, not an extra processing step.
 
-When monitoring is enabled, `--target-display-nits` keeps its historical, opt-in meaning (it overrides the source HDR `max_luma`) and never changes the monitor/comparison target; passing both logs that the external output is unaffected.
+When monitoring is enabled, `--target-display-nits` is the external monitor peak (the comparison baseline); for a `pq2020` target it must match the monitor's calibrated peak. It is no longer a source override: use `--source-max-luma` for that. `--monitor-sdr-white` sets the SDR white of the common mapping target.
+
+Migration from older builds: a source-peak override previously written as `--target-display-nits N` is now `--source-max-luma N`. `sdr709` monitoring no longer defaults the target to 100 nits; pass `--target-display-nits 100` to keep the old monitor peak.
 
 ### Environment Variables
 
@@ -274,14 +276,14 @@ When monitoring is enabled, `--target-display-nits` keeps its historical, opt-in
 
 5. **How do I play back a DPX frame saved via `Ctrl + E`?**
 
-   The DPX header records transfer/primaries with SMPTE ST 268:2014 values (PQ=14, HLG=15, BT.2020=15) that FFmpeg's DPX decoder does not recognize (it maps transfer/colorimetric only up to 12/10), and its reference high quantity (HDR peak) is not read. EyeQ therefore sees an unknown color space and no `max_luma` — add a `setparams` filter to restore the color space, and `--target-display-nits` to supply the peak used for tone mapping:
+   The DPX header records transfer/primaries with SMPTE ST 268:2014 values (PQ=14, HLG=15, BT.2020=15) that FFmpeg's DPX decoder does not recognize (it maps transfer/colorimetric only up to 12/10), and its reference high quantity (HDR peak) is not read. EyeQ therefore sees an unknown color space and no `max_luma` — add a `setparams` filter to restore the color space, and `--source-max-luma` to supply the source peak used for tone mapping:
 
    ```
-   eyeq --no-colorspace-hint --target-display-nits 1000 \
+   eyeq --no-colorspace-hint --source-max-luma 1000 \
      'render_0001.0.foo.mkv.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084'
    ```
 
-   Use `color_trc=arib-std-b67` for HLG. On an HDR display the PQ output passes through without tone mapping, so `--no-colorspace-hint` and `--target-display-nits` are unnecessary; `--no-colorspace-hint` is required only on non-HDR displays to enable tone mapping.
+   Use `color_trc=arib-std-b67` for HLG. On an HDR display the PQ output passes through without tone mapping, so `--no-colorspace-hint` and `--source-max-luma` are unnecessary; `--no-colorspace-hint` is required only on non-HDR displays to enable tone mapping.
 
 ## DeckLink Output
 

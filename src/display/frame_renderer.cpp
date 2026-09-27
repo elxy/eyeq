@@ -93,12 +93,13 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
     osd_manager_ = std::make_unique<OsdManager>(gpu, pixel_density_);
   }
 
-  // Default comparison mapping target: BT.2020/D65, peak from the renderer's
-  // target display nits, true black and the standard SDR white. The work
-  // precision is a functional choice; F16 is the plain-display candidate and
+  // Default comparison mapping target: BT.2020/D65, a 1000-nit nominal peak, true
+  // black and the standard SDR white. The coordinator replaces this target with
+  // the fixed one it owns; the default only matters for a standalone renderer. The
+  // work precision is a functional choice; F16 is the plain-display candidate and
   // the difference path upgrades itself to F32.
   mapping_target_.primaries = PL_COLOR_PRIM_BT_2020;
-  mapping_target_.peak_nits = static_cast<float>(target_display_nits_);
+  mapping_target_.peak_nits = 1000.0f;
   mapping_target_.black_nits = 0.0f;
   mapping_target_.sdr_white_nits = PL_COLOR_SDR_WHITE;
   work_precision_ = WorkPrecision::F16;
@@ -130,17 +131,11 @@ FrameRenderer::~FrameRenderer() {
   display_render_.reset();
 }
 
-void FrameRenderer::SetTargetDisplayNits(double nits, bool override_enabled) {
-  target_display_nits_ = nits;
-  target_display_override_enabled_ = override_enabled;
-  mapping_target_.peak_nits = static_cast<float>(nits);
-  if (display_render_) {
-    display_render_->SetMappingTarget(mapping_target_, work_precision_);
-  }
-  // The HDR Vivid curve is solved against the mapping target, so it must be
-  // re-solved when that target changes. The coordinator re-applies its own
-  // fixed target right after this call, which also re-solves.
-  ResolveHdrVividParams();
+void FrameRenderer::SetSourceMaxLuma(double nits) {
+  // Source metadata correction only; the mapping target is untouched.
+  source_max_luma_enabled_ = true;
+  source_max_luma_nits_ = nits;
+  source_max_luma_logged_ = false;
 }
 
 void FrameRenderer::SetHdrVividEnabled(bool enabled) {
@@ -394,17 +389,19 @@ std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<A
       }
       pl_frames_[i] = av_frames_.at(i).GetPLFrame();
 
-      // Apply the target display peak to all HDR content (HLG / DPX read-back),
-      // but only when the user explicitly passed --target-display-nits (opt-in override).
+      // Correct the source HDR mastering/content peak when the user asked for it
+      // (--source-max-luma). This is the untrusted-metadata path (HLG / DPX
+      // read-back); the mapping target itself is never moved.
       struct pl_color_space *csp = &pl_frames_[i]->color;
-      if (target_display_override_enabled_ && pl_color_space_is_hdr(csp)) {
-        if (csp->hdr.max_luma > 0.0f && std::abs(csp->hdr.max_luma - static_cast<float>(target_display_nits_)) > 0.5f &&
-            !target_display_override_logged_) {
-          Logger->info("Video #{}: overriding HDR max_luma {:.0f} → target display {:.0f} nits", i, csp->hdr.max_luma,
-                       target_display_nits_);
-          target_display_override_logged_ = true;
+      if (source_max_luma_enabled_ && pl_color_space_is_hdr(csp)) {
+        if (csp->hdr.max_luma > 0.0f &&
+            std::abs(csp->hdr.max_luma - static_cast<float>(source_max_luma_nits_)) > 0.5f &&
+            !source_max_luma_logged_) {
+          Logger->info("Video #{}: overriding source HDR max_luma {:.0f} → {:.0f} nits", i, csp->hdr.max_luma,
+                       source_max_luma_nits_);
+          source_max_luma_logged_ = true;
         }
-        csp->hdr.max_luma = static_cast<float>(target_display_nits_);
+        csp->hdr.max_luma = static_cast<float>(source_max_luma_nits_);
       }
     } catch (const texture_format_error &e) {
       Logger->warn("Video #{}: {}", i, e.what());

@@ -201,8 +201,9 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
 - `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
 - `--sdr-white-on-hdr <nits>`：当主视频为HDR时，设置SDR视频的参考白电平（单位nits）。默认按照标准参考白203 nits（ITU-R BT.2408）进行映射。该选项仅在主视频为HDR、对比视频为SDR时生效
-- `--target-display-nits <nits>`：目标显示峰值亮度，单位 nits。传入后，把所有 HDR 内容（HLG、DPX 读回）的峰值（`max_luma`）覆盖为该值。它不设置监看目标，监看目标请用 `--monitor-target-nits`
-- `--hdrvivid-render`：用 GPU 色调映射曲线应用 HDR Vivid 1.0 动态元数据。每帧携带 CUVA 元数据时，通过所有其他源共用的同一个渲染器映射到公共显示映射目标（监看时为监看目标，否则为 `--target-display-nits`），因此 Vivid 与 Dolby Vision 在同一显示线性空间中比较。无 Vivid 元数据的源不受影响，源 mastering/动态元数据也不会被写回公共结果
+- `--target-display-nits <nits>`：比较映射目标峰值亮度（nits）。它是所有模式下比较基准的唯一入口：既是公共显示映射目标（也是 Vivid 曲线的目标显示亮度），监看时又是外监峰值。`pq2020` 监看目标必填（物理监视器没有可猜的默认值），其余默认 1000。它不再覆盖源 HDR `max_luma`——该职责已移到 `--source-max-luma`，且不做兼容映射（有意的行为修正）
+- `--source-max-luma <nits>`：可选的源 HDR mastering/内容峰值（`pl_color_space.hdr.max_luma`）覆盖，单位 nits。源峰值不可信时使用（HLG、DPX 读回）；仅影响走 libplacebo 普通色调映射的源，不写回码流自带的动态元数据（Vivid 的 tml/rml 锚点属于码流本身，不受影响），且与映射目标完全解耦
+- `--hdrvivid-render`：用 GPU 色调映射曲线应用 HDR Vivid 1.0 动态元数据。每帧携带 CUVA 元数据时，通过所有其他源共用的同一个渲染器映射到公共显示映射目标（`--target-display-nits`，监看时为外监峰值），因此 Vivid 与 Dolby Vision 在同一显示线性空间中比较。无 Vivid 元数据的源不受影响，源 mastering/动态元数据也不会被写回公共结果
 - `--high-dpi {auto,yes,no}`：High-DPI模式，默认`auto`自动检测
 - `--scale-method <method>`：视频放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
@@ -225,14 +226,15 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--monitor-connection {sdi,hdmi}`：输出连接（默认 `sdi`）
 - `--monitor-pixel-format {v210,r210}`：输出像素格式（默认 `v210`）
 - `--monitor-color {sdr709,pq2020}`：色彩目标——`sdr709`（BT.709 / BT.1886）或 `pq2020`（BT.2020 / PQ）（默认 `sdr709`）
-- `--monitor-target-nits <nits>`：监视器峰值亮度（nits），即比较基准。`pq2020` 目标必填，且绝不由 `--target-display-nits` 派生。`sdr709` 目标未传时默认为 100 nits
 - `--monitor-sdr-white <nits>`：监看时共同映射目标的 SDR 白电平（默认 203 nits）
 
 外监的终止性失败——sink 上报错误、设备丢失或已关闭——会在本次运行内停用监看。EyeQ 会记录该失败并保持桌面继续运行，但不会自动重启：**需重启播放器才能恢复监看**。非终止性的单次请求失败（例如 `FramePacker` 回读失败）会被上报，模块仍可继续使用；失败的请求不会被静默重试。
 
 线缆编码有意**不做抖动（dither-free）**：显示线性结果直接量化为 10-bit，以保证输出字节对测试与客观测量是确定性的；平滑渐变出现 banding 是已知且接受的代价。追求最纯净信号可用 `r210`（RGB 4:4:4）；`v210` 的 4:2:2 色度是格式本身的属性，不是额外的后处理。
 
-开启监看时，`--target-display-nits` 保持其历史 opt-in 含义（覆盖源 HDR `max_luma`），不会改变监看/比较目标；两者同时传入时会提示外监输出不受影响。
+开启监看时，`--target-display-nits` 即外监峰值（比较基准）；`pq2020` 目标下应与监视器校准峰值一致。它不再是源覆盖，源覆盖请用 `--source-max-luma`。`--monitor-sdr-white` 设置公共映射目标的 SDR 白电平。
+
+从旧版本迁移：过去用 `--target-display-nits N` 表达的源峰值覆盖，现在改用 `--source-max-luma N`。`sdr709` 监看不再默认把目标设为 100 nits；如需保留旧的监视器峰值，请显式传 `--target-display-nits 100`。
 
 ### 环境变量
 
@@ -272,14 +274,14 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 5. 如何回看`Ctrl + E`保存的DPX渲染帧？
 
-   DPX 头部用 SMPTE ST 268:2014 的枚举值记录 transfer/primaries（PQ=14、HLG=15、BT.2020=15），而 FFmpeg 的 DPX 解码器不认识这些值（transfer/colorimetric 只映射到 12/10），reference high quantity（HDR 峰值）也不会被读取。因此 EyeQ 拿到的是未知色彩空间、且没有 `max_luma`——需用 `setparams` 滤镜恢复色彩空间，并用 `--target-display-nits` 提供色调映射所需的峰值：
+   DPX 头部用 SMPTE ST 268:2014 的枚举值记录 transfer/primaries（PQ=14、HLG=15、BT.2020=15），而 FFmpeg 的 DPX 解码器不认识这些值（transfer/colorimetric 只映射到 12/10），reference high quantity（HDR 峰值）也不会被读取。因此 EyeQ 拿到的是未知色彩空间、且没有 `max_luma`——需用 `setparams` 滤镜恢复色彩空间，并用 `--source-max-luma` 提供色调映射所需的源峰值：
 
    ```
-   eyeq --no-colorspace-hint --target-display-nits 1000 \
+   eyeq --no-colorspace-hint --source-max-luma 1000 \
      'render_0001.0.foo.mkv.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084'
    ```
 
-   HLG 用 `color_trc=arib-std-b67`。在 HDR 显示器上 PQ 直通、无需色调映射，`--no-colorspace-hint` 与 `--target-display-nits` 可不加；`--no-colorspace-hint` 仅在非 HDR 显示器上需要，用于开启色调映射。
+   HLG 用 `color_trc=arib-std-b67`。在 HDR 显示器上 PQ 直通、无需色调映射，`--no-colorspace-hint` 与 `--source-max-luma` 可不加；`--no-colorspace-hint` 仅在非 HDR 显示器上需要，用于开启色调映射。
 
 ## DeckLink 输出
 
