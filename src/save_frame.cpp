@@ -1,11 +1,13 @@
 #include "utils.hpp"
 
+#include <memory>
 #include <string>
 
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
@@ -208,6 +210,35 @@ int save_frame(AVFrame *frame, const std::filesystem::path &filename, std::strin
   int ret;
 
   (void)format;
+
+  // Hardware decoded frames (e.g. VideoToolbox surfaces) only exist in device
+  // memory and expose no CPU-readable planes, so swscale and the encoders
+  // cannot consume them. Download them to a system-memory frame first. The
+  // download owns the pixel buffers, hence the frame is kept alive until this
+  // function returns.
+  auto frame_deleter = [](AVFrame *f) { av_frame_free(&f); };
+  std::unique_ptr<AVFrame, decltype(frame_deleter)> downloaded_frame(nullptr, frame_deleter);
+  if (frame->hw_frames_ctx) {
+    AVFrame *sw_frame = av_frame_alloc();
+    if (NULL == sw_frame) {
+      av_log(NULL, AV_LOG_ERROR, "Could not allocate a frame for hardware download\n");
+      return AVERROR(ENOMEM);
+    }
+    ret = av_hwframe_transfer_data(sw_frame, frame, 0);
+    if (ret < 0) {
+      av_log(NULL, AV_LOG_ERROR, "Could not download hardware frame: %s\n", ffmpeg_error_string(ret).c_str());
+      av_frame_free(&sw_frame);
+      return ret;
+    }
+    av_frame_copy_props(sw_frame, frame);
+    // The frame now lives in system memory; drop any hardware context carried
+    // over with the metadata so the encoders see a plain software frame.
+    av_buffer_unref(&sw_frame->hw_frames_ctx);
+    av_log(NULL, AV_LOG_DEBUG, "Downloaded hardware frame to pixel format %s\n",
+           av_get_pix_fmt_name(static_cast<AVPixelFormat>(sw_frame->format)));
+    downloaded_frame.reset(sw_frame);
+    frame = sw_frame;
+  }
 
   const std::string filename_utf8 = filename.u8string();
   const char *filename_cstr = filename_utf8.c_str();
