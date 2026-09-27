@@ -201,7 +201,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--filter <filter>`：指定视频滤镜，作为未单独指定滤镜的视频的默认滤镜，即[FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html)。也可以在视频路径后使用`@`分隔符为单个视频指定滤镜，如`video.mp4@"filter"`
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
 - `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
-- `--sdr-white-on-hdr <nits>`：当主视频为HDR时，设置SDR视频的参考白电平（单位nits）。默认按照标准参考白203 nits（ITU-R BT.2408）进行映射。该选项仅在主视频为HDR、对比视频为SDR时生效
+- `--reference-white <nits>`：统一的SDR参考白电平（单位nits，默认203，ITU-R BT.2408）。主视频为HDR时用作SDR源的参考白，监看时用作映射/输出线的SDR白；纯SDR桌面不受影响。替代 `--sdr-white-on-hdr` 与 `--monitor-sdr-white`
 - `--target-display-nits <nits>`：映射目标的峰值亮度（nits）：普通播放时是显示映射目标（也是 `--hdrvivid-render` 下 Vivid 曲线的目标显示亮度），监看时即监视器峰值。`pq2020` 监看目标必填（物理监视器没有可猜的默认值），其余默认 1000。
 - `--source-max-luma <nits>`：可选的源 HDR mastering/内容峰值（`pl_color_space.hdr.max_luma`）覆盖，单位 nits。源峰值不可信时使用（HLG、DPX 读回）
 - `--hdrvivid-render`：启用 HDR Vivid 渲染。
@@ -217,12 +217,12 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--icc-profile <profile>`：ICC色彩管理。`auto`使用系统配置(仅macOS)，也可指定ICC文件路径，或`N:path`为特定视频指定
 - `--loglevel <level>`：日志级别，包括`debug`、`info`、`warning`、`error`、`critical`、`off`，默认为`info`
 - `--debug`：等同于`--loglevel debug`
-- `--monitor-device <selector>`：在指定DeckLink设备上开启监看。选择器必须显式：`index:<n>`或`id:<persistent-id>`。开启监看会禁用所有应用侧ICC（global、`auto`与`N:path`）；macOS系统自身的色彩管理不受影响
-- `--monitor-mode <WxH@N|WxH@N/D>`：原生mode，使用精确整数数据，例如`3840x2160@50`或`3840x2160@30000/1001`。与`--monitor-device`搭配必填；设备原生不支持的 mode 会被拒绝
-- `--monitor-connection {sdi,hdmi}`：输出连接（默认`sdi`）
+- `--monitor-status`：打印只读的DeckLink设备/mode目录（设备、能力、输出连接，以及每种连接/像素格式下的原生mode）后退出；不会开启任何输出
+- `--monitor-device <auto|selector>`：在DeckLink设备上开启监看。`auto`选取支持播放的设备，跳过被占用的（若全部失败则报告每个候选的原因）；否则选择器必须显式：`index:<n>`或`id:<persistent-id>`。开启监看会禁用所有应用侧ICC（global、`auto`与`N:path`）；macOS系统自身的色彩管理不受影响
+- `--monitor-mode <auto|WxH@N|WxH@N/D>`：监看mode。`auto`（默认）选取与主视频最接近的原生mode（优先精确帧率，其次取不低于源的最低帧率；同一帧率下取覆盖源的最小mode）。显式值为精确整数数据，例如`3840x2160@50`或`3840x2160@30000/1001`；设备原生不支持的 mode 会被拒绝
+- `--monitor-connection {auto,sdi,hdmi}`：输出连接。`auto`（默认）跟随设备已激活的输出，设备报告SDI时优先SDI；不探测实际接线，若设备同时报告两者请显式指定
 - `--monitor-pixel-format {v210,r210}`：输出像素格式（默认`v210`）
-- `--monitor-color {sdr709,pq2020}`：色彩目标——`sdr709`（BT.709 / BT.1886）或`pq2020`（BT.2020 / PQ）（默认`sdr709`）
-- `--monitor-sdr-white <nits>`：监看时共同映射目标的SDR白电平（默认203 nits）
+- `--monitor-color {auto,sdr709,pq2020}`：色彩目标。`auto`（默认）只看主视频的传输函数——PQ/HLG 选`pq2020`，其余（含P3等宽色域SDR）选`sdr709`。`sdr709`为BT.709 / BT.1886；`pq2020`为BT.2020 / PQ，且必须配合`--target-display-nits`
 
 ### 环境变量
 
@@ -254,7 +254,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
    可以，但需要注意通过`--main`指定主视频。
    - 如果主视频是SDR，则渲染的目标色彩空间是SDR的，HDR视频会进行色调映射
-   - 如果主视频是HDR10，则渲染的目标色彩空间是HDR10的，SDR视频按照参考白(203 nits)进行映射。可通过`--sdr-white-on-hdr`调整该亮度
+   - 如果主视频是HDR10，则渲染的目标色彩空间是HDR10的，SDR视频按照参考白(203 nits)进行映射。可通过`--reference-white`调整该亮度
 
 4. 不兼容的像素格式（如提示`pl_map_avframe_ex() failed`）
 

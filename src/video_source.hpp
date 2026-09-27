@@ -69,6 +69,11 @@ public:
   const char *ColorRange() const { return av_color_range_name(dec_ctx_->color_range); }
   const char *ColorPrimaries() const { return av_color_primaries_name(dec_ctx_->color_primaries); }
   const char *ColorTransfer() const { return av_color_transfer_name(dec_ctx_->color_trc); }
+  // HDR is decided by the transfer function only: PQ (SMPTE ST 2084) and HLG
+  // (ARIB STD-B67). Wide-gamut SDR (e.g. P3) is not HDR and is not treated as such.
+  bool IsHdr() const {
+    return dec_ctx_->color_trc == AVCOL_TRC_SMPTE2084 || dec_ctx_->color_trc == AVCOL_TRC_ARIB_STD_B67;
+  }
   float Bitrate() const { return (float)fmt_ctx_->bit_rate / 1000; }
   float FrameRate() const { return frame_rate_; }
   float TimeBase() const { return time_base_; }

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <map>
@@ -77,24 +78,29 @@ struct EyeQArgs {
   HardwareDecoder hardware_decoder;
 
   std::vector<std::string> icc_profiles; // ICC profile specifications
-  float sdr_white_on_hdr;                // SDR white level (nits) when rendering under HDR
-  bool hdrvivid_render;                  // Apply HDR Vivid 1.0 dynamic metadata on the GPU
-  double target_display_nits;            // Comparison mapping target peak luminance (nits), all modes
-  bool target_display_set;               // Whether --target-display-nits was explicitly passed
-  double source_max_luma;                // Opt-in source HDR max_luma override (nits)
-  bool source_max_luma_set;              // Whether --source-max-luma was explicitly passed
+  // Single SDR reference white (nits). Applied to the source interpretation when the
+  // main video is HDR and to the monitor mapping/wire when monitoring; a pure SDR
+  // desktop is unaffected. Replaces --sdr-white-on-hdr and --monitor-sdr-white.
+  double reference_white;
+  bool reference_white_set;
+  bool hdrvivid_render;       // Apply HDR Vivid 1.0 dynamic metadata on the GPU
+  double target_display_nits; // Comparison mapping target peak luminance (nits), all modes
+  bool target_display_set;    // Whether --target-display-nits was explicitly passed
+  double source_max_luma;     // Opt-in source HDR max_luma override (nits)
+  bool source_max_luma_set;   // Whether --source-max-luma was explicitly passed
 
 #ifdef EYEQ_ENABLE_DECKLINK
   // External monitoring (SDK-enabled builds only). --monitor-device enables it;
-  // --monitor-mode is then required. All values are validated before any output is
-  // enabled. The monitor target is the comparison baseline and is the same
-  // --target-display-nits peak used in every other mode.
-  std::optional<std::string> monitor_device; // index:<n> or id:<persistent-id>
-  std::optional<std::string> monitor_mode;   // WxH@N or WxH@N/D (exact integer rate)
-  std::string monitor_connection = "sdi";
+  // --monitor-mode/--monitor-connection/--monitor-color default to 'auto'. All
+  // values are validated (and every auto choice resolved and logged) before any
+  // output is enabled. The monitor target is the comparison baseline and is the
+  // same --target-display-nits peak used in every other mode.
+  std::optional<std::string> monitor_device; // 'auto', index:<n> or id:<persistent-id>
+  std::optional<std::string> monitor_mode;   // 'auto', WxH@N or WxH@N/D
+  std::string monitor_connection = "auto";
   std::string monitor_pixel_format = "v210";
-  std::string monitor_color_target = "sdr709"; // sdr709 or pq2020
-  double monitor_sdr_white = PL_COLOR_SDR_WHITE;
+  std::string monitor_color_target = "auto"; // auto, sdr709 or pq2020
+  bool monitor_status = false;               // print the device/mode catalog and exit
 #endif
 };
 
@@ -189,8 +195,11 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   option_full_screen->excludes(option_window_size);
 
   app.add_flag("!--no-colorspace-hint", args.colorspace_hint, "Disable colorspace hint to allow tone mapping");
-  app.add_option("--sdr-white-on-hdr", args.sdr_white_on_hdr,
-                 "SDR reference white level in nits when the main video is HDR (default: 203)");
+  app.add_option("--reference-white", args.reference_white,
+                 "SDR reference white in nits (default: 203, ITU-R BT.2408). Used as the SDR white when the main "
+                 "video is HDR and as the monitor mapping/wire SDR white when monitoring. A pure SDR desktop is "
+                 "unaffected. Replaces --sdr-white-on-hdr and --monitor-sdr-white")
+      ->check(CLI::PositiveNumber);
   app.add_flag("--hdrvivid-render", args.hdrvivid_render,
                "Apply HDR Vivid 1.0 dynamic metadata to the common display mapping target on the GPU");
   app.add_option("--target-display-nits", args.target_display_nits,
@@ -263,19 +272,22 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
       ->expected(1, 10);
 
 #ifdef EYEQ_ENABLE_DECKLINK
+  app.add_flag("--monitor-status", args.monitor_status,
+               "Print the DeckLink device/mode catalog (read-only) and exit; does not enable monitoring");
   app.add_option("--monitor-device", args.monitor_device,
                  "Enable monitoring on a DeckLink device; the external monitor becomes the comparison target. "
-                 "Selector is explicit: index:<n> or id:<persistent-id>");
+                 "'auto' picks a playback-capable device, skipping any that is busy; otherwise the selector is "
+                 "explicit: index:<n> or id:<persistent-id>");
   app.add_option("--monitor-mode", args.monitor_mode,
-                 "Native monitor mode as exact integer data: WxH@N or WxH@N/D (e.g. 3840x2160@50 or "
-                 "3840x2160@30000/1001). Required with --monitor-device");
-  app.add_option("--monitor-connection", args.monitor_connection, "Monitor connection: sdi or hdmi (default: sdi)");
+                 "Monitor mode: 'auto' (nearest native mode to the main video, default) or exact integer data "
+                 "WxH@N / WxH@N/D (e.g. 3840x2160@50 or 3840x2160@30000/1001)");
+  app.add_option("--monitor-connection", args.monitor_connection,
+                 "Monitor connection: auto (device's active output, default), sdi or hdmi");
   app.add_option("--monitor-pixel-format", args.monitor_pixel_format,
                  "Monitor pixel format: v210 or r210 (default: v210)");
   app.add_option("--monitor-color", args.monitor_color_target,
-                 "Monitor color target: sdr709 (BT.709/BT.1886) or pq2020 (BT.2020/PQ) (default: sdr709)");
-  app.add_option("--monitor-sdr-white", args.monitor_sdr_white,
-                 "SDR white level (nits) of the common mapping target when monitoring (default: 203)");
+                 "Monitor color target: auto (follows the main video transfer, default), sdr709 "
+                 "(BT.709/BT.1886) or pq2020 (BT.2020/PQ)");
 #endif
 
   try {
@@ -293,19 +305,11 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   // user explicitly passes --source-max-luma.
   args.target_display_set = app.count("--target-display-nits") > 0;
   args.source_max_luma_set = app.count("--source-max-luma") > 0;
+  args.reference_white_set = app.count("--reference-white") > 0;
 
 #ifdef EYEQ_ENABLE_DECKLINK
-  if (args.monitor_device.has_value() && !args.monitor_mode.has_value()) {
-    Logger->critical("--monitor-mode is required with --monitor-device");
-    exit(1);
-  }
   if (!args.monitor_device.has_value() && args.monitor_mode.has_value()) {
     Logger->critical("--monitor-mode requires --monitor-device");
-    exit(1);
-  }
-  // A PQ monitor peak cannot be guessed; refuse instead of defaulting to 1000.
-  if (args.monitor_device.has_value() && args.monitor_color_target == "pq2020" && !args.target_display_set) {
-    Logger->critical("--target-display-nits is required for a pq2020 monitor target (no HDR monitor peak is guessed)");
     exit(1);
   }
 #endif
@@ -452,61 +456,240 @@ static void save_snapshot_frames(const EyeQArgs &args, const FrameSnapshot &snap
 }
 
 #ifdef EYEQ_ENABLE_DECKLINK
+
+static const char *ConnectionName(VideoConnection connection) {
+  return connection == VideoConnection::HDMI ? "hdmi" : "sdi";
+}
+
+static const char *PixelFormatName(PixelFormat format) { return format == PixelFormat::R210 ? "r210" : "v210"; }
+
+static const char *KnownBool(bool known, bool value) { return !known ? "unknown" : (value ? "yes" : "no"); }
+
+// A stable, unambiguous label for logs: index, persistent id and display name.
+static std::string FormatDeviceLabel(const DeviceInfo &device) {
+  std::string label = fmt::format("index:{}", device.index);
+  if (device.has_persistent_id) {
+    label += fmt::format(" id:{}", device.id.persistent_id);
+  }
+  const std::string &name = !device.display_name.empty() ? device.display_name : device.model_name;
+  if (!name.empty()) {
+    label += fmt::format(" \"{}\"", name);
+  }
+  return label;
+}
+
+static std::string FormatConnections(const MonitorConnections &connections) {
+  if (!connections.known) {
+    return "unknown (device did not report them)";
+  }
+  std::string text;
+  if (connections.sdi) {
+    text = "sdi";
+  }
+  if (connections.hdmi) {
+    if (!text.empty()) {
+      text += ",";
+    }
+    text += "hdmi";
+  }
+  return text.empty() ? "none" : text;
+}
+
+static const DeviceInfo *FindCatalogDevice(const DeviceCatalog &catalog, const DeviceId &selector) {
+  if (!selector.persistent_id.empty()) {
+    for (const DeviceInfo &device : catalog.devices) {
+      if (device.has_persistent_id && device.id.persistent_id == selector.persistent_id) {
+        return &device;
+      }
+    }
+    return nullptr;
+  }
+  for (const DeviceInfo &device : catalog.devices) {
+    if (device.index == selector.index) {
+      return &device;
+    }
+  }
+  return nullptr;
+}
+
+// --monitor-status: read-only device/mode catalog, printed and exited before any
+// SDL/GPU/player work. Throws on a hard enumeration failure.
+static void PrintMonitorStatus() {
+  const DeviceCatalog catalog = DeckLinkOutput::Enumerate();
+  if (catalog.status != DeviceCatalog::Status::Ok) {
+    throw std::runtime_error("DeckLink enumeration failed: " + catalog.error);
+  }
+  std::printf("DeckLink API version: %s\n", catalog.api_version.empty() ? "(unknown)" : catalog.api_version.c_str());
+  std::printf("Devices: %zu\n", catalog.devices.size());
+  for (const DeviceInfo &device : catalog.devices) {
+    std::printf("  %s\n", FormatDeviceLabel(device).c_str());
+    std::printf("    playback=%s capture=%s active=%s\n",
+                KnownBool(device.supports_playback_known, device.supports_playback),
+                KnownBool(device.supports_capture_known, device.supports_capture),
+                KnownBool(device.active_known, device.active));
+    std::printf("    output connections: %s\n", FormatConnections(device.connections).c_str());
+    if (device.supports_playback_known && !device.supports_playback) {
+      std::printf("    modes: (device does not support playback)\n");
+      continue;
+    }
+    for (const VideoConnection connection : {VideoConnection::SDI, VideoConnection::HDMI}) {
+      for (const PixelFormat format : {PixelFormat::V210, PixelFormat::R210}) {
+        std::vector<MonitorMode> modes;
+        std::string error;
+        if (!DeckLinkOutput::ListModes(device.id, connection, format, &modes, &error)) {
+          std::printf("    %s/%s: (query failed: %s)\n", ConnectionName(connection), PixelFormatName(format),
+                      error.c_str());
+          continue;
+        }
+        if (modes.empty()) {
+          continue;
+        }
+        std::string line;
+        for (const MonitorMode &mode : modes) {
+          if (!line.empty()) {
+            line += " ";
+          }
+          line += FormatMonitorMode(mode);
+        }
+        std::printf("    %s/%s: %s\n", ConnectionName(connection), PixelFormatName(format), line.c_str());
+      }
+    }
+  }
+}
+
 // Resolves and opens the monitoring output strictly before anything is enabled.
 // Every parse/validation/catalog/open failure throws with a message: an
 // unsupported request is rejected, never silently downgraded to SDR, and no
 // device configuration is written (the catalog query and Open only read).
+//
+// `auto` device/connection/mode/color are explicit, logged choices. A device
+// candidate is only abandoned when opening it fails (e.g. busy) and another
+// playback-capable device exists; a single explicit selector always surfaces the
+// real error. The aggregate of every candidate's failure is reported, never a
+// silent fallback.
 static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, DisplayCoordinator &coordinator,
-                                                   const EyeQArgs &args) {
+                                                   const EyeQArgs &args, bool main_is_hdr, int source_width,
+                                                   int source_height, double source_fps) {
   std::string error;
-  DeviceId selector;
-  if (!ParseDeviceSelector(*args.monitor_device, &selector, &error)) {
-    throw std::runtime_error("--monitor-device: " + error);
-  }
-  VideoConnection connection = VideoConnection::SDI;
-  if (!ParseMonitorConnection(args.monitor_connection, &connection, &error)) {
-    throw std::runtime_error("--monitor-connection: " + error);
-  }
+
   PixelFormat pixel_format = PixelFormat::V210;
   if (!ParseMonitorPixelFormat(args.monitor_pixel_format, &pixel_format, &error)) {
     throw std::runtime_error("--monitor-pixel-format: " + error);
   }
-  MonitorColorTarget color_target = MonitorColorTarget::SdrBt709;
-  if (!ParseMonitorColorTarget(args.monitor_color_target, &color_target, &error)) {
+  MonitorConnectionChoice connection_choice;
+  if (!ParseMonitorConnectionChoice(args.monitor_connection, &connection_choice, &error)) {
+    throw std::runtime_error("--monitor-connection: " + error);
+  }
+  MonitorColorTarget color_requested;
+  if (!ParseMonitorColorTarget(args.monitor_color_target, &color_requested, &error)) {
     throw std::runtime_error("--monitor-color: " + error);
   }
+  bool mode_auto = true;
   MonitorMode requested;
-  if (!ParseMonitorMode(*args.monitor_mode, &requested, &error)) {
+  if (args.monitor_mode.has_value() && !ParseMonitorModeChoice(*args.monitor_mode, &mode_auto, &requested, &error)) {
     throw std::runtime_error("--monitor-mode: " + error);
   }
 
-  // The mode must come from the device's native list; nothing is constructed that
-  // ListModes did not return.
-  std::vector<MonitorMode> modes;
-  if (!DeckLinkOutput::ListModes(selector, connection, pixel_format, &modes, &error)) {
-    throw std::runtime_error("failed to query DeckLink native modes: " + error);
-  }
-  MonitorMode selected;
-  if (!SelectMonitorMode(modes, requested, &selected, &error)) {
-    throw std::runtime_error("--monitor-mode: " + error);
-  }
-
-  OutputRequest request;
-  if (!BuildMonitorOutputRequest(selector, selected, connection, pixel_format, color_target, args.target_display_nits,
-                                 &request, &error)) {
-    throw std::runtime_error("invalid monitor output request: " + error);
+  // The color target follows only the main video's transfer (PQ/HLG -> pq2020).
+  MonitorColorTarget color_target;
+  std::string color_reason;
+  ResolveMonitorColorTarget(color_requested, main_is_hdr, &color_target, &color_reason);
+  // A PQ monitor peak cannot be guessed; refuse instead of defaulting to 1000.
+  if (color_target == MonitorColorTarget::PqBt2020 && !args.target_display_set) {
+    throw std::runtime_error(
+        "--target-display-nits is required for a pq2020 monitor target (no HDR monitor peak is guessed)");
   }
 
-  auto backend = std::make_unique<DeckLinkOutput>();
-  ResolvedOutput resolved;
-  if (!backend->Open(request, &resolved, &error)) {
-    throw std::runtime_error("failed to open the DeckLink output: " + error);
+  const DeviceCatalog catalog = DeckLinkOutput::Enumerate();
+  if (catalog.status != DeviceCatalog::Status::Ok) {
+    throw std::runtime_error("failed to enumerate DeckLink devices: " + catalog.error);
   }
-  Logger->info("Monitoring enabled: mode {} connection {} pixel format {} color target {} monitor peak {:.1f} nits, "
-               "SDR white {:.1f} nits (paced playback in sync with the desktop)",
-               FormatMonitorMode(resolved.mode), args.monitor_connection, args.monitor_pixel_format,
-               MonitorColorTargetLabel(color_target), args.target_display_nits, args.monitor_sdr_white);
-  return std::make_unique<MonitorOutput>(context, coordinator, std::move(backend), resolved);
+
+  // Ordered candidates: 'auto' is every playback-capable device in enumeration
+  // order; an explicit selector is exactly one candidate resolved against the
+  // catalog so its connection mask is available exactly as for auto.
+  std::vector<DeviceInfo> candidates;
+  if (args.monitor_device.has_value() && *args.monitor_device != "auto") {
+    DeviceId selector;
+    if (!ParseDeviceSelector(*args.monitor_device, &selector, &error)) {
+      throw std::runtime_error("--monitor-device: " + error);
+    }
+    const DeviceInfo *found = FindCatalogDevice(catalog, selector);
+    if (found == nullptr) {
+      throw std::runtime_error("--monitor-device: device not found: " + *args.monitor_device);
+    }
+    candidates.push_back(*found);
+  } else {
+    for (const DeviceInfo &device : catalog.devices) {
+      if (device.supports_playback_known && device.supports_playback) {
+        candidates.push_back(device);
+      }
+    }
+    if (candidates.empty()) {
+      throw std::runtime_error("--monitor-device auto: no playback-capable DeckLink device found");
+    }
+  }
+
+  std::string aggregate;
+  for (const DeviceInfo &device : candidates) {
+    std::string device_error;
+    try {
+      VideoConnection connection = VideoConnection::SDI;
+      std::string connection_reason;
+      if (!ResolveMonitorConnection(connection_choice, device.connections, &connection, &connection_reason,
+                                    &device_error)) {
+        throw std::runtime_error("--monitor-connection: " + device_error);
+      }
+
+      // The mode must come from the device's native list; nothing is constructed
+      // that ListModes did not return.
+      std::vector<MonitorMode> modes;
+      if (!DeckLinkOutput::ListModes(device.id, connection, pixel_format, &modes, &device_error)) {
+        throw std::runtime_error("failed to query DeckLink native modes: " + device_error);
+      }
+      MonitorMode selected;
+      std::string mode_reason;
+      if (mode_auto) {
+        if (!SelectMonitorModeForSource(modes, source_width, source_height, source_fps, &selected, &mode_reason,
+                                        &device_error)) {
+          throw std::runtime_error("--monitor-mode: " + device_error);
+        }
+      } else {
+        if (!SelectMonitorMode(modes, requested, &selected, &device_error)) {
+          throw std::runtime_error("--monitor-mode: " + device_error);
+        }
+        mode_reason = "explicit";
+      }
+
+      OutputRequest request;
+      if (!BuildMonitorOutputRequest(device.id, selected, connection, pixel_format, color_target,
+                                     args.target_display_nits, &request, &device_error)) {
+        throw std::runtime_error("invalid monitor output request: " + device_error);
+      }
+
+      auto backend = std::make_unique<DeckLinkOutput>();
+      ResolvedOutput resolved;
+      if (!backend->Open(request, &resolved, &device_error)) {
+        throw std::runtime_error("failed to open the DeckLink output: " + device_error);
+      }
+      Logger->info("Monitoring enabled: device {} mode {} ({}) connection {} ({}) pixel format {} color target {} "
+                   "({}), monitor peak {:.1f} nits, reference white {:.1f} nits (paced playback in sync with the "
+                   "desktop)",
+                   FormatDeviceLabel(device), FormatMonitorMode(resolved.mode), mode_reason,
+                   ConnectionName(resolved.connection), connection_reason, PixelFormatName(pixel_format),
+                   MonitorColorTargetLabel(color_target), color_reason, args.target_display_nits, args.reference_white);
+      return std::make_unique<MonitorOutput>(context, coordinator, std::move(backend), resolved);
+    } catch (const std::exception &e) {
+      if (candidates.size() == 1) {
+        throw; // a single candidate surfaces its real error unchanged
+      }
+      if (!aggregate.empty()) {
+        aggregate += "; ";
+      }
+      aggregate += FormatDeviceLabel(device) + ": " + e.what();
+    }
+  }
+  throw std::runtime_error("no monitor device could be opened: " + aggregate);
 }
 #endif
 
@@ -535,7 +718,8 @@ int main(int argc, char **argv) {
       .save_render_format = "dpx",
       .log_level = LoggingLevel::INFO,
       .hardware_decoder = HardwareDecoder::Auto,
-      .sdr_white_on_hdr = 0,
+      .reference_white = PL_COLOR_SDR_WHITE,
+      .reference_white_set = false,
       .hdrvivid_render = false,
       .target_display_nits = 1000.0,
       .target_display_set = false,
@@ -545,6 +729,19 @@ int main(int argc, char **argv) {
 
   parse_args(args, argc, argv);
   set_log_level(args.log_level);
+
+#ifdef EYEQ_ENABLE_DECKLINK
+  // A read-only catalog print; it enables nothing and exits before SDL/GPU work.
+  if (args.monitor_status) {
+    try {
+      PrintMonitorStatus();
+    } catch (const std::exception &e) {
+      Logger->critical("{}", e.what());
+      return 1;
+    }
+    return 0;
+  }
+#endif
 
   if (args.target_display_set && (args.target_display_nits <= 0.0 || args.target_display_nits > 10000.0)) {
     Logger->critical("--target-display-nits must be in the range (0, 10000] nits");
@@ -694,6 +891,10 @@ int main(int argc, char **argv) {
   bool monitoring = false;
 #ifdef EYEQ_ENABLE_DECKLINK
   monitoring = args.monitor_device.has_value();
+  // The main video's transfer decides the auto monitor color target: PQ/HLG is
+  // HDR, everything else (including wide-gamut SDR) is SDR. Primaries are never
+  // used for this choice.
+  const bool main_is_hdr = player.GetVideoSource(args.main_id)->IsHdr();
 #endif
 
   DisplayCoordinator::Config coordinator_config;
@@ -708,11 +909,12 @@ int main(int argc, char **argv) {
   coordinator_config.hdrvivid = args.hdrvivid_render;
   coordinator_config.mapping_target.primaries = PL_COLOR_PRIM_BT_2020;
   const float mapping_peak = static_cast<float>(args.target_display_nits);
-#ifdef EYEQ_ENABLE_DECKLINK
-  const float mapping_sdr_white = monitoring ? static_cast<float>(args.monitor_sdr_white) : PL_COLOR_SDR_WHITE;
-#else
-  const float mapping_sdr_white = PL_COLOR_SDR_WHITE;
-#endif
+  const float reference_white = static_cast<float>(args.reference_white);
+  // The reference white only affects a pipeline where SDR and HDR meet: as the
+  // source SDR white when the main video is HDR (SetSdrWhiteOnHdr below) and as
+  // the monitor mapping/wire SDR white when monitoring. A pure SDR desktop keeps
+  // the libplacebo default and is unaffected.
+  const float mapping_sdr_white = monitoring ? reference_white : PL_COLOR_SDR_WHITE;
   coordinator_config.mapping_target.peak_nits = mapping_peak;
   coordinator_config.mapping_target.black_nits = 0.0f;
   coordinator_config.mapping_target.sdr_white_nits = mapping_sdr_white;
@@ -751,8 +953,8 @@ int main(int argc, char **argv) {
                  args.icc_profiles.size());
   }
 
-  if (args.sdr_white_on_hdr > 0) {
-    coordinator->SetSdrWhiteOnHdr(args.sdr_white_on_hdr);
+  if (args.reference_white_set) {
+    coordinator->SetSdrWhiteOnHdr(reference_white);
   }
   coordinator->SetMainSource(args.main_id);
 
@@ -762,7 +964,8 @@ int main(int argc, char **argv) {
     // The external monitor target is the same --target-display-nits peak used in
     // every other mode (applied through the coordinator's mapping target above).
     try {
-      monitor = SetupMonitor(window.context(), *coordinator, args);
+      monitor = SetupMonitor(window.context(), *coordinator, args, main_is_hdr, player.Width(), player.Height(),
+                             player.FrameRate());
     } catch (const std::exception &e) {
       // No output was enabled; release the GPU resources before SDL_Quit so the
       // failure path follows the same ordering rule as the normal exit path.

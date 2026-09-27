@@ -1,7 +1,9 @@
 #include "output/monitor_cli.hpp"
 
 #include <charconv>
+#include <cmath>
 #include <limits>
+#include <sstream>
 #include <system_error>
 
 #include "output/decklink/monitor_mode.hpp"
@@ -95,16 +97,72 @@ bool ParseDeviceSelector(const std::string &text, DeviceId *selector, std::strin
   return Fail(error, "unknown device selector kind '" + kind + "': use 'index:' or 'id:'");
 }
 
-bool ParseMonitorConnection(const std::string &text, VideoConnection *out, std::string *error) {
+bool ParseMonitorConnectionChoice(const std::string &text, MonitorConnectionChoice *out, std::string *error) {
+  if (text == "auto") {
+    *out = MonitorConnectionChoice::Auto;
+    return true;
+  }
   if (text == "sdi") {
-    *out = VideoConnection::SDI;
+    *out = MonitorConnectionChoice::Sdi;
     return true;
   }
   if (text == "hdmi") {
-    *out = VideoConnection::HDMI;
+    *out = MonitorConnectionChoice::Hdmi;
     return true;
   }
-  return Fail(error, "monitor connection '" + text + "' must be 'sdi' or 'hdmi'");
+  return Fail(error, "monitor connection '" + text + "' must be 'auto', 'sdi' or 'hdmi'");
+}
+
+const char *MonitorConnectionChoiceLabel(MonitorConnectionChoice choice) {
+  switch (choice) {
+  case MonitorConnectionChoice::Auto:
+    return "auto";
+  case MonitorConnectionChoice::Sdi:
+    return "sdi";
+  case MonitorConnectionChoice::Hdmi:
+    return "hdmi";
+  }
+  return "?";
+}
+
+bool ResolveMonitorConnection(MonitorConnectionChoice requested, const MonitorConnections &connections,
+                              VideoConnection *out, std::string *reason, std::string *error) {
+  switch (requested) {
+  case MonitorConnectionChoice::Sdi:
+    *out = VideoConnection::SDI;
+    if (reason != nullptr) {
+      *reason = "explicit sdi";
+    }
+    return true;
+  case MonitorConnectionChoice::Hdmi:
+    *out = VideoConnection::HDMI;
+    if (reason != nullptr) {
+      *reason = "explicit hdmi";
+    }
+    return true;
+  case MonitorConnectionChoice::Auto:
+    break;
+  }
+
+  if (!connections.known) {
+    return Fail(error, "cannot auto-select the monitor connection: the device did not report its output "
+                       "connections; pass --monitor-connection sdi|hdmi explicitly");
+  }
+  if (connections.sdi) {
+    *out = VideoConnection::SDI;
+    if (reason != nullptr) {
+      *reason = "auto: device reports SDI";
+    }
+    return true;
+  }
+  if (connections.hdmi) {
+    *out = VideoConnection::HDMI;
+    if (reason != nullptr) {
+      *reason = "auto: device reports only HDMI";
+    }
+    return true;
+  }
+  return Fail(error, "cannot auto-select the monitor connection: the device reports neither SDI nor HDMI output");
 }
 
 bool ParseMonitorPixelFormat(const std::string &text, PixelFormat *out, std::string *error) {
@@ -120,6 +178,10 @@ bool ParseMonitorPixelFormat(const std::string &text, PixelFormat *out, std::str
 }
 
 bool ParseMonitorColorTarget(const std::string &text, MonitorColorTarget *out, std::string *error) {
+  if (text == "auto") {
+    *out = MonitorColorTarget::Auto;
+    return true;
+  }
   if (text == "sdr709") {
     *out = MonitorColorTarget::SdrBt709;
     return true;
@@ -128,7 +190,26 @@ bool ParseMonitorColorTarget(const std::string &text, MonitorColorTarget *out, s
     *out = MonitorColorTarget::PqBt2020;
     return true;
   }
-  return Fail(error, "monitor color target '" + text + "' must be 'sdr709' (BT.709/BT.1886) or 'pq2020' (BT.2020/PQ)");
+  return Fail(error,
+              "monitor color target '" + text + "' must be 'auto', 'sdr709' (BT.709/BT.1886) or 'pq2020' (BT.2020/PQ)");
+}
+
+bool ResolveMonitorColorTarget(MonitorColorTarget requested, bool main_is_hdr, MonitorColorTarget *out,
+                               std::string *reason) {
+  if (requested != MonitorColorTarget::Auto) {
+    *out = requested;
+    if (reason != nullptr) {
+      *reason = "explicit";
+    }
+    return true;
+  }
+  // The choice is driven by the transfer function, never by primaries: BT.2020 is
+  // a superset of wide-gamut SDR (P3) and is only paired with a PQ wire.
+  *out = main_is_hdr ? MonitorColorTarget::PqBt2020 : MonitorColorTarget::SdrBt709;
+  if (reason != nullptr) {
+    *reason = main_is_hdr ? "auto: main video is HDR (PQ/HLG)" : "auto: main video is SDR";
+  }
+  return true;
 }
 
 bool ParseMonitorMode(const std::string &text, MonitorMode *out, std::string *error) {
@@ -174,6 +255,118 @@ bool ParseMonitorMode(const std::string &text, MonitorMode *out, std::string *er
   return true;
 }
 
+bool ParseMonitorModeChoice(const std::string &text, bool *is_auto, MonitorMode *explicit_mode, std::string *error) {
+  if (text == "auto") {
+    *is_auto = true;
+    *explicit_mode = MonitorMode{};
+    return true;
+  }
+  *is_auto = false;
+  return ParseMonitorMode(text, explicit_mode, error);
+}
+
+bool IsMonitorModeWhitelisted(const MonitorMode &mode) {
+  return (mode.width == 1920 && mode.height == 1080) || (mode.width == 3840 && mode.height == 2160);
+}
+
+namespace {
+
+double ModeFps(const MonitorMode &mode) {
+  return mode.frame_duration > 0 ? static_cast<double>(mode.time_scale) / static_cast<double>(mode.frame_duration)
+                                 : 0.0;
+}
+
+// Smallest-area mode that covers the source; when none covers, the largest area.
+bool PreferResolution(const MonitorMode &candidate, const MonitorMode &current, int source_width, int source_height) {
+  const bool candidate_covers = candidate.width >= source_width && candidate.height >= source_height;
+  const bool current_covers = current.width >= source_width && current.height >= source_height;
+  if (candidate_covers != current_covers) {
+    return candidate_covers; // covering beats not covering
+  }
+  const int64_t candidate_area = static_cast<int64_t>(candidate.width) * candidate.height;
+  const int64_t current_area = static_cast<int64_t>(current.width) * current.height;
+  if (candidate_covers) {
+    return candidate_area < current_area; // least upscale among covering modes
+  }
+  return candidate_area > current_area; // least downscale among non-covering modes
+}
+
+} // namespace
+
+bool SelectMonitorModeForSource(const std::vector<MonitorMode> &modes, int source_width, int source_height,
+                                double source_fps, MonitorMode *out, std::string *reason, std::string *error) {
+  if (source_width <= 0 || source_height <= 0) {
+    return Fail(error, "cannot auto-select a monitor mode: the main video size is unknown; pass --monitor-mode");
+  }
+  if (!std::isfinite(source_fps) || source_fps <= 0.0) {
+    return Fail(error, "cannot auto-select a monitor mode: the main video frame rate is unknown; pass "
+                       "--monitor-mode");
+  }
+
+  // Prefer whitelisted modes whenever the device has any; a mode outside the
+  // whitelist would be rejected by Open, so auto should not choose one needlessly.
+  std::vector<const MonitorMode *> progressive;
+  std::vector<const MonitorMode *> whitelisted;
+  for (const MonitorMode &mode : modes) {
+    if (!mode.is_progressive) {
+      continue;
+    }
+    progressive.push_back(&mode);
+    if (IsMonitorModeWhitelisted(mode)) {
+      whitelisted.push_back(&mode);
+    }
+  }
+  const std::vector<const MonitorMode *> &pool = whitelisted.empty() ? progressive : whitelisted;
+  if (pool.empty()) {
+    return Fail(error, "cannot auto-select a monitor mode: the device lists no progressive mode for this "
+                       "connection and pixel format");
+  }
+
+  constexpr double kRateEpsilon = 5e-3; // separates 30000/1001 from 30000/1000 and nothing finer
+  const MonitorMode *rate_choice = nullptr;
+  for (const MonitorMode *mode : pool) {
+    if (std::fabs(ModeFps(*mode) - source_fps) <= kRateEpsilon) {
+      rate_choice = mode;
+      break;
+    }
+  }
+  bool exact = rate_choice != nullptr;
+  if (rate_choice == nullptr) {
+    for (const MonitorMode *mode : pool) {
+      const double fps = ModeFps(*mode);
+      if (fps >= source_fps - kRateEpsilon && (rate_choice == nullptr || fps < ModeFps(*rate_choice))) {
+        rate_choice = mode; // lowest rate not below the source (no dropped frames)
+      }
+    }
+  }
+  if (rate_choice == nullptr) {
+    for (const MonitorMode *mode : pool) {
+      if (rate_choice == nullptr || ModeFps(*mode) > ModeFps(*rate_choice)) {
+        rate_choice = mode; // highest rate below the source
+      }
+    }
+  }
+
+  const MonitorMode *best = nullptr;
+  for (const MonitorMode *mode : pool) {
+    if (std::fabs(ModeFps(*mode) - ModeFps(*rate_choice)) > kRateEpsilon) {
+      continue;
+    }
+    if (best == nullptr || PreferResolution(*mode, *best, source_width, source_height)) {
+      best = mode;
+    }
+  }
+
+  *out = *best;
+  if (reason != nullptr) {
+    std::ostringstream text;
+    text << "auto: source " << source_width << "x" << source_height << " @ " << source_fps << " fps -> "
+         << FormatMonitorMode(*best) << " (" << (exact ? "exact rate" : "nearest rate") << ")";
+    *reason = text.str();
+  }
+  return true;
+}
+
 bool SelectMonitorMode(const std::vector<MonitorMode> &modes, const MonitorMode &requested, MonitorMode *out,
                        std::string *error) {
   for (const MonitorMode &mode : modes) {
@@ -201,6 +394,9 @@ bool BuildMonitorOutputRequest(const DeviceId &device, const MonitorMode &mode, 
   request.color.encoding.range = ColorRange::Video;
   request.color.encoding.chroma_loc = ChromaLocation::Left;
   request.color.target_nits = target_nits;
+  if (color_target == MonitorColorTarget::Auto) {
+    return Fail(error, "internal error: monitor color target was not resolved before building the request");
+  }
   if (color_target == MonitorColorTarget::PqBt2020) {
     request.color.encoding.primaries = ColorPrimaries::BT2020;
     request.color.encoding.transfer = ColorTransfer::PQ;
@@ -220,7 +416,15 @@ bool BuildMonitorOutputRequest(const DeviceId &device, const MonitorMode &mode, 
 }
 
 const char *MonitorColorTargetLabel(MonitorColorTarget target) {
-  return target == MonitorColorTarget::PqBt2020 ? "pq2020" : "sdr709";
+  switch (target) {
+  case MonitorColorTarget::Auto:
+    return "auto";
+  case MonitorColorTarget::SdrBt709:
+    return "sdr709";
+  case MonitorColorTarget::PqBt2020:
+    return "pq2020";
+  }
+  return "?";
 }
 
 } // namespace EYEQ

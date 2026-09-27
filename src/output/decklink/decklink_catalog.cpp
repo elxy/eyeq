@@ -71,11 +71,12 @@ DeviceInfo ReadDeviceInfo(IDeckLink *device, int index) {
   }
 
   IDeckLinkProfileAttributes *attributes = nullptr;
-  if (device->QueryInterface(IID_IDeckLinkProfileAttributes, reinterpret_cast<void **>(&attributes)) != S_OK ||
-      attributes == nullptr) {
-    return info;
+  const bool attributes_available =
+      device->QueryInterface(IID_IDeckLinkProfileAttributes, reinterpret_cast<void **>(&attributes)) == S_OK &&
+      attributes != nullptr;
+  if (attributes_available) {
+    info.profile_attributes_available = true;
   }
-  info.profile_attributes_available = true;
 
   int64_t value = 0;
   if (attributes->GetInt(BMDDeckLinkPersistentID, &value) == S_OK) {
@@ -96,7 +97,53 @@ DeviceInfo ReadDeviceInfo(IDeckLink *device, int index) {
     info.active = duplex != bmdDuplexInactive;
     info.active_known = true;
   }
-  attributes->Release();
+
+  // Output connectors for --monitor-connection auto. The configured/active output
+  // (IDeckLinkConfiguration) is preferred; the capability mask is only a fallback,
+  // so a device that reports "no connector" but still lists SDI capability is not
+  // silently guessed. A zero configured mask falls through to the capability.
+  bool capability_known = false;
+  bool capability_sdi = false;
+  bool capability_hdmi = false;
+  if (attributes_available) {
+    int64_t connections = 0;
+    if (attributes->GetInt(BMDDeckLinkVideoOutputConnections, &connections) == S_OK) {
+      capability_known = true;
+      capability_sdi = (connections & bmdVideoConnectionSDI) != 0;
+      capability_hdmi = (connections & bmdVideoConnectionHDMI) != 0;
+    }
+  }
+
+  bool configured_known = false;
+  bool configured_sdi = false;
+  bool configured_hdmi = false;
+  IDeckLinkConfiguration *configuration = nullptr;
+  if (device->QueryInterface(IID_IDeckLinkConfiguration, reinterpret_cast<void **>(&configuration)) == S_OK &&
+      configuration != nullptr) {
+    int64_t configured = 0;
+    if (configuration->GetInt(bmdDeckLinkConfigVideoOutputConnection, &configured) == S_OK) {
+      configured_known = true;
+      configured_sdi = (configured & bmdVideoConnectionSDI) != 0;
+      configured_hdmi = (configured & bmdVideoConnectionHDMI) != 0;
+    }
+    configuration->Release();
+  }
+
+  if (configured_known && (configured_sdi || configured_hdmi)) {
+    info.connections.known = true;
+    info.connections.sdi = configured_sdi;
+    info.connections.hdmi = configured_hdmi;
+  } else if (capability_known) {
+    info.connections.known = true;
+    info.connections.sdi = capability_sdi;
+    info.connections.hdmi = capability_hdmi;
+  } else if (configured_known) {
+    info.connections.known = true; // genuinely reported no SDI/HDMI output
+  }
+
+  if (attributes_available) {
+    attributes->Release();
+  }
   return info;
 }
 

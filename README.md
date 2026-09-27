@@ -203,7 +203,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--filter <filter>`: Default video filter applied to videos without a per-video filter, using [FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html) syntax. Per-video filters can be appended after the video path with `@`, e.g. `video.mp4@"filter"`
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
 - `--no-colorspace-hint`: Disable video color space hinting; uses the default color space instead. Enable this for tone mapping when the display does not support HDR
-- `--sdr-white-on-hdr <nits>`: Set the SDR reference white level (in nits) when the main video is HDR. By default, SDR videos are mapped using the standard reference white of 203 nits (ITU-R BT.2408). This option only takes effect when the main video is HDR and the target video is SDR
+- `--reference-white <nits>`: Single SDR reference white level in nits (default 203, ITU-R BT.2408). It is used as the source SDR white when the main video is HDR and as the monitor mapping/wire SDR white when monitoring; a pure SDR desktop is unaffected. Replaces `--sdr-white-on-hdr` and `--monitor-sdr-white`
 - `--target-display-nits <nits>`: Peak luminance of the mapping target in nits: for normal playback it is the display mapping target (and also the target display luminance the Vivid curve is solved against under `--hdrvivid-render`); when monitoring it is the monitor peak. Required for a `pq2020` monitor target (a physical monitor has no guessable default); otherwise it defaults to 1000.
 - `--source-max-luma <nits>`: Opt-in override of the source HDR mastering/content peak (`pl_color_space.hdr.max_luma`) in nits. Use it when the source peak is untrusted (HLG, DPX read-back).
 - `--hdrvivid-render`: Enable HDR Vivid rendering.
@@ -219,12 +219,12 @@ After launching, the following keyboard and mouse controls are available:
 - `--icc-profile <profile>`: ICC color management — `auto` uses the system profile (macOS only); a file path specifies a custom ICC profile; `N:path` specifies a profile for a specific video
 - `--loglevel <level>`: Log level — `debug`, `info`, `warning`, `error`, `critical`, `off` (default `info`)
 - `--debug`: Equivalent to `--loglevel debug`
-- `--monitor-device <selector>`: Enable monitoring on a DeckLink device. The selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`); the macOS system color management itself is untouched
-- `--monitor-mode <WxH@N|WxH@N/D>`: Native monitor mode as exact integer data, e.g. `3840x2160@50` or `3840x2160@30000/1001`. Required with `--monitor-device`; a mode the device does not natively support is rejected
-- `--monitor-connection {sdi,hdmi}`: Output connection (default `sdi`)
+- `--monitor-status`: Print the read-only DeckLink device/mode catalog (devices, capabilities, output connections, and the native modes per connection/pixel format) and exit. It enables nothing
+- `--monitor-device <auto|selector>`: Enable monitoring on a DeckLink device. `auto` picks a playback-capable device, skipping any that is busy (if every candidate fails, the reason for each is reported); otherwise the selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`); the macOS system color management itself is untouched
+- `--monitor-mode <auto|WxH@N|WxH@N/D>`: Monitor mode. `auto` (default) picks the native mode closest to the main video (exact rate first, then the lowest rate not below the source; within that rate the smallest mode covering the source). An explicit value is exact integer data, e.g. `3840x2160@50` or `3840x2160@30000/1001`, and a mode the device does not natively support is rejected
+- `--monitor-connection {auto,sdi,hdmi}`: Output connection. `auto` (default) follows the device's already active output, preferring SDI when the device reports it; the actual wiring is not probed, so use an explicit value if the device reports both
 - `--monitor-pixel-format {v210,r210}`: Output pixel format (default `v210`)
-- `--monitor-color {sdr709,pq2020}`: Color target — `sdr709` (BT.709 / BT.1886) or `pq2020` (BT.2020 / PQ) (default `sdr709`)
-- `--monitor-sdr-white <nits>`: SDR white level of the common mapping target when monitoring (default 203 nits)
+- `--monitor-color {auto,sdr709,pq2020}`: Color target. `auto` (default) follows the main video's transfer function only — PQ/HLG selects `pq2020`, everything else (including wide-gamut SDR such as P3) selects `sdr709`. `sdr709` is BT.709 / BT.1886; `pq2020` is BT.2020 / PQ and requires `--target-display-nits`
 
 ### Environment Variables
 
@@ -256,7 +256,7 @@ After launching, the following keyboard and mouse controls are available:
 
    Yes, but you need to use `--main` to specify the main video.
    - If the main video is SDR, the target color space is SDR, and HDR videos will be tone-mapped
-   - If the main video is HDR10, the target color space is HDR10, and SDR videos will be mapped using a reference white of 203 nits. Use `--sdr-white-on-hdr` to override this value
+   - If the main video is HDR10, the target color space is HDR10, and SDR videos will be mapped using a reference white of 203 nits. Use `--reference-white` to override this value
 
 4. **Incompatible pixel format (e.g. `pl_map_avframe_ex() failed`)**
 

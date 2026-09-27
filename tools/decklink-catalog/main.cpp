@@ -83,6 +83,26 @@ void PrintDevices(const EYEQ::DeviceCatalog &catalog) {
                   KnownBool(device.supports_capture_known, device.supports_capture),
                   KnownBool(device.active_known, device.active));
     }
+    // The connection mask is read from the configured output first, so an
+    // "unknown" here means neither query succeeded, never a definite "none".
+    std::string connections;
+    if (!device.connections.known) {
+      connections = "unknown";
+    } else {
+      if (device.connections.sdi) {
+        connections = "sdi";
+      }
+      if (device.connections.hdmi) {
+        if (!connections.empty()) {
+          connections += ",";
+        }
+        connections += "hdmi";
+      }
+      if (connections.empty()) {
+        connections = "none";
+      }
+    }
+    std::printf("      output connections: %s\n", connections.c_str());
   }
 }
 

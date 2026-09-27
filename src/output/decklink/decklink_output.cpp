@@ -910,8 +910,7 @@ bool DeckLinkOutput::Open(const OutputRequest &request, ResolvedOutput *resolved
 
   // 1A-2 stage constraint: first version supports only these progressive modes.
   const MonitorMode &mode = request.mode;
-  const bool whitelisted = (mode.width == 1920 && mode.height == 1080) || (mode.width == 3840 && mode.height == 2160);
-  if (!whitelisted) {
+  if (!IsMonitorModeWhitelisted(mode)) {
     return impl.AbortOpen(error, "mode is not in the first-version whitelist (1920x1080 or 3840x2160)");
   }
 

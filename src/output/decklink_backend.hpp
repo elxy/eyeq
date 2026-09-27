@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "output/frame_sink.hpp"
+#include "output/monitor_cli.hpp"
 #include "output/output_profile.hpp"
 
 namespace EYEQ {
@@ -29,6 +30,10 @@ struct DeviceInfo {
   bool supports_capture_known = false;
   bool active = false; // false when the sub-device has no active connectors
   bool active_known = false;
+  // Output connectors (SDI/HDMI), preferring the configured/active output over the
+  // capability mask. `known` stays false when neither query succeeded; this feeds
+  // --monitor-connection auto and is never treated as a definite "no connector".
+  MonitorConnections connections;
 };
 
 // Result of a read-only device enumeration.
