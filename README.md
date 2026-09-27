@@ -230,6 +230,10 @@ A build made with `-DEYEQ_ENABLE_DECKLINK=ON` and the DeckLink SDK can send the 
 - `--monitor-target-nits <nits>`: Monitor peak luminance in nits, i.e. the comparison target. Required for a `pq2020` target and never derived from `--target-display-nits`. For an `sdr709` target it defaults to 100 nits when omitted
 - `--monitor-sdr-white <nits>`: SDR white level of the common mapping target when monitoring (default 203 nits)
 
+A terminal output failure — the sink reports an error, loses the device, or closes — stops monitoring for the rest of the run. EyeQ logs the failure and keeps the desktop running, but there is no automatic restart: **restart the player to recover monitoring**. Non-terminal per-request failures (for example a `FramePacker` readback failure) are reported and the module keeps working; a failed request is never retried silently.
+
+The wire encode is intentionally **dither-free**: the display-linear result is quantized to 10-bit without dithering so the output bytes stay deterministic for tests and objective measurement. Banding in smooth gradients is a known, accepted consequence. Use `r210` (RGB 4:4:4) for the cleanest signal; `v210`'s 4:2:2 chroma is a property of the format, not an extra processing step.
+
 When monitoring is enabled, `--target-display-nits` keeps its historical, opt-in meaning (it overrides the source HDR `max_luma`) and never changes the monitor/comparison target; passing both logs that the external output is unaffected.
 
 ### Environment Variables
