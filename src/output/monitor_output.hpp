@@ -1,14 +1,10 @@
 #pragma once
 
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
-extern "C" {
-#include <libavutil/frame.h>
-}
 #include <libplacebo/gpu.h>
 #include <libplacebo/renderer.h>
 
@@ -100,7 +96,7 @@ public:
     Outcome outcome = Outcome::None;
     uint64_t submit_id = 0;
     uint64_t source_frame_serial = 0;
-    std::string stage;  // failure/cancel stage: submit, config, feed, render, pack, still, event, cancel, close
+    std::string stage;  // failure/cancel stage: submit, config, render, pack, still, event, cancel, close
     std::string reason; // human-readable detail for Failed, empty otherwise
   };
 
@@ -138,8 +134,8 @@ public:
    * Low-level submit of an explicit request. Accepted: the request is in flight
    * and the GPU work was submitted; call Pump()/Tick(). Busy: a request is already
    * in flight; @p request is not read, mapped or modified at all. Failed: the
-   * request could not be started (config/feed/render/pack) or the sink rejected
-   * it; see last_result(). Closed: Close() was called.
+   * request could not be started (config/render/pack) or the sink rejected it;
+   * see last_result(). Closed: Close() was called.
    */
   SubmitOutcome Submit(Request &request);
 
@@ -236,7 +232,6 @@ private:
   bool drain_pending_ = false;
   bool cancel_requested_ = false;
   StagingSlot *slot_ = nullptr;
-  std::map<int, std::shared_ptr<AVFrame>> in_flight_frames_;
   SubmissionInfo in_flight_info_{};
 
   StepResult last_result_{};
