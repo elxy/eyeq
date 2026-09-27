@@ -203,9 +203,9 @@ After launching, the following keyboard and mouse controls are available:
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
 - `--no-colorspace-hint`: Disable video color space hinting; uses the default color space instead. Enable this for tone mapping when the display does not support HDR
 - `--sdr-white-on-hdr <nits>`: Set the SDR reference white level (in nits) when the main video is HDR. By default, SDR videos are mapped using the standard reference white of 203 nits (ITU-R BT.2408). This option only takes effect when the main video is HDR and the target video is SDR
-- `--target-display-nits <nits>`: Comparison mapping target peak luminance in nits. This is the single entry for the comparison baseline in every mode: it is the common display mapping target (and therefore the Vivid curve's target display luminance) and the external monitor peak when monitoring. For a `pq2020` monitor target it is required (a physical monitor has no guessable default); otherwise it defaults to 1000. It no longer overrides the source HDR `max_luma` — that role moved to `--source-max-luma`, with no compatibility mapping (an intentional behavior fix)
+- `--target-display-nits <nits>`: Peak luminance of the common mapping target in nits — the single comparison baseline in every mode. With `--hdrvivid-render` it is also the target display luminance the Vivid curve is solved against; when monitoring is enabled it is the external monitor peak. Required for a `pq2020` monitor target (a physical monitor has no guessable default); otherwise it defaults to 1000. To override a source's own HDR peak, use `--source-max-luma`
 - `--source-max-luma <nits>`: Opt-in override of the source HDR mastering/content peak (`pl_color_space.hdr.max_luma`) in nits. Use it when the source peak is untrusted (HLG, DPX read-back); it affects only sources that go through libplacebo's normal tone mapping, never rewrites the bitstream's dynamic metadata (the Vivid tml/rml anchors are part of the stream and stay untouched), and is decoupled from the mapping target
-- `--hdrvivid-render`: Apply HDR Vivid 1.0 dynamic metadata with a GPU tone-mapping curve. Each frame that carries CUVA metadata is mapped to the common display mapping target (`--target-display-nits`, or the external monitor peak when monitoring) through the same single renderer every other source uses, so Vivid and Dolby Vision are compared in one display-linear space. Sources without Vivid metadata are left untouched, and the source's mastering/dynamic metadata is never rewritten into the public result
+- `--hdrvivid-render`: Apply HDR Vivid 1.0 dynamic metadata with a GPU tone-mapping curve. Each frame that carries CUVA metadata is mapped to the common display mapping target (`--target-display-nits`) through the same single renderer every other source uses, so Vivid and Dolby Vision are compared in one display-linear space. Sources without Vivid metadata are left untouched, and the source's mastering/dynamic metadata is never rewritten into the public result
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
 - `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
@@ -230,11 +230,11 @@ A build made with `-DEYEQ_ENABLE_DECKLINK=ON` and the DeckLink SDK can send the 
 - `--monitor-color {sdr709,pq2020}`: Color target — `sdr709` (BT.709 / BT.1886) or `pq2020` (BT.2020 / PQ) (default `sdr709`)
 - `--monitor-sdr-white <nits>`: SDR white level of the common mapping target when monitoring (default 203 nits)
 
-A terminal output failure — the sink reports an error, loses the device, or closes — stops monitoring for the rest of the run. EyeQ logs the failure and keeps the desktop running, but there is no automatic restart: **restart the player to recover monitoring**. Non-terminal per-request failures (for example a `FramePacker` readback failure) are reported and the module keeps working; a failed request is never retried silently.
+A terminal monitor failure — a device error, a lost device, or a closed output — stops monitoring for the rest of the run: EyeQ logs the failure and keeps the desktop running, and monitoring only comes back after a player restart. A recoverable per-request failure (for example a `FramePacker` readback failure) is reported and the module keeps working; a failed request is not retried.
 
-The wire encode is intentionally **dither-free**: the display-linear result is quantized to 10-bit without dithering so the output bytes stay deterministic for tests and objective measurement. Banding in smooth gradients is a known, accepted consequence. Use `r210` (RGB 4:4:4) for the cleanest signal; `v210`'s 4:2:2 chroma is a property of the format, not an extra processing step.
+The monitor output quantizes the display-linear result directly to 10-bit without adding dither, so the output bytes are deterministic for tests and objective measurement; smooth gradients may show slight banding. `v210`'s 4:2:2 chroma subsampling comes with the format; `r210` (RGB 4:4:4) is the cleanest signal.
 
-When monitoring is enabled, `--target-display-nits` is the external monitor peak (the comparison baseline); for a `pq2020` target it must match the monitor's calibrated peak. It is no longer a source override: use `--source-max-luma` for that. `--monitor-sdr-white` sets the SDR white of the common mapping target.
+When monitoring is enabled, `--target-display-nits` is the external monitor peak (the comparison baseline); for a `pq2020` target it should match the monitor's calibrated peak. `--monitor-sdr-white` sets the SDR white of the common mapping target.
 
 Migration from older builds: a source-peak override previously written as `--target-display-nits N` is now `--source-max-luma N`. `sdr709` monitoring no longer defaults the target to 100 nits; pass `--target-display-nits 100` to keep the old monitor peak.
 
@@ -417,10 +417,10 @@ manual/environment-limited.
 ### Still monitor composition layer
 
 `src/output/monitor_output.hpp` consumes the common display-linear result produced by
-the coordination layer (`src/display/display_coordinator.*`), encodes it to the wire
-transfer into a fixed offscreen full-range RGB target, packs it with `FramePacker` and
-hands the bytes to `FrameSink::DisplayStill`. It never owns a `FrameRenderer`. It owns
-the `FrameSink` and the borrow pairing; at most one request is in flight and main
+the coordination layer (`src/display/display_coordinator.*`), encodes it into a fixed
+offscreen full-range RGB target in the selected output pixel format, packs it with
+`FramePacker` and hands the bytes to `FrameSink::DisplayStill`. It never owns a
+`FrameRenderer`. It owns the `FrameSink`; at most one request is in flight and main
 advances it on the same thread with `Tick()` (or the low-level `Submit()`/`Pump()`). A
 new request while one is in flight is reported as Busy and is not read or mapped.
 `Close()` drains the packer and closes the owned sink within one total deadline.

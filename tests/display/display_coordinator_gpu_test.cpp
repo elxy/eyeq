@@ -728,11 +728,12 @@ void TestTargetSemantics(EYEQ::RenderContext &context, AVStream *stream) {
   coordinator->SetSdrWhiteOnHdr(120.0f);
   Check(std::fabs(coordinator->mapping_target().sdr_white_nits - PL_COLOR_SDR_WHITE) < 0.5f,
         "--sdr-white-on-hdr does not change the mapping target SDR white");
-  coordinator->SetTargetPeakNits(500.0f, 100.0f);
-  Check(std::fabs(coordinator->mapping_target().peak_nits - 500.0f) < 0.5f,
-        "SetTargetPeakNits sets the comparison-baseline peak");
-  Check(std::fabs(coordinator->mapping_target().sdr_white_nits - 100.0f) < 0.5f,
-        "SetTargetPeakNits sets the comparison-baseline SDR white");
+  // The mapping target is fixed at construction and exposed verbatim; main
+  // passes it through the Config, there is no runtime setter.
+  Check(std::fabs(coordinator->mapping_target().peak_nits - 600.0f) < 0.5f,
+        "the mapping target peak is the Config baseline");
+  Check(std::fabs(coordinator->mapping_target().sdr_white_nits - PL_COLOR_SDR_WHITE) < 0.5f,
+        "the mapping target SDR white is the Config baseline");
 }
 
 // ---------------------------------------------------------------------------

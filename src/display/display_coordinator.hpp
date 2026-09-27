@@ -119,10 +119,6 @@ public:
    */
   void SetHdrVividEnabled(bool enabled);
   bool hdrvivid_enabled() const { return renderer_->IsHdrVividEnabled(); }
-  // Sets the fixed mapping target peak and SDR white explicitly (the comparison
-  // baseline, i.e. the outside monitor when monitoring is enabled, V2.1 8.2).
-  void SetTargetPeakNits(float peak_nits, float sdr_white_nits);
-
   const MappingTarget &mapping_target() const { return mapping_target_; }
   // Explicitly replaces the fixed mapping target (invalidates the cached scene).
   void SetMappingTarget(const MappingTarget &target);

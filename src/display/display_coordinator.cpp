@@ -128,15 +128,6 @@ void DisplayCoordinator::SetSourceMaxLuma(double nits) {
   InvalidateScene();
 }
 
-void DisplayCoordinator::SetTargetPeakNits(float peak_nits, float sdr_white_nits) {
-  AssertUiThread();
-  mapping_target_.peak_nits = peak_nits;
-  mapping_target_.sdr_white_nits = sdr_white_nits;
-  ValidateMappingTarget(mapping_target_);
-  renderer_->SetMappingTarget(mapping_target_, work_precision_);
-  InvalidateScene();
-}
-
 void DisplayCoordinator::SetHdrVividEnabled(bool enabled) {
   AssertUiThread();
   if (renderer_->IsHdrVividEnabled() == enabled) {

@@ -201,9 +201,9 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
 - `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
 - `--sdr-white-on-hdr <nits>`：当主视频为HDR时，设置SDR视频的参考白电平（单位nits）。默认按照标准参考白203 nits（ITU-R BT.2408）进行映射。该选项仅在主视频为HDR、对比视频为SDR时生效
-- `--target-display-nits <nits>`：比较映射目标峰值亮度（nits）。它是所有模式下比较基准的唯一入口：既是公共显示映射目标（也是 Vivid 曲线的目标显示亮度），监看时又是外监峰值。`pq2020` 监看目标必填（物理监视器没有可猜的默认值），其余默认 1000。它不再覆盖源 HDR `max_luma`——该职责已移到 `--source-max-luma`，且不做兼容映射（有意的行为修正）
+- `--target-display-nits <nits>`：公共映射目标的峰值亮度（nits），即所有模式下比较基准的唯一入口：普通播放时是显示映射目标（也是 `--hdrvivid-render` 下 Vivid 曲线的目标显示亮度），监看时即监视器峰值。`pq2020` 监看目标必填（物理监视器没有可猜的默认值），其余默认 1000。要覆盖源自身的 HDR 峰值，请用 `--source-max-luma`
 - `--source-max-luma <nits>`：可选的源 HDR mastering/内容峰值（`pl_color_space.hdr.max_luma`）覆盖，单位 nits。源峰值不可信时使用（HLG、DPX 读回）；仅影响走 libplacebo 普通色调映射的源，不写回码流自带的动态元数据（Vivid 的 tml/rml 锚点属于码流本身，不受影响），且与映射目标完全解耦
-- `--hdrvivid-render`：用 GPU 色调映射曲线应用 HDR Vivid 1.0 动态元数据。每帧携带 CUVA 元数据时，通过所有其他源共用的同一个渲染器映射到公共显示映射目标（`--target-display-nits`，监看时为外监峰值），因此 Vivid 与 Dolby Vision 在同一显示线性空间中比较。无 Vivid 元数据的源不受影响，源 mastering/动态元数据也不会被写回公共结果
+- `--hdrvivid-render`：用 GPU 色调映射曲线应用 HDR Vivid 1.0 动态元数据。每帧携带 CUVA 元数据时，通过所有其他源共用的同一个渲染器映射到公共显示映射目标（`--target-display-nits`），因此 Vivid 与 Dolby Vision 在同一显示线性空间中比较。无 Vivid 元数据的源不受影响，源 mastering/动态元数据也不会被写回公共结果
 - `--high-dpi {auto,yes,no}`：High-DPI模式，默认`auto`自动检测
 - `--scale-method <method>`：视频放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
@@ -219,7 +219,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ### 监看输出（DeckLink）
 
-用 `-DEYEQ_ENABLE_DECKLINK=ON` 加 DeckLink SDK 构建的版本可以把当前比较结果送到外接监视器。该模式为**静帧（still-only）**：播放器保持暂停，按空格只会提示暂不支持连续播放。桌面预览与外监消费同一份合成结果，因此切换桌面 OSD 或改变窗口大小不会改变外监打包字节。不传 `--monitor-device` 时默认播放器不变，也不会链接 DeckLink 后端。
+用 `-DEYEQ_ENABLE_DECKLINK=ON` 加 DeckLink SDK 构建的版本可以把当前比较结果送到外接监视器。该模式为**静帧（still-only）**：播放器保持暂停，按空格只会提示暂不支持连续播放。桌面预览与监视器输出消费同一份合成结果，因此切换桌面 OSD 或改变窗口大小不会改变监视器输出的打包字节。不传 `--monitor-device` 时默认播放器不变，也不会链接 DeckLink 后端。
 
 - `--monitor-device <selector>`：在指定 DeckLink 设备上开启监看。选择器必须显式：`index:<n>` 或 `id:<persistent-id>`。开启监看会禁用所有应用侧 ICC（global、`auto` 与 `N:path`，包含 macOS 预览）；macOS 系统色彩管理不受影响
 - `--monitor-mode <WxH@N|WxH@N/D>`：原生 mode，使用精确整数数据，例如 `3840x2160@50` 或 `3840x2160@30000/1001`。与 `--monitor-device` 搭配必填；设备原生不支持的 mode 会被拒绝
@@ -228,11 +228,11 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--monitor-color {sdr709,pq2020}`：色彩目标——`sdr709`（BT.709 / BT.1886）或 `pq2020`（BT.2020 / PQ）（默认 `sdr709`）
 - `--monitor-sdr-white <nits>`：监看时共同映射目标的 SDR 白电平（默认 203 nits）
 
-外监的终止性失败——sink 上报错误、设备丢失或已关闭——会在本次运行内停用监看。EyeQ 会记录该失败并保持桌面继续运行，但不会自动重启：**需重启播放器才能恢复监看**。非终止性的单次请求失败（例如 `FramePacker` 回读失败）会被上报，模块仍可继续使用；失败的请求不会被静默重试。
+监视器输出的终止性失败——设备报错、设备丢失或输出已关闭——会在本次运行内停用监看：EyeQ 记录该失败并保持桌面继续运行，监看需重启播放器后恢复。可恢复的单次请求失败（例如打包器读回失败）会被上报，模块仍可继续使用；失败的请求不会重试。
 
-线缆编码有意**不做抖动（dither-free）**：显示线性结果直接量化为 10-bit，以保证输出字节对测试与客观测量是确定性的；平滑渐变出现 banding 是已知且接受的代价。追求最纯净信号可用 `r210`（RGB 4:4:4）；`v210` 的 4:2:2 色度是格式本身的属性，不是额外的后处理。
+监视器输出把显示线性结果直接量化为 10-bit，不添加抖动，输出字节对测试与客观测量是确定性的；平滑渐变上可能出现轻微 banding。`v210` 的 4:2:2 色度子采样来自格式本身；追求更纯净的信号可用 `r210`（RGB 4:4:4）。
 
-开启监看时，`--target-display-nits` 即外监峰值（比较基准）；`pq2020` 目标下应与监视器校准峰值一致。它不再是源覆盖，源覆盖请用 `--source-max-luma`。`--monitor-sdr-white` 设置公共映射目标的 SDR 白电平。
+开启监看时，`--target-display-nits` 即监视器峰值（比较基准）；`pq2020` 目标下应与监视器校准峰值一致。`--monitor-sdr-white` 设置公共映射目标的 SDR 白电平。
 
 从旧版本迁移：过去用 `--target-display-nits N` 表达的源峰值覆盖，现在改用 `--source-max-luma N`。`sdr709` 监看不再默认把目标设为 100 nits；如需保留旧的监视器峰值，请显式传 `--target-display-nits 100`。
 
@@ -285,14 +285,14 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ## DeckLink 输出
 
-DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。GPU 打包器（`src/output/frame_packer.hpp` / `.cpp`）通过异步读回环把非线性 full-range 浮点 RGB 转成 Video range 的 r210/v210。`eyeq` 播放器已为**静帧外监**接入该链路（见上方“监看输出（DeckLink）”）：合成层只保留唯一渲染器，把同一份合成结果同时交给桌面预览与外监，但硬件时钟连续播放尚未实现。音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。另有独立工具 `decklink-test-signal`，通过同一后端输出确定性 CPU 测试画面，运行时**会启用真实硬件输出**。自动化验证目前只在 fake SDK 上跑通原生写路径，打包器仅在本机 GPU 上验证；这是验证状态，不是运行行为限制。
+DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。GPU 打包器（`src/output/frame_packer.hpp` / `.cpp`）通过异步读回环把非线性 full-range 浮点 RGB 转成 Video range 的 r210/v210。`eyeq` 播放器已为**静帧监看**接入该链路（见上方“监看输出（DeckLink）”）：合成层只保留唯一渲染器，把同一份合成结果同时交给桌面预览与监视器输出，但硬件时钟连续播放尚未实现。音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。另有独立工具 `decklink-test-signal`，通过同一后端输出确定性 CPU 测试画面，运行时**会启用真实硬件输出**。自动化验证目前只在 fake SDK 上跑通原生写路径，打包器仅在本机 GPU 上验证；这是验证状态，不是运行行为限制。
 
 可选 CMake 开关（默认全部为 `OFF`，不影响普通播放器构建）：
 
 | 开关 | 默认 | 用途 |
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试；配合 `EYEQ_ENABLE_DECKLINK` 还会构建确定性的 SDK 故障注入与输出后端测试。无需 GPU、设备 |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog`、`decklink-test-signal` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。同时为 `eyeq` 接入静帧外监选项 |
+| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog`、`decklink-test-signal` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。同时为 `eyeq` 接入静帧监看选项 |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 构建 GPU 打包测试：CPU oracle、真实 GPU 对比/读回测试、生命周期故障注入测试。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK，也不需要 DeckLink 设备 |
 | `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | 构建离屏显示/渲染测试：在无窗口的 headless Vulkan 设备上运行真实 `RenderContext`/`FrameRenderer`，覆盖 Fill/Slide/Grid、双实例交错、HDR override、ICC 隔离与 OSD 开关。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK、窗口或 DeckLink 设备 |
 | `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | 构建纯 CPU 播放器测试：用本地合成的 YUV4MPEG2 文件驱动真实 `SyncPlayer`/`VideoSource`，覆盖帧快照发布、控制完成顺序、相对 seek 累积、多源 EOF 对齐、有界命令预算、Stop 取消与 seek 失败传播。无需 GPU、窗口、SDK 或 DeckLink 设备 |
@@ -386,13 +386,13 @@ renderer 的输出不受另一个影响、且另一个被销毁后仍可继续�
 ### 静帧监看组合层
 
 `src/output/monitor_output.hpp` 消费由协调层（`src/display/display_coordinator.*`）产出的
-公共显示线性结果，把它编码为线缆传输函数并写入固定尺寸的离屏 full-range RGB 目标，再用
+公共显示线性结果，把它编码为固定尺寸的离屏 full-range RGB 目标（输出像素格式），再用
 `FramePacker` 打包后交给 `FrameSink::DisplayStill`。它不再拥有 `FrameRenderer`。它自己拥有
-`FrameSink` 与借用配对；同一时刻只允许一个在途请求，main 在同一线程用 `Tick()`（或底层的
+`FrameSink`；同一时刻只允许一个在途请求，main 在同一线程用 `Tick()`（或底层的
 `Submit()`/`Pump()`）推进。在途时新请求返回 Busy，不会被读取或映射。`Close()` 在同一个
 总 deadline 内排空 packer 并关闭自己拥有的 sink。
 
-配合 `EYEQ_ENABLE_DECKLINK=ON`，`eyeq` 播放器已为静帧外监接入该层（见“监看输出（DeckLink）”）；
+配合 `EYEQ_ENABLE_DECKLINK=ON`，`eyeq` 播放器已为静帧监看接入该层（见“监看输出（DeckLink）”）；
 硬件时钟连续播放、音频与原生 HDR 直通仍未实现。
 
 组合测试在无窗口的 headless Vulkan 设备上运行真实组合层，配合可真正返回 Still
