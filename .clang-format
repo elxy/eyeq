@@ -1,4 +1,7 @@
-Language: Cpp
+# No "Language:" key: the settings below are the default document and therefore
+# apply to every language clang-format handles here, including the Objective-C++
+# sources (.mm). Declaring "Language: Cpp" made clang-format abort on .mm files
+# with "Configuration file(s) do(es) not support Objective-C".
 BasedOnStyle: LLVM
 ColumnLimit: 120
 

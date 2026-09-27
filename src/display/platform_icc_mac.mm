@@ -65,11 +65,10 @@ void ParseICCProfileHeader(ICCProfileInfo &info) {
   info.connection_space = sig_to_string(pcs_sig);
 
   // Standardized name mapping
-  std::map<std::string, std::string> sig_names{
-      {"RGB ", "RGB"},        {"GRAY", "Grayscale"},  {"CMYK", "CMYK"},
-      {"Lab ", "Lab"},        {"XYZ ", "XYZ"},        {"Luv ", "Luv"},
-      {"YCbr", "YCbCr"},      {"Yxy ", "Yxy"},        {"HSV ", "HSV"},
-      {"HLS ", "HLS"},        {"SCNR", "Scanner RGB"}};
+  std::map<std::string, std::string> sig_names{{"RGB ", "RGB"},   {"GRAY", "Grayscale"},  {"CMYK", "CMYK"},
+                                               {"Lab ", "Lab"},   {"XYZ ", "XYZ"},        {"Luv ", "Luv"},
+                                               {"YCbr", "YCbCr"}, {"Yxy ", "Yxy"},        {"HSV ", "HSV"},
+                                               {"HLS ", "HLS"},   {"SCNR", "Scanner RGB"}};
 
   if (sig_names.count(info.color_space))
     info.color_space = sig_names[info.color_space];
@@ -85,8 +84,8 @@ ICCProfileInfo GetSystemDisplayICCProfile(SDL_Window *window) {
     return info;
   }
 
-  NSWindow *nswindow = (__bridge NSWindow *)SDL_GetPointerProperty(
-      SDL_GetWindowProperties(window), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+  NSWindow *nswindow = (__bridge NSWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(window),
+                                                                   SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
   if (!nswindow) {
     info.source = "Failed to get NSWindow from SDL_Window";
     return info;
