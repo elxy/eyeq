@@ -889,6 +889,186 @@ void TestGpuFiniteGate(EYEQ::RenderContext &context) {
   pl_tex_destroy(gpu, &tex);
 }
 
+// ---------------------------------------------------------------------------
+// Paced playback (continuous monitor output) tests.
+// ---------------------------------------------------------------------------
+
+bool DriveTicks(MonitorOutput &monitor, const std::function<bool()> &done, int max_ticks = 200000) {
+  for (int i = 0; i < max_ticks; ++i) {
+    monitor.Tick();
+    if (done()) {
+      return true;
+    }
+    YieldToGpu();
+  }
+  return false;
+}
+
+// Composes a solid-color scene (the feed generation changes, so every call produces a
+// new render identity).
+void ComposeSolid(EYEQ::DisplayCoordinator &coordinator, AVStream *stream, int w, int h, const Color &c) {
+  auto frame = MakeFrame(stream, w, h, [c](int, int) { return c; });
+  coordinator.SetMainSource(0);
+  coordinator.FeedFrames({{0, frame}});
+  EYEQ::DisplayState state = MakeState({0}, 0);
+  coordinator.RenderScene(state);
+}
+
+// Continuous paced submissions must reach the sink in composition order, at strictly
+// increasing display ticks, with bytes that match the independent CPU packing oracle
+// of the frame's own target, and without any full-frame readback on the way.
+void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[paced playback: order, display ticks, bytes vs oracle]\n");
+  const int w = 64;
+  const int h = 48;
+  auto resolved = BuildResolved(w, h, EYEQ::PixelFormat::V210, false, 100.0, 0);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+  auto fake = std::make_unique<EYEQ::test::FakeFrameSink>(8);
+  auto scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(*fake);
+  eyeq_test::ScriptedFrameSink *sink = scripted.get();
+  MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
+
+  EYEQ::ResetLinearTextureReadbackCount();
+  monitor.SetPlayback(true);
+
+  const int kFrames = 5;
+  std::vector<std::vector<float>> frame_rgb;
+  std::vector<std::vector<uint8_t>> frame_bytes;
+  for (int i = 0; i < kFrames; ++i) {
+    ComposeSolid(*coordinator, stream, w, h, Color{0.05f + 0.15f * i, 0.1f + 0.1f * i, 0.2f});
+    const std::size_t schedules_before = sink->schedule_calls().size();
+    monitor.Tick(); // enqueue the new composition
+    const bool ok = DriveTicks(monitor, [&]() { return sink->schedule_calls().size() > schedules_before; });
+    Check(ok, "paced frame " + std::to_string(i) + " is scheduled");
+    frame_bytes.push_back(sink->schedule_calls().back().bytes);
+    // The target still holds this frame: no later composition ran yet.
+    frame_rgb.push_back(DownloadTargetRgb(context.gpu(), monitor));
+  }
+
+  Check(sink->schedule_calls().size() == static_cast<std::size_t>(kFrames), "every paced frame reached the sink");
+  bool order_ok = true;
+  bool ticks_ok = true;
+  for (std::size_t i = 0; i < sink->schedule_calls().size(); ++i) {
+    const auto &call = sink->schedule_calls()[i];
+    if (call.info.submit_id != static_cast<uint64_t>(i + 1)) {
+      order_ok = false;
+    }
+    if (call.display_duration != resolved.mode.frame_duration) {
+      order_ok = false;
+    }
+    if (i > 0 && call.display_time <= sink->schedule_calls()[i - 1].display_time) {
+      ticks_ok = false;
+    }
+  }
+  Check(order_ok, "paced frames are scheduled in composition order with the mode frame duration");
+  Check(ticks_ok, "display ticks strictly increase");
+  for (int i = 0; i < kFrames; ++i) {
+    const auto stats = eyeq_test::CompareFrame(frame_bytes[static_cast<std::size_t>(i)].data(), w, h,
+                                               resolved.layout.row_bytes, frame_rgb[static_cast<std::size_t>(i)],
+                                               resolved.layout.pixel_format, resolved.color.encoding.primaries);
+    Check(stats.mismatch == 0, "paced frame " + std::to_string(i) + " bytes match the CPU oracle");
+  }
+  Check(monitor.diagnostics().paced_submits == static_cast<uint64_t>(kFrames), "every composition was paced-submitted");
+  Check(EYEQ::LinearTextureReadbackCount() == 0, "paced playback never does a full-frame readback");
+  Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "paced monitor closed");
+}
+
+// When the sink cannot schedule (Busy), the bounded queue overflows by dropping the
+// oldest unscheduled frame; the newest frames survive and still reach the sink.
+void TestPacedOverflowDropsOldest(EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[paced playback: queue overflow drops the oldest unscheduled frame]\n");
+  const int w = 64;
+  const int h = 48;
+  auto resolved = BuildResolved(w, h, EYEQ::PixelFormat::V210, false, 100.0, 0);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+  auto fake = std::make_unique<EYEQ::test::FakeFrameSink>(8);
+  auto scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(*fake);
+  eyeq_test::ScriptedFrameSink *sink = scripted.get();
+  MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
+
+  sink->ScriptSchedule(EYEQ::ScheduleOutcome::Busy, 1000);
+  monitor.SetPlayback(true);
+
+  const int kFrames = 6; // more than the ring capacity
+  for (int i = 0; i < kFrames; ++i) {
+    ComposeSolid(*coordinator, stream, w, h, Color{0.05f + 0.12f * i, 0.3f, 0.1f});
+    monitor.Tick();
+    YieldToGpu();
+  }
+  const std::size_t capacity = static_cast<std::size_t>(EYEQ::FramePacker::kRingCapacity);
+  Check(monitor.paced_pending() == capacity, "the paced queue is bounded by the packer ring");
+  Check(monitor.diagnostics().paced_dropped == static_cast<uint64_t>(kFrames) - capacity,
+        "overflow dropped exactly the oldest unscheduled frames");
+  Check(monitor.diagnostics().paced_submits == static_cast<uint64_t>(kFrames),
+        "every composition was enqueued before the drops");
+
+  const std::vector<float> newest_rgb = DownloadTargetRgb(context.gpu(), monitor);
+  sink->ClearScheduleScript();
+  const bool drained = DriveTicks(monitor, [&]() { return monitor.paced_pending() == 0; });
+  Check(drained, "the retained paced frames drain once the sink accepts");
+  Check(monitor.diagnostics().paced_scheduled == static_cast<uint64_t>(capacity),
+        "exactly the retained frames reached the sink");
+  const auto stats =
+      eyeq_test::CompareFrame(sink->schedule_calls().back().bytes.data(), w, h, resolved.layout.row_bytes, newest_rgb,
+                              resolved.layout.pixel_format, resolved.color.encoding.primaries);
+  Check(stats.mismatch == 0, "the newest frame reaches the sink (and matches its oracle)");
+  Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "overflow monitor closed");
+}
+
+// Pause stops the scheduled session and freezes the last frame as a still; new scenes
+// shown while paused stay stills; resuming jumps to the latest composed frame.
+void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[paced playback: pause freezes, resume jumps to the latest]\n");
+  const int w = 64;
+  const int h = 48;
+  auto resolved = BuildResolved(w, h, EYEQ::PixelFormat::V210, false, 100.0, 0);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+  auto fake = std::make_unique<EYEQ::test::FakeFrameSink>(8);
+  auto scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(*fake);
+  eyeq_test::ScriptedFrameSink *sink = scripted.get();
+  MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
+
+  EYEQ::ResetLinearTextureReadbackCount();
+  monitor.SetPlayback(true);
+  ComposeSolid(*coordinator, stream, w, h, Color{0.9f, 0.1f, 0.1f});
+  monitor.Tick();
+  Check(DriveTicks(monitor, [&]() { return sink->schedule_calls().size() >= 1; }), "the first paced frame schedules");
+  const std::size_t schedules_after_first = sink->schedule_calls().size();
+
+  // Pause: the session stops and the last frame freezes as a still.
+  monitor.SetPlayback(false);
+  const bool stopped = DriveTicks(
+      monitor, [&]() { return !monitor.playback_started() && !monitor.in_flight() && sink->still_calls() >= 1; });
+  Check(stopped, "pause stops the scheduled session and freezes a still");
+  Check(sink->schedule_calls().size() == schedules_after_first, "pause does not schedule new frames");
+
+  // New scenes while paused are stills, never paced schedules.
+  for (int i = 0; i < 2; ++i) {
+    ComposeSolid(*coordinator, stream, w, h, Color{0.1f, 0.8f - 0.1f * i, 0.2f});
+    monitor.Tick();
+    Check(DriveTicks(monitor, [&]() { return !monitor.in_flight(); }), "paused still completes");
+  }
+  Check(sink->schedule_calls().size() == schedules_after_first, "no paced scheduling while paused");
+  Check(sink->still_calls() >= 2, "paused scenes are shown as stills");
+
+  // Latest composition before resume.
+  ComposeSolid(*coordinator, stream, w, h, Color{0.2f, 0.2f, 0.9f});
+  monitor.Tick();
+  Check(DriveTicks(monitor, [&]() { return !monitor.in_flight(); }), "the latest paused still completes");
+  const std::vector<float> latest_rgb = DownloadTargetRgb(context.gpu(), monitor);
+
+  const std::size_t schedules_before_resume = sink->schedule_calls().size();
+  monitor.SetPlayback(true);
+  const bool resumed = DriveTicks(monitor, [&]() { return sink->schedule_calls().size() > schedules_before_resume; });
+  Check(resumed, "playback resumes and schedules a frame");
+  const auto stats =
+      eyeq_test::CompareFrame(sink->schedule_calls().back().bytes.data(), w, h, resolved.layout.row_bytes, latest_rgb,
+                              resolved.layout.pixel_format, resolved.color.encoding.primaries);
+  Check(stats.mismatch == 0, "resume jumps to the latest composed frame");
+  Check(EYEQ::LinearTextureReadbackCount() == 0, "pause/resume never does a full-frame readback");
+  Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "pause/resume monitor closed");
+}
+
 void TestSharedResultAndResubmit(EYEQ::RenderContext &context, AVStream *stream) {
   std::fprintf(stdout, "[shared result, resize/OSD stability, resubmission]\n");
   const int w = 64;
@@ -1108,6 +1288,9 @@ int main() {
     TestIsolation(gpu, context, owner.stream);
     TestUhdOnce(gpu, context, owner.stream);
     TestGpuFiniteGate(context);
+    TestPacedPlaybackOrderAndBytes(context, owner.stream);
+    TestPacedOverflowDropsOldest(context, owner.stream);
+    TestPacedPauseResume(context, owner.stream);
     TestSharedResultAndResubmit(context, owner.stream);
     TestRecomposeWhileInFlight(context, owner.stream);
     TestCancelFailureClose(context, owner.stream);
