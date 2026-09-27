@@ -129,6 +129,10 @@ MonitorOutput::MonitorOutput(RenderContext &context, DisplayCoordinator &coordin
     target_.frame.color.hdr.max_luma = target_peak;
 
     encoder_ = std::make_unique<OutputEncoder>(context.log(), gpu);
+    // The playback/monitor path must never pay for a full-frame NaN readback; the
+    // GPU-side gate reduces the common result to one flag word (V2.1 3.2, review
+    // decision). It is required, so a GPU without compute/SSBO fails fast here.
+    finite_gate_ = std::make_unique<FiniteGate>(context.log(), gpu);
     packer_ = std::make_unique<FramePacker>(gpu, ToPackConfig(output_));
   } catch (...) {
     // The destructor will not run for a throwing constructor; release the raw GPU
@@ -270,6 +274,17 @@ MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
   std::string frame_error;
   if (!ValidateFrame(request, &frame_error)) {
     SetResult(Outcome::Failed, "config", std::move(frame_error));
+    return SubmitOutcome::Failed;
+  }
+
+  // GPU-side NaN/Inf gate: no full-frame host readback. A non-finite common result
+  // is a hard error, never encoded and never silently clamped.
+  try {
+    finite_gate_->Validate(request.frame.texture);
+    ++diagnostics_.finite_checks;
+  } catch (const std::exception &e) {
+    ++diagnostics_.finite_failures;
+    SetResult(Outcome::Failed, "finite", e.what());
     return SubmitOutcome::Failed;
   }
 

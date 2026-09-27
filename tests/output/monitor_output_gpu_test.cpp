@@ -826,6 +826,69 @@ int DriveController(MonitorOutput &controller, int max_ticks = 100000) {
   return -1;
 }
 
+// The GPU-side finite gate replaces the full-frame readback on the playback/monitor
+// path: it detects NaN/Inf (hard error) while only reading back one flag word. The
+// full-frame readback counter must stay at zero throughout.
+void TestGpuFiniteGate(EYEQ::RenderContext &context) {
+  std::fprintf(stdout, "[GPU finite gate]\n");
+  pl_gpu gpu = context.gpu();
+  const auto caps =
+      static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+  pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
+  if (format == nullptr) {
+    throw std::runtime_error("no rgba32f host-writable format for the finite-gate test");
+  }
+  struct pl_tex_params params = {.w = 4, .h = 1, .format = format, .sampleable = true, .host_writable = true};
+  pl_tex tex = pl_tex_create(gpu, &params);
+  if (tex == nullptr) {
+    throw std::runtime_error("finite-gate probe texture creation failed");
+  }
+
+  auto upload = [&](const std::vector<float> &rgba) {
+    struct pl_tex_transfer_params transfer = {
+        .tex = tex,
+        .row_pitch = 4 * 4 * sizeof(float),
+        .ptr = const_cast<float *>(rgba.data()),
+    };
+    if (!pl_tex_upload(gpu, &transfer)) {
+      throw std::runtime_error("finite-gate probe upload failed");
+    }
+  };
+
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+
+  EYEQ::ResetLinearTextureReadbackCount();
+  {
+    EYEQ::FiniteGate gate(context.log(), gpu);
+    std::vector<float> finite(16, 0.25f);
+    upload(finite);
+    bool ok = true;
+    try {
+      gate.Validate(tex);
+    } catch (const std::exception &) {
+      ok = false;
+    }
+    Check(ok, "the GPU gate accepts a finite texture");
+
+    for (float poison : {nan, inf, -inf}) {
+      std::vector<float> bad(16, 0.25f);
+      bad[4] = poison;
+      upload(bad);
+      bool threw = false;
+      try {
+        gate.Validate(tex);
+      } catch (const std::runtime_error &) {
+        threw = true;
+      }
+      Check(threw, std::isnan(poison) ? "the GPU gate rejects NaN" : "the GPU gate rejects Inf");
+      upload(finite); // restore for the next iteration
+    }
+  }
+  Check(EYEQ::LinearTextureReadbackCount() == 0, "the GPU gate never triggers a full-frame readback");
+  pl_tex_destroy(gpu, &tex);
+}
+
 void TestSharedResultAndResubmit(EYEQ::RenderContext &context, AVStream *stream) {
   std::fprintf(stdout, "[shared result, resize/OSD stability, resubmission]\n");
   const int w = 64;
@@ -1044,6 +1107,7 @@ int main() {
     TestClose(gpu, context, owner.stream);
     TestIsolation(gpu, context, owner.stream);
     TestUhdOnce(gpu, context, owner.stream);
+    TestGpuFiniteGate(context);
     TestSharedResultAndResubmit(context, owner.stream);
     TestRecomposeWhileInFlight(context, owner.stream);
     TestCancelFailureClose(context, owner.stream);

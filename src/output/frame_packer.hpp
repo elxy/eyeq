@@ -42,6 +42,15 @@ enum class PackDrain { Idle, TimedOut, Failed };
 //     reason) to stderr; there is no public error channel or event subsystem.
 class FramePacker {
 public:
+  // Staging ring depth. Chosen from the player benchmark in
+  // tests/decklink/packer/frame_packer_gpu_test.cpp (BENCH lines): on the dev machine
+  // submit->ready is p50 <= 2.8 ms / p95 <= 3.7 ms for UHD and p50 <= 0.7 ms / p95 <=
+  // 0.8 ms for 1080p (v210/r210), i.e. well inside the 20 ms monitor frame period at
+  // 50 fps. Depth 3 reaches the depth-4 throughput at 1080p while allocating less
+  // mapped host memory (66 MB at UHD v210 vs 88 MB), so it is the data-driven pick:
+  // enough pipelining for the paced playback queue without over-allocating.
+  static constexpr int kRingCapacity = 3;
+
   FramePacker(pl_gpu gpu, const PackConfig &config);
   ~FramePacker();
 

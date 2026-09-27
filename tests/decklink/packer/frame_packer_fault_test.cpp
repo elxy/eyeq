@@ -125,15 +125,16 @@ void TestRingFull() {
   pl_tex source = UploadSource(device.gpu(), config.layout.width, config.layout.height,
                                FlatPattern(config.layout.width, config.layout.height), false);
 
-  // The fixed ring is two slots deep (R4).
-  StagingSlot *slots[2] = {};
-  for (int i = 0; i < 2; ++i) {
+  // The fixed ring depth is a single compile-time constant; fill it completely.
+  constexpr int kRing = FramePacker::kRingCapacity;
+  StagingSlot *slots[kRing] = {};
+  for (int i = 0; i < kRing; ++i) {
     slots[i] = packer.Submit(source, static_cast<uint64_t>(i));
     CHECK(slots[i] != nullptr);
   }
-  CHECK(packer.Submit(source, 2) == nullptr); // ring full, no new input consumed
+  CHECK(packer.Submit(source, static_cast<uint64_t>(kRing)) == nullptr); // ring full, no new input consumed
 
-  for (int i = 0; i < 2; ++i) {
+  for (int i = 0; i < kRing; ++i) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(20000);
     while (packer.Poll(slots[i]) == PackPoll::NotReady) {
       CHECK(Clock::now() < deadline);
@@ -142,11 +143,11 @@ void TestRingFull() {
     CHECK(packer.Size(slots[i]) == config.layout.image_bytes);
     CHECK(packer.Bytes(slots[i]) != nullptr);
   }
-  CHECK(packer.Submit(source, 3) == nullptr); // still full while Ready
-  for (int i = 0; i < 2; ++i) {
+  CHECK(packer.Submit(source, static_cast<uint64_t>(kRing + 1)) == nullptr); // still full while Ready
+  for (int i = 0; i < kRing; ++i) {
     packer.Reap(slots[i]);
   }
-  CHECK(packer.Submit(source, 4) != nullptr);
+  CHECK(packer.Submit(source, static_cast<uint64_t>(kRing + 2)) != nullptr);
   CHECK(packer.Shutdown(20000) == PackDrain::Idle);
   pl_tex_destroy(device.gpu(), &source);
 }

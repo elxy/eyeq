@@ -219,82 +219,92 @@ void TestUhdFirstAndLast(GpuDevice &device) {
   }
 }
 
-// Short four-slot UHD benchmark. Warm-up (shader compile, first allocations) is
-// excluded. Latency starts before Submit, and the success/failure and Shutdown results
-// are checked. Reported bytes are the mapped host buffers and the logical carrier
-// payload separately; driver physical residency is not measured.
-void TestUhdShortBench(GpuDevice &device) {
-  const int width = 3840;
-  const int height = 2160;
-  constexpr int kFrames = 16;
-  constexpr int kRing = 2;
+// Packer throughput benchmark. It drives the real production ring (FramePacker's
+// kRingCapacity slots) and reports the submit->ready latency distribution for one
+// width/height/format combination. Warm-up (shader compile, first allocations) is
+// excluded. Latency starts before Submit, and the success/failure and Shutdown
+// results are checked. The percentiles are the data used to choose the packer ring
+// depth and the paced submit lead time; they are informational, not assertions.
+void BenchPacker(GpuDevice &device, int width, int height, PixelFormat format) {
+  constexpr int kFrames = 32;
+  constexpr int kRing = FramePacker::kRingCapacity;
   const std::vector<float> rgb = MakePattern(width, height, 7, true);
-  for (PixelFormat format : {PixelFormat::R210, PixelFormat::V210}) {
-    const PackConfig config = MakeConfig(width, height, format, Sdr709(), 0);
-    FramePacker packer(device.gpu(), config);
-    pl_tex source = UploadSource(device.gpu(), width, height, rgb, true);
-    for (int i = 0; i < 3; ++i) {
-      (void)RunOneFrame(packer, source, static_cast<uint64_t>(i), 60000);
-    }
+  const PackConfig config = MakeConfig(width, height, format, Sdr709(), 0);
+  FramePacker packer(device.gpu(), config);
+  pl_tex source = UploadSource(device.gpu(), width, height, rgb, true);
+  for (int i = 0; i < 3; ++i) {
+    (void)RunOneFrame(packer, source, static_cast<uint64_t>(i), 60000);
+  }
 
-    struct Pending {
-      StagingSlot *slot = nullptr;
-      Clock::time_point submitted;
-    };
-    std::deque<Pending> pending;
-    std::vector<double> latencies;
-    double submit_total_ms = 0.0;
-    const auto begin = Clock::now();
-    auto retire_oldest = [&]() {
-      Pending oldest = pending.front();
-      pending.pop_front();
-      const auto deadline = Clock::now() + std::chrono::milliseconds(60000);
-      PackPoll poll = PackPoll::NotReady;
-      while (Clock::now() < deadline) {
-        poll = packer.Poll(oldest.slot);
-        if (poll != PackPoll::NotReady) {
-          break;
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(200));
+  struct Pending {
+    StagingSlot *slot = nullptr;
+    Clock::time_point submitted;
+  };
+  std::deque<Pending> pending;
+  std::vector<double> latencies;
+  double submit_total_ms = 0.0;
+  const auto begin = Clock::now();
+  auto retire_oldest = [&]() {
+    Pending oldest = pending.front();
+    pending.pop_front();
+    const auto deadline = Clock::now() + std::chrono::milliseconds(60000);
+    PackPoll poll = PackPoll::NotReady;
+    while (Clock::now() < deadline) {
+      poll = packer.Poll(oldest.slot);
+      if (poll != PackPoll::NotReady) {
+        break;
       }
-      if (poll != PackPoll::Ready) {
-        packer.Abort(oldest.slot);
-        throw std::runtime_error("bench frame did not reach Ready within the wall-time bound");
-      }
-      latencies.push_back(std::chrono::duration<double, std::milli>(Clock::now() - oldest.submitted).count());
-      packer.Reap(oldest.slot);
-    };
-    for (int i = 0; i < kFrames; ++i) {
-      if (static_cast<int>(pending.size()) == kRing) {
-        retire_oldest();
-      }
-      const auto submit_begin = Clock::now(); // start before Submit
-      StagingSlot *slot = packer.Submit(source, static_cast<uint64_t>(i));
-      if (slot == nullptr) {
-        throw std::runtime_error("bench Submit returned nullptr");
-      }
-      submit_total_ms += std::chrono::duration<double, std::milli>(Clock::now() - submit_begin).count();
-      pending.push_back(Pending{slot, submit_begin});
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
-    while (!pending.empty()) {
+    if (poll != PackPoll::Ready) {
+      packer.Abort(oldest.slot);
+      throw std::runtime_error("bench frame did not reach Ready within the wall-time bound");
+    }
+    latencies.push_back(std::chrono::duration<double, std::milli>(Clock::now() - oldest.submitted).count());
+    packer.Reap(oldest.slot);
+  };
+  for (int i = 0; i < kFrames; ++i) {
+    if (static_cast<int>(pending.size()) == kRing) {
       retire_oldest();
     }
-    const double wall_ms = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
-    std::sort(latencies.begin(), latencies.end());
-    const double p50 = latencies[latencies.size() / 2];
-    const double p95 = latencies[latencies.size() * 95 / 100];
-    const std::size_t mapped_bytes = config.layout.image_bytes * kRing;
-    const std::size_t carrier_bytes =
-        static_cast<std::size_t>(config.layout.row_bytes / 4) * static_cast<std::size_t>(height) * 4 * kRing;
-    std::printf("BENCH %s frames=%d wall=%.1fms amortized=%.3fms/frame submit_avg=%.3fms "
-                "submit_to_ready_p50=%.3fms p95=%.3fms bytes_per_frame=%zu mapped_host_bytes=%zu "
-                "carrier_payload_bytes=%zu\n",
-                ToString(format), kFrames, wall_ms, wall_ms / kFrames, submit_total_ms / kFrames, p50, p95,
-                config.layout.image_bytes, mapped_bytes, carrier_bytes);
-    if (packer.Shutdown(10000) != PackDrain::Idle) {
-      throw std::runtime_error("bench Shutdown did not reach Idle");
+    const auto submit_begin = Clock::now(); // start before Submit
+    StagingSlot *slot = packer.Submit(source, static_cast<uint64_t>(i));
+    if (slot == nullptr) {
+      throw std::runtime_error("bench Submit returned nullptr");
     }
-    pl_tex_destroy(device.gpu(), &source);
+    submit_total_ms += std::chrono::duration<double, std::milli>(Clock::now() - submit_begin).count();
+    pending.push_back(Pending{slot, submit_begin});
+  }
+  while (!pending.empty()) {
+    retire_oldest();
+  }
+  const double wall_ms = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+  std::sort(latencies.begin(), latencies.end());
+  auto percentile = [&](double q) {
+    const std::size_t index = std::min(latencies.size() - 1, static_cast<std::size_t>(q * latencies.size()));
+    return latencies[index];
+  };
+  const double p50 = percentile(0.50);
+  const double p95 = percentile(0.95);
+  const double p99 = percentile(0.99);
+  const std::size_t mapped_bytes = config.layout.image_bytes * kRing;
+  const std::size_t carrier_bytes =
+      static_cast<std::size_t>(config.layout.row_bytes / 4) * static_cast<std::size_t>(height) * 4 * kRing;
+  std::printf("BENCH %dx%d %s ring=%d frames=%d wall=%.1fms amortized=%.3fms/frame submit_avg=%.3fms "
+              "submit_to_ready_p50=%.3fms p95=%.3fms p99=%.3fms bytes_per_frame=%zu mapped_host_bytes=%zu "
+              "carrier_payload_bytes=%zu\n",
+              width, height, ToString(format), kRing, kFrames, wall_ms, wall_ms / kFrames, submit_total_ms / kFrames,
+              p50, p95, p99, config.layout.image_bytes, mapped_bytes, carrier_bytes);
+  if (packer.Shutdown(10000) != PackDrain::Idle) {
+    throw std::runtime_error("bench Shutdown did not reach Idle");
+  }
+  pl_tex_destroy(device.gpu(), &source);
+}
+
+void TestBench(GpuDevice &device) {
+  for (PixelFormat format : {PixelFormat::R210, PixelFormat::V210}) {
+    BenchPacker(device, 3840, 2160, format);
+    BenchPacker(device, 1920, 1080, format);
   }
 }
 
@@ -312,7 +322,7 @@ int main() {
     TestMultipleFrames(device);
     TestEncodingsDiffer(device);
     TestUhdFirstAndLast(device);
-    TestUhdShortBench(device);
+    TestBench(device);
   } catch (const std::exception &error) {
     std::fprintf(stderr, "frame_packer_gpu FAILED: %s\n", error.what());
     return 1;

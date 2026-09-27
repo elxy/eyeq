@@ -109,6 +109,8 @@ public:
     uint64_t still_busy = 0;
     uint64_t displayed = 0;
     uint64_t pack_failed = 0;
+    uint64_t finite_checks = 0;
+    uint64_t finite_failures = 0;
   };
 
   // @p sink is owned by this object and must be dedicated to it. @p coordinator is
@@ -217,6 +219,7 @@ private:
 
   Target target_;
   std::unique_ptr<OutputEncoder> encoder_;
+  std::unique_ptr<FiniteGate> finite_gate_;
   std::unique_ptr<FramePacker> packer_;
 
   bool closed_ = false;
