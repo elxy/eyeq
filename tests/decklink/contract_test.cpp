@@ -306,14 +306,14 @@ void TestFixtureBusyRetry() {
 
   CHECK(api.StartScheduled(0, &error));
 
-  const SubmissionInfo info1{1, 1, 7, 1000, 555};
+  const SubmissionInfo info1{1, 555};
   StagingSlot slot1;
   slot1.bytes.assign(16, 0x11);
   slot1.ready = true;
   CHECK(SubmitWithRetry(api, slot1, info1, 0, 1000) == ScheduleOutcome::Accepted);
   CHECK(sink.return_count(info1.submit_id) == 0); // completion not consumed yet
 
-  const SubmissionInfo info2{2, 1, 7, 1001, 556};
+  const SubmissionInfo info2{2, 556};
   StagingSlot slot2;
   slot2.bytes.assign(16, 0x22);
   slot2.ready = true;
@@ -326,18 +326,16 @@ void TestFixtureBusyRetry() {
   OutputEvent event{};
   CHECK(api.PollEvent(&event));
   CHECK(event.kind == OutputEvent::Kind::FrameCompleted && event.submit_id == info1.submit_id);
-  CHECK(event.output_index == info1.output_index && event.source_frame_serial == info1.source_frame_serial);
+  CHECK(event.source_frame_serial == info1.source_frame_serial);
   CHECK(sink.return_count(info1.submit_id) == 1);
 
   CHECK(SubmitWithRetry(api, slot2, info2, 1000, 1000) == ScheduleOutcome::Accepted);
   CHECK(sink.return_count(info2.submit_id) == 0);
   const SubmissionInfo &echo = sink.last_info();
-  CHECK(echo.submit_id == info2.submit_id && echo.batch_seq == info2.batch_seq &&
-        echo.timeline_epoch == info2.timeline_epoch && echo.output_index == info2.output_index &&
-        echo.source_frame_serial == info2.source_frame_serial);
+  CHECK(echo.submit_id == info2.submit_id && echo.source_frame_serial == info2.source_frame_serial);
 
   CHECK(api.PollEvent(&event));
-  CHECK(event.submit_id == info2.submit_id && event.output_index == info2.output_index);
+  CHECK(event.submit_id == info2.submit_id);
   CHECK(sink.return_count(info2.submit_id) == 1);
 
   CHECK(api.StopScheduled(0, nullptr, &error));
@@ -353,7 +351,7 @@ void TestFixtureCloseDrain() {
 
   CHECK(api.StartScheduled(0, &error));
 
-  const SubmissionInfo info1{10, 1, 3, 0, 99};
+  const SubmissionInfo info1{10, 99};
   StagingSlot slot1;
   slot1.bytes.assign(16, 0xAA);
   slot1.ready = true;
@@ -366,7 +364,7 @@ void TestFixtureCloseDrain() {
 
   // New work is rejected without consuming a device frame.
   const int free_before = sink.free_slots();
-  const SubmissionInfo info2{11, 1, 3, 1, 100};
+  const SubmissionInfo info2{11, 100};
   StagingSlot slot2;
   slot2.bytes.assign(16, 0xBB);
   slot2.ready = true;
@@ -398,7 +396,7 @@ void TestByteOwnershipAndFailure() {
     StagingSlot slot;
     slot.bytes = {1, 2, 3, 4};
     slot.ready = true;
-    const SubmissionInfo info{20, 2, 5, 42, 4242};
+    const SubmissionInfo info{20, 4242};
     CHECK(SubmitWithRetry(api, slot, info, 0, 1000) == ScheduleOutcome::Accepted);
     const std::vector<uint8_t> *copy = sink.copy(info.submit_id);
     CHECK(copy != nullptr && copy->size() == 4);
@@ -408,11 +406,10 @@ void TestByteOwnershipAndFailure() {
 
     OutputEvent event{};
     CHECK(api.PollEvent(&event));
-    CHECK(event.submit_id == info.submit_id && event.batch_seq == info.batch_seq);
+    CHECK(event.submit_id == info.submit_id);
 
     // Empty view is rejected without consuming.
-    CHECK(api.TrySchedule(PackedFrameView{nullptr, 0}, SubmissionInfo{21, 0, 0, 0, 0}, 0, 1000) ==
-          ScheduleOutcome::Rejected);
+    CHECK(api.TrySchedule(PackedFrameView{nullptr, 0}, SubmissionInfo{21, 0}, 0, 1000) == ScheduleOutcome::Rejected);
   }
   {
     test::FakeFrameSink sink(/*pool_slots=*/1);
@@ -420,7 +417,7 @@ void TestByteOwnershipAndFailure() {
     StagingSlot slot;
     slot.bytes.assign(16, 0x33);
     slot.ready = true;
-    const SubmissionInfo info{30, 1, 1, 0, 1};
+    const SubmissionInfo info{30, 1};
     sink.fail_next_before_consumption();
     CHECK(SubmitWithRetry(api, slot, info, 0, 1000) == ScheduleOutcome::DeviceError);
     CHECK(slot.reap_count == 1);
@@ -441,7 +438,7 @@ void TestDisplayStill() {
     StagingSlot slot;
     slot.bytes = {7, 8, 9};
     slot.ready = true;
-    const SubmissionInfo info{40, 1, 1, 0, 7};
+    const SubmissionInfo info{40, 7};
 
     CHECK(api.DisplayStill(View(slot), info) == StillOutcome::Displayed);
     CHECK(sink.still_display_count() == 1);
@@ -467,7 +464,7 @@ void TestDisplayStill() {
     StagingSlot slot;
     slot.bytes = {1, 2, 3};
     slot.ready = true;
-    const SubmissionInfo info{41, 1, 1, 0, 8};
+    const SubmissionInfo info{41, 8};
     CHECK(api.DisplayStill(View(slot), info) == StillOutcome::DeviceError);
     CHECK(!sink.has_copy(info.submit_id));
     CHECK(sink.still_display_count() == 0);
@@ -480,12 +477,12 @@ void TestDisplayStill() {
     StagingSlot slot;
     slot.bytes = {1, 2, 3};
     slot.ready = true;
-    const SubmissionInfo info{42, 1, 1, 0, 9};
+    const SubmissionInfo info{42, 9};
     // Keep one device frame outstanding so Close enters Draining.
     StagingSlot scheduled;
     scheduled.bytes.assign(16, 0x55);
     scheduled.ready = true;
-    CHECK(SubmitWithRetry(api, scheduled, SubmissionInfo{43, 1, 1, 0, 10}, 0, 1000) == ScheduleOutcome::Accepted);
+    CHECK(SubmitWithRetry(api, scheduled, SubmissionInfo{43, 10}, 0, 1000) == ScheduleOutcome::Accepted);
     CHECK(api.Close(1000) == CloseStatus::DrainTimeout);
     CHECK(api.DisplayStill(View(slot), info) == StillOutcome::Closed);
     CHECK(!sink.has_copy(info.submit_id));

@@ -15,12 +15,11 @@ struct PackedFrameView {
 
 // Opaque identity for one schedule attempt. The backend stores and echoes it and
 // never interprets source_frame_serial; the output-index <-> source-serial mapping
-// belongs to the caller.
+// belongs to the caller. Only the two fields an actual caller provides are kept
+// (R5); the wider OutputEvent identity below is a seam that no SubmissionInfo
+// source populates today.
 struct SubmissionInfo {
-  uint64_t submit_id = 0; // unique per schedule attempt
-  uint64_t batch_seq = 0;
-  uint64_t timeline_epoch = 0;
-  uint64_t output_index = 0;
+  uint64_t submit_id = 0;           // unique per schedule attempt
   uint64_t source_frame_serial = 0; // opaque echo
 };
 
@@ -37,6 +36,8 @@ struct OutputEvent {
   CompletionResult result = CompletionResult::Completed;
 
   uint64_t submit_id = 0;
+  // Reserved seam fields: kept for future producers, but a SubmissionInfo does
+  // not carry them anymore, so the backend leaves them at their default (0).
   uint64_t batch_seq = 0;
   uint64_t timeline_epoch = 0;
   uint64_t output_index = 0;

@@ -35,9 +35,6 @@ ScheduleOutcome FakeFrameSink::TrySchedule(const PackedFrameView &view, const Su
   event.kind = OutputEvent::Kind::FrameCompleted;
   event.result = CompletionResult::Completed;
   event.submit_id = info.submit_id;
-  event.batch_seq = info.batch_seq;
-  event.timeline_epoch = info.timeline_epoch;
-  event.output_index = info.output_index;
   event.source_frame_serial = info.source_frame_serial;
   event.display_time = display_time;
   events_.push_back(event);

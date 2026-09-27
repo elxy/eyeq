@@ -172,9 +172,6 @@ bool RunTestSignal(FrameSink &sink, const ResolvedOutput &resolved, const TestSi
 
     SubmissionInfo info;
     info.submit_id = index;
-    info.batch_seq = index;
-    info.timeline_epoch = 0;
-    info.output_index = index;
     info.source_frame_serial = index;
 
     const int64_t display_time = static_cast<int64_t>(index) * frame_duration;

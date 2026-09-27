@@ -71,9 +71,6 @@ PackedFrameView ViewOf(const std::vector<uint8_t> &bytes) { return PackedFrameVi
 SubmissionInfo MakeInfo(uint64_t submit_id) {
   SubmissionInfo info;
   info.submit_id = submit_id;
-  info.batch_seq = submit_id + 100;
-  info.timeline_epoch = 7;
-  info.output_index = submit_id;
   info.source_frame_serial = submit_id + 1000;
   return info;
 }
@@ -244,8 +241,7 @@ void TestAcceptedCopiesBytesAndReturnsCompletion() {
     CHECK(PollOnce(output, &event));
     CHECK(event.kind == OutputEvent::Kind::FrameCompleted);
     CHECK(event.result == CompletionResult::Completed);
-    CHECK(event.submit_id == 1 && event.batch_seq == 101 && event.timeline_epoch == 7 && event.output_index == 1 &&
-          event.source_frame_serial == 1001);
+    CHECK(event.submit_id == 1 && event.source_frame_serial == 1001);
     CHECK(event.display_time == 1000);
     CHECK(output.unreconciled_frame_count() == 0);
     CHECK(output.Close(0) == CloseStatus::Closed);

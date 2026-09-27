@@ -338,9 +338,6 @@ struct DeckLinkOutput::Impl {
     event.stage = stage;
     event.os_status = status;
     event.submit_id = info.submit_id;
-    event.batch_seq = info.batch_seq;
-    event.timeline_epoch = info.timeline_epoch;
-    event.output_index = info.output_index;
     event.source_frame_serial = info.source_frame_serial;
     event.display_time = display_time;
     CopyMessage(event.message, sizeof(event.message), message);
@@ -377,9 +374,6 @@ struct DeckLinkOutput::Impl {
     event.stage = error_stage;
     event.os_status = error_status;
     event.submit_id = error_info.submit_id;
-    event.batch_seq = error_info.batch_seq;
-    event.timeline_epoch = error_info.timeline_epoch;
-    event.output_index = error_info.output_index;
     event.source_frame_serial = error_info.source_frame_serial;
     event.display_time = error_display_time;
     CopyMessage(event.message, sizeof(event.message), error_message);
@@ -639,9 +633,6 @@ struct DeckLinkOutput::Impl {
       }
     } else {
       event.submit_id = record.info.submit_id;
-      event.batch_seq = record.info.batch_seq;
-      event.timeline_epoch = record.info.timeline_epoch;
-      event.output_index = record.info.output_index;
       event.source_frame_serial = record.info.source_frame_serial;
       event.display_time = record.display_time;
 
