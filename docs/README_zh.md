@@ -4,10 +4,11 @@
 
 相比于[video-compare](https://github.com/pixop/video-compare)，主要增加了：
 
-1. 支持高位深、HDR10、Dolby Vision (Profile 5/8) 与 HDR Vivid 1.0（`--hdrvivid-render`）
+1. 支持高位深、HDR10、Dolby Vision (Profile 5/8) 与 HDR Vivid
 2. 支持ICC色彩管理，macOS下自动检测系统显示器ICC配置
 3. 支持1-10个视频同时对比，随时切换参考视频，便于评估保真度
 4. 三种显示模式：Fill(切换)、Slide(左右滑动)、Grid(网格)
+5. 支持通过Blackmagic Design的DeckLink设备接入监视器
 
 ## 安装
 
@@ -201,9 +202,9 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
 - `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
 - `--sdr-white-on-hdr <nits>`：当主视频为HDR时，设置SDR视频的参考白电平（单位nits）。默认按照标准参考白203 nits（ITU-R BT.2408）进行映射。该选项仅在主视频为HDR、对比视频为SDR时生效
-- `--target-display-nits <nits>`：公共映射目标的峰值亮度（nits），即所有模式下比较基准的唯一入口：普通播放时是显示映射目标（也是 `--hdrvivid-render` 下 Vivid 曲线的目标显示亮度），监看时即监视器峰值。`pq2020` 监看目标必填（物理监视器没有可猜的默认值），其余默认 1000。要覆盖源自身的 HDR 峰值，请用 `--source-max-luma`
-- `--source-max-luma <nits>`：可选的源 HDR mastering/内容峰值（`pl_color_space.hdr.max_luma`）覆盖，单位 nits。源峰值不可信时使用（HLG、DPX 读回）；仅影响走 libplacebo 普通色调映射的源，不写回码流自带的动态元数据（Vivid 的 tml/rml 锚点属于码流本身，不受影响），且与映射目标完全解耦
-- `--hdrvivid-render`：用 GPU 色调映射曲线应用 HDR Vivid 1.0 动态元数据。每帧携带 CUVA 元数据时，通过所有其他源共用的同一个渲染器映射到公共显示映射目标（`--target-display-nits`），因此 Vivid 与 Dolby Vision 在同一显示线性空间中比较。无 Vivid 元数据的源不受影响，源 mastering/动态元数据也不会被写回公共结果
+- `--target-display-nits <nits>`：映射目标的峰值亮度（nits）：普通播放时是显示映射目标（也是 `--hdrvivid-render` 下 Vivid 曲线的目标显示亮度），监看时即监视器峰值。`pq2020` 监看目标必填（物理监视器没有可猜的默认值），其余默认 1000。
+- `--source-max-luma <nits>`：可选的源 HDR mastering/内容峰值（`pl_color_space.hdr.max_luma`）覆盖，单位 nits。源峰值不可信时使用（HLG、DPX 读回）
+- `--hdrvivid-render`：启用 HDR Vivid 渲染。
 - `--high-dpi {auto,yes,no}`：High-DPI模式，默认`auto`自动检测
 - `--scale-method <method>`：视频放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
@@ -216,27 +217,12 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--icc-profile <profile>`：ICC色彩管理。`auto`使用系统配置(仅macOS)，也可指定ICC文件路径，或`N:path`为特定视频指定
 - `--loglevel <level>`：日志级别，包括`debug`、`info`、`warning`、`error`、`critical`、`off`，默认为`info`
 - `--debug`：等同于`--loglevel debug`
-
-### 监看输出（DeckLink）
-
-用 `-DEYEQ_ENABLE_DECKLINK=ON` 加 DeckLink SDK 构建的版本可以把当前比较结果送到外接监视器。暂停时监视器显示当前静帧；播放时监视器与桌面行为一致：按自身显示节拍（`--monitor-mode` 帧率）呈现，宁可跳帧也绝不放慢，没有新帧就重复上一帧，暂停时冻结最后一帧。桌面预览与监视器输出消费同一份合成结果，因此切换桌面 OSD 或改变窗口大小不会改变监视器输出的打包字节。不传 `--monitor-device` 时默认播放器不变，也不会链接 DeckLink 后端。
-
-- `--monitor-device <selector>`：在指定 DeckLink 设备上开启监看。选择器必须显式：`index:<n>` 或 `id:<persistent-id>`。开启监看会禁用所有应用侧 ICC（global、`auto` 与 `N:path`，包含 macOS 预览）；macOS 系统色彩管理不受影响
-- `--monitor-mode <WxH@N|WxH@N/D>`：原生 mode，使用精确整数数据，例如 `3840x2160@50` 或 `3840x2160@30000/1001`。与 `--monitor-device` 搭配必填；设备原生不支持的 mode 会被拒绝
-- `--monitor-connection {sdi,hdmi}`：输出连接（默认 `sdi`）
-- `--monitor-pixel-format {v210,r210}`：输出像素格式（默认 `v210`）
-- `--monitor-color {sdr709,pq2020}`：色彩目标——`sdr709`（BT.709 / BT.1886）或 `pq2020`（BT.2020 / PQ）（默认 `sdr709`）
-- `--monitor-sdr-white <nits>`：监看时共同映射目标的 SDR 白电平（默认 203 nits）
-
-监视器输出的终止性失败——设备报错、设备丢失或输出已关闭——会在本次运行内停用监看：EyeQ 记录该失败并保持桌面继续运行，监看需重启播放器后恢复。可恢复的单次请求失败（例如打包器读回失败）会被上报，模块仍可继续使用；失败的请求不会重试。sink 报告“显示延迟（DisplayedLate）”或“丢弃（Dropped）”属于正常节拍行为，不算失败：以 `trace` 级别记录，监视器继续用最新帧输出。
-
-已知限制：监视器稳定性与桌面（UI）线程绑定。监视器帧在与桌面预览同一 UI 线程上合成与排程，因此桌面卡顿（例如一次长窗口 present 或 GPU 卡顿）可能导致监视器跳帧；输出不会为补偿而放慢，目前也没有独立的渲染/排程 worker。
-
-监视器输出把显示线性结果直接量化为 10-bit，不添加抖动，输出字节对测试与客观测量是确定性的；平滑渐变上可能出现轻微 banding。`v210` 的 4:2:2 色度子采样来自格式本身；追求更纯净的信号可用 `r210`（RGB 4:4:4）。
-
-开启监看时，`--target-display-nits` 即监视器峰值（比较基准）；`pq2020` 目标下应与监视器校准峰值一致。`--monitor-sdr-white` 设置公共映射目标的 SDR 白电平。
-
-从旧版本迁移：过去用 `--target-display-nits N` 表达的源峰值覆盖，现在改用 `--source-max-luma N`。`sdr709` 监看不再默认把目标设为 100 nits；如需保留旧的监视器峰值，请显式传 `--target-display-nits 100`。
+- `--monitor-device <selector>`：在指定DeckLink设备上开启监看。选择器必须显式：`index:<n>`或`id:<persistent-id>`。开启监看会禁用所有应用侧ICC（global、`auto`与`N:path`）；macOS系统自身的色彩管理不受影响
+- `--monitor-mode <WxH@N|WxH@N/D>`：原生mode，使用精确整数数据，例如`3840x2160@50`或`3840x2160@30000/1001`。与`--monitor-device`搭配必填；设备原生不支持的 mode 会被拒绝
+- `--monitor-connection {sdi,hdmi}`：输出连接（默认`sdi`）
+- `--monitor-pixel-format {v210,r210}`：输出像素格式（默认`v210`）
+- `--monitor-color {sdr709,pq2020}`：色彩目标——`sdr709`（BT.709 / BT.1886）或`pq2020`（BT.2020 / PQ）（默认`sdr709`）
+- `--monitor-sdr-white <nits>`：监看时共同映射目标的SDR白电平（默认203 nits）
 
 ### 环境变量
 
@@ -276,71 +262,14 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 5. 如何回看`Ctrl + E`保存的DPX渲染帧？
 
-   DPX 头部用 SMPTE ST 268:2014 的枚举值记录 transfer/primaries（PQ=14、HLG=15、BT.2020=15），而 FFmpeg 的 DPX 解码器不认识这些值（transfer/colorimetric 只映射到 12/10），reference high quantity（HDR 峰值）也不会被读取。因此 EyeQ 拿到的是未知色彩空间、且没有 `max_luma`——需用 `setparams` 滤镜恢复色彩空间，并用 `--source-max-luma` 提供色调映射所需的源峰值：
+   DPX头部用SMPTE ST 268:2014的枚举值记录transfer/primaries（PQ=14、HLG=15、BT.2020=15），而FFmpeg的DPX解码器不认识这些值（transfer/colorimetric只映射到12/10），reference high quantity（HDR 峰值）也不会被读取。因此EyeQ拿到的是未知色彩空间、且没有`max_luma`——需用 `setparams` 滤镜恢复色彩空间，并用`--source-max-luma`提供色调映射所需的源峰值：
 
    ```
    eyeq --no-colorspace-hint --source-max-luma 1000 \
      'render_0001.0.foo.mkv.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084'
    ```
 
-   HLG 用 `color_trc=arib-std-b67`。在 HDR 显示器上 PQ 直通、无需色调映射，`--no-colorspace-hint` 与 `--source-max-luma` 可不加；`--no-colorspace-hint` 仅在非 HDR 显示器上需要，用于开启色调映射。
-
-## DeckLink 输出
-
-DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。GPU 打包器（`src/output/frame_packer.hpp` / `.cpp`）通过异步读回环把非线性 full-range 浮点 RGB 转成 Video range 的 r210/v210。`eyeq` 播放器已为监看接入该链路（见上方“监看输出（DeckLink）”）：合成层只保留唯一渲染器，把同一份合成结果同时交给桌面预览与监视器输出，播放时监视器输出按 mode 时钟排程。音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。另有独立工具 `decklink-test-signal`，通过同一后端输出确定性 CPU 测试画面，运行时**会启用真实硬件输出**，其用法与选项见 [tests/README_zh.md](../tests/README_zh.md)。
-
-构建开关、测试目标与各测试集的验证状态也统一记录在 [tests/README_zh.md](../tests/README_zh.md)；测试目标默认全部为 `OFF`，不影响普通播放器构建。
-
-构建只读设备/模式查询后端与工具：
-
-```sh
-cmake -S . -B build-sdk -DEYEQ_ENABLE_DECKLINK=ON \
-  -DDECKLINK_SDK_ROOT="/path/to/Blackmagic DeckLink SDK 16.0"
-cmake --build build-sdk --target decklink-catalog
-# 列出设备：
-./build-sdk/bin/decklink-catalog
-# 只读查询某设备的输出模式。选择器必须显式写成 index:<n> 或 id:<persistent-id>，
-# 裸数字会被拒绝，不会被猜测成索引。
-./build-sdk/bin/decklink-catalog --device index:0 --connection sdi --pixel-format v210
-./build-sdk/bin/decklink-catalog --device id:2697367084
-```
-
-该工具只做查询，不会启用输出、调度帧或修改设备配置。
-
-### GPU 帧打包器
-
-`eyeq_frame_packer` 实现了 `FramePacker` 接缝：接收同一 `pl_gpu` 上可采样的非线性
-full-range 浮点 RGB 纹理（`RGBA16F`、`RGBA32F` 或任意分量精度至少 16 位的浮点格式），
-按冻结的首版策略（BT709/SDR-BT1886 或 BT2020/PQ、Video range、Left 色度，不做传输/
-色调映射/ICC 处理），通过固定 3 槽环形缓冲、持久映射主机缓冲与异步
-`pl_tex_download` + `pl_buf_poll` 输出 r210（大端）或 v210（小端）字节。在监看模式下
-`eyeq` 播放器把 packer 输出送到外接监视器（见上方“监看输出（DeckLink）”）。
-
-GPU 打包测试、离屏显示/渲染测试与监看组合层测试统一记录在
-[tests/README_zh.md](../tests/README_zh.md)。
-
-### 监看组合层
-
-`src/output/monitor_output.hpp` 消费由协调层（`src/display/display_coordinator.*`）产出的
-公共显示线性结果，把它编码为固定尺寸的离屏 full-range RGB 目标（输出像素格式），再用
-`FramePacker` 打包后交给 `FrameSink`。它不再拥有 `FrameRenderer`。它自己拥有
-`FrameSink`；main 在同一线程用 `Tick()`（或底层的 `Submit()`/`Pump()`）推进。静帧路径同一
-时刻只允许一个在途请求，在途时新请求返回 Busy，不会被读取或映射。播放路径
-（`SetPlayback(true)`）把新合成帧通过 packer 环流水提交，每帧排到下一个显示节拍点，
-队列满时顶掉最旧的未排帧。与桌面差分路径不同，该层**不校验**公共结果的 NaN/Inf（既不做全帧
-读回，也不做 GPU 内归约）：非有限值在这里被视为源/上游的问题。`Close()` 在同一个总 deadline
-内停止调度播放、排空 packer 并关闭自己拥有的 sink。
-
-配合 `EYEQ_ENABLE_DECKLINK=ON`，`eyeq` 播放器已为监看接入该层（见“监看输出（DeckLink）”）；
-音频与原生 HDR 直通仍未实现，paced 路径尚未在真实硬件上验证（见
-[tests/README_zh.md](../tests/README_zh.md)）。
-
-## 测试
-
-测试位于 `tests/`，由 [tests/CMakeLists.txt](../tests/CMakeLists.txt) 接入；构建开关、
-各测试集的运行方式与验证状态统一记录在 [tests/README_zh.md](../tests/README_zh.md)。
-所有测试目标默认 `OFF`，不影响普通播放器构建。没有任何测试集验证真实 DeckLink 硬件、
-窗口 present 路径或桌面视觉输出。
+   HLG用`color_trc=arib-std-b67`。在HDR显示器上PQ直通、无需色调映射，`--no-colorspace-hint`与`--source-max-luma`可不加；`--no-colorspace-hint`仅在非HDR显示器上需要，用于开启色调映射。
 
 ## 许可证
 

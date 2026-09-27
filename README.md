@@ -6,10 +6,11 @@ A multi-video subjective quality comparison tool, focused on visual quality asse
 
 Compared to [video-compare](https://github.com/pixop/video-compare), EyeQ adds:
 
-1. High bit-depth, HDR10, Dolby Vision (Profile 5/8) and HDR Vivid 1.0 (`--hdrvivid-render`) support
+1. High bit-depth, HDR10, Dolby Vision (Profile 5/8) and HDR Vivid support
 2. ICC color management with automatic system display ICC profile detection on macOS
 3. Simultaneous comparison of 1–10 videos with on-the-fly reference switching for fidelity evaluation
 4. Three display modes: Fill (switch), Slide (side-by-side swipe), and Grid
+5. Monitoring via a Blackmagic Design DeckLink device
 
 ## Installation
 
@@ -203,9 +204,9 @@ After launching, the following keyboard and mouse controls are available:
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
 - `--no-colorspace-hint`: Disable video color space hinting; uses the default color space instead. Enable this for tone mapping when the display does not support HDR
 - `--sdr-white-on-hdr <nits>`: Set the SDR reference white level (in nits) when the main video is HDR. By default, SDR videos are mapped using the standard reference white of 203 nits (ITU-R BT.2408). This option only takes effect when the main video is HDR and the target video is SDR
-- `--target-display-nits <nits>`: Peak luminance of the common mapping target in nits — the single comparison baseline in every mode. With `--hdrvivid-render` it is also the target display luminance the Vivid curve is solved against; when monitoring is enabled it is the external monitor peak. Required for a `pq2020` monitor target (a physical monitor has no guessable default); otherwise it defaults to 1000. To override a source's own HDR peak, use `--source-max-luma`
-- `--source-max-luma <nits>`: Opt-in override of the source HDR mastering/content peak (`pl_color_space.hdr.max_luma`) in nits. Use it when the source peak is untrusted (HLG, DPX read-back); it affects only sources that go through libplacebo's normal tone mapping, never rewrites the bitstream's dynamic metadata (the Vivid tml/rml anchors are part of the stream and stay untouched), and is decoupled from the mapping target
-- `--hdrvivid-render`: Apply HDR Vivid 1.0 dynamic metadata with a GPU tone-mapping curve. Each frame that carries CUVA metadata is mapped to the common display mapping target (`--target-display-nits`) through the same single renderer every other source uses, so Vivid and Dolby Vision are compared in one display-linear space. Sources without Vivid metadata are left untouched, and the source's mastering/dynamic metadata is never rewritten into the public result
+- `--target-display-nits <nits>`: Peak luminance of the mapping target in nits: for normal playback it is the display mapping target (and also the target display luminance the Vivid curve is solved against under `--hdrvivid-render`); when monitoring it is the monitor peak. Required for a `pq2020` monitor target (a physical monitor has no guessable default); otherwise it defaults to 1000.
+- `--source-max-luma <nits>`: Opt-in override of the source HDR mastering/content peak (`pl_color_space.hdr.max_luma`) in nits. Use it when the source peak is untrusted (HLG, DPX read-back).
+- `--hdrvivid-render`: Enable HDR Vivid rendering.
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
 - `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
@@ -218,27 +219,12 @@ After launching, the following keyboard and mouse controls are available:
 - `--icc-profile <profile>`: ICC color management — `auto` uses the system profile (macOS only); a file path specifies a custom ICC profile; `N:path` specifies a profile for a specific video
 - `--loglevel <level>`: Log level — `debug`, `info`, `warning`, `error`, `critical`, `off` (default `info`)
 - `--debug`: Equivalent to `--loglevel debug`
-
-### Monitoring Output (DeckLink)
-
-A build made with `-DEYEQ_ENABLE_DECKLINK=ON` and the DeckLink SDK can send the current comparison result to an external monitor. While the player is paused the monitor shows the current still; while it plays, the monitor follows the desktop: it presents at its own display ticks (the `--monitor-mode` rate), skips frames instead of slowing down, repeats the last frame when none is ready, and freezes on the last frame when paused. The desktop preview and the DeckLink output consume the same composed result, so toggling the desktop OSD or resizing the window never changes the packed output bytes. Without `--monitor-device` the default player is unchanged and does not link the DeckLink backend.
-
-- `--monitor-device <selector>`: Enable monitoring on a DeckLink device. The selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`, including the macOS preview); the macOS system color management is untouched
+- `--monitor-device <selector>`: Enable monitoring on a DeckLink device. The selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`); the macOS system color management itself is untouched
 - `--monitor-mode <WxH@N|WxH@N/D>`: Native monitor mode as exact integer data, e.g. `3840x2160@50` or `3840x2160@30000/1001`. Required with `--monitor-device`; a mode the device does not natively support is rejected
 - `--monitor-connection {sdi,hdmi}`: Output connection (default `sdi`)
 - `--monitor-pixel-format {v210,r210}`: Output pixel format (default `v210`)
 - `--monitor-color {sdr709,pq2020}`: Color target — `sdr709` (BT.709 / BT.1886) or `pq2020` (BT.2020 / PQ) (default `sdr709`)
 - `--monitor-sdr-white <nits>`: SDR white level of the common mapping target when monitoring (default 203 nits)
-
-A terminal monitor failure — a device error, a lost device, or a closed output — stops monitoring for the rest of the run: EyeQ logs the failure and keeps the desktop running, and monitoring only comes back after a player restart. A recoverable per-request failure (for example a `FramePacker` readback failure) is reported and the module keeps working; a failed request is not retried. A frame the sink reports as displayed late or dropped is normal pacing behaviour, not a failure: it is traced at `trace` level and the monitor continues with the newest frame.
-
-Known limitation: monitor stability is tied to the desktop (UI) thread. Monitor frames are composed and paced on the same UI thread that presents the desktop preview, so a desktop stall (for example a long window present or a GPU stall) can make the monitor skip frames. The output never slows down to compensate, and there is no independent render/pace worker yet.
-
-The monitor output quantizes the display-linear result directly to 10-bit without adding dither, so the output bytes are deterministic for tests and objective measurement; smooth gradients may show slight banding. `v210`'s 4:2:2 chroma subsampling comes with the format; `r210` (RGB 4:4:4) is the cleanest signal.
-
-When monitoring is enabled, `--target-display-nits` is the external monitor peak (the comparison baseline); for a `pq2020` target it should match the monitor's calibrated peak. `--monitor-sdr-white` sets the SDR white of the common mapping target.
-
-Migration from older builds: a source-peak override previously written as `--target-display-nits N` is now `--source-max-luma N`. `sdr709` monitoring no longer defaults the target to 100 nits; pass `--target-display-nits 100` to keep the old monitor peak.
 
 ### Environment Variables
 
@@ -286,74 +272,6 @@ Migration from older builds: a source-peak override previously written as `--tar
    ```
 
    Use `color_trc=arib-std-b67` for HLG. On an HDR display the PQ output passes through without tone mapping, so `--no-colorspace-hint` and `--source-max-luma` are unnecessary; `--no-colorspace-hint` is required only on non-HDR displays to enable tone mapping.
-
-## DeckLink Output
-
-The DeckLink SDI/HDMI output backend has an independent implementation: device/mode enumeration, a default SDK frame pool, CPU frame copy, scheduled playback with completion events, still frames and safe shutdown. A GPU frame packer (`src/output/frame_packer.hpp` / `.cpp`) converts nonlinear full-range float RGB into Video-range r210/v210 through an asynchronous readback ring. The `eyeq` player is wired to the packer for external monitoring (see the Monitoring Output section above): the composition layer keeps a single renderer and hands the same composed result to both the desktop preview and the monitor output, and the monitor output paces frames to the mode clock while playing. Audio and native HDR passthrough are not implemented, and `decklink-catalog` remains read-only. A standalone `decklink-test-signal` tool renders a deterministic CPU pattern through the same backend and enables real hardware output when run. Its usage and options are documented in [tests/README.md](./tests/README.md).
-
-The build switches, the test targets and the per-suite verification status are also
-documented in [tests/README.md](./tests/README.md); every test target defaults to
-`OFF` and the normal player build is unaffected.
-
-Building the read-only catalog backend and tool:
-
-```sh
-cmake -S . -B build-sdk -DEYEQ_ENABLE_DECKLINK=ON \
-  -DDECKLINK_SDK_ROOT="/path/to/Blackmagic DeckLink SDK 16.0"
-cmake --build build-sdk --target decklink-catalog
-# List devices:
-./build-sdk/bin/decklink-catalog
-# List output modes for a device (read-only). The selector is explicit: index:<n> or
-# id:<persistent-id>, and a bare number is rejected instead of being guessed.
-./build-sdk/bin/decklink-catalog --device index:0 --connection sdi --pixel-format v210
-./build-sdk/bin/decklink-catalog --device id:2697367084
-```
-
-The tool only queries the device; it never enables an output, schedules frames or changes device configuration.
-
-### GPU frame packer
-
-`eyeq_frame_packer` implements the `FramePacker` seam. It takes a sampleable,
-nonlinear full-range float RGB texture (`RGBA16F`, `RGBA32F` or any float format with
-at least 16-bit components) on the same `pl_gpu`, applies the frozen first-version
-policy (BT709/SDR-BT1886 or BT2020/PQ, Video range, Left chroma, no transfer/tonemap/
-ICC processing) and produces r210 (big-endian) or v210 (little-endian) bytes in a
-fixed staging ring (three slots) backed by persistent mapped host buffers and asynchronous
-`pl_tex_download` + `pl_buf_poll`. In monitoring mode the `eyeq` player sends the
-packer's output to an external monitor (see the Monitoring Output section above).
-
-The GPU packing tests, the offscreen display/rendering tests and the monitor
-composition tests are documented in [tests/README.md](./tests/README.md).
-
-### Monitor composition layer
-
-`src/output/monitor_output.hpp` consumes the common display-linear result produced by
-the coordination layer (`src/display/display_coordinator.*`), encodes it into a fixed
-offscreen full-range RGB target in the selected output pixel format, packs it with
-`FramePacker` and hands the bytes to the `FrameSink`. It never owns a `FrameRenderer`.
-It owns the `FrameSink`; main advances it on the same thread with `Tick()` (or the
-low-level `Submit()`/`Pump()`). The still path keeps at most one request in flight and
-reports a request that arrives meanwhile as Busy without reading or mapping it. The
-paced playback path (enabled with `SetPlayback(true)`) pipelines new composed frames
-through the packer ring, schedules each at the next display tick and drops the oldest
-unscheduled frame on overflow. Unlike the desktop difference path, this layer does
-not validate the common result for NaN/Inf (no full-frame readback and no GPU-side
-reduction): a non-finite sample is treated as a source/upstream problem there.
-`Close()` stops scheduled playback, drains the packer, and closes the owned sink
-within one total deadline.
-
-With `EYEQ_ENABLE_DECKLINK=ON` the `eyeq` player is wired to this layer for external
-monitoring (see "Monitoring Output (DeckLink)"); audio and native HDR passthrough are
-still not implemented; the paced path has not been validated on real hardware (see
-[tests/README.md](./tests/README.md)).
-
-## Testing
-
-Test suites live under `tests/` and are wired by [tests/CMakeLists.txt](./tests/CMakeLists.txt);
-the build switches, how to run each suite, and the verification status of each suite
-are documented in [tests/README.md](./tests/README.md). Every test target defaults to
-`OFF`, so the normal player build is unaffected. No test suite verifies real DeckLink
-hardware, a window present path, or desktop visual output.
 
 ## License
 

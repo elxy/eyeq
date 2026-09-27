@@ -7,6 +7,7 @@
 - [SDL3](https://www.libsdl.org/) — window management and user interaction; SDL3_ttf for OSD text rendering
 - [Vulkan](https://www.vulkan.org/) — rendering backend
 - [spdlog](https://github.com/gabime/spdlog) — logging
+- [Desktop Video SDK](http://www.blackmagicdesign.com/support/family/capture-and-playback) — monitoring via a Blackmagic Design DeckLink device
 
 Building via Homebrew is recommended on macOS and Linux. On Windows, building via MSYS2 is recommended.
 
@@ -50,4 +51,24 @@ cd eyeq
 # Build
 cmake -S . -B build
 cmake --build build
+```
+
+### DeckLink Support
+
+Manually download the Desktop Video SDK and install it to `/path/to/Blackmagic DeckLink SDK 16.0`.
+
+```sh
+cmake -S . -B build -DEYEQ_ENABLE_DECKLINK=ON \
+  -DDECKLINK_SDK_ROOT="/path/to/Blackmagic DeckLink SDK 16.0"
+```
+
+Using the device/mode query tool:
+
+```sh
+cmake --build build --target decklink-catalog
+# List devices:
+./build-sdk/bin/decklink-catalog
+# Read-only query of a device's output modes. The selector must be written explicitly as index:<n> or id:<persistent-id>
+./build-sdk/bin/decklink-catalog --device index:0 --connection sdi --pixel-format v210
+./build-sdk/bin/decklink-catalog --device id:2697367084
 ```

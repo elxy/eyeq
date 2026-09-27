@@ -7,6 +7,7 @@ EyeQ的依赖项：
 - [SDL3](https://www.libsdl.org/)：用于窗口管理、用户交互，SDL3_ttf用于OSD显示
 - [Vulkan](https://www.vulkan.org/)：渲染后端
 - [spdlog](https://github.com/gabime/spdlog)：用于日志
+- [Desktop Video SDK](http://www.blackmagicdesign.com/support/family/capture-and-playback)：通过Blackmagic Design的DeckLink设备接入监视器。
 
 MacOS和Linux下建议通过Homebrew编译，Windows下建议通过MSYS2编译。
 
@@ -14,11 +15,11 @@ MacOS和Linux下建议通过Homebrew编译，Windows下建议通过MSYS2编译�
 
 ```sh
 # 安装依赖
-brew tap ernestcao/homebrew-eyeq https://git.woa.com/ernestcao/homebrew-eyeq
+brew tap elxy/eyeq
 brew install --only-dependencies eyeq # 自动安装依赖项
 
 # 下载源码
-git clone https://git.woa.com/ernestcao/eyeq.git
+git clone https://github.com/elxy/eyeq.git
 cd eyeq
 
 # 编译
@@ -44,7 +45,7 @@ pacman -S mingw-w64-ucrt-x86_64-sdl3-ttf
 pacman -S mingw-w64-ucrt-x86_64-ffmpeg
 
 # 下载源码
-git clone https://git.woa.com/ernestcao/eyeq
+git clone https://github.com/elxy/eyeq.git
 cd eyeq
 
 # 编译
@@ -52,3 +53,22 @@ cmake -S . -B build
 cmake --build build
 ```
 
+### DeckLink支持
+
+手动下载Desktop Video SDK，安装到`/path/to/Blackmagic DeckLink SDK 16.0`。
+
+```sh
+cmake -S . -B build -DEYEQ_ENABLE_DECKLINK=ON \
+  -DDECKLINK_SDK_ROOT="/path/to/Blackmagic DeckLink SDK 16.0"
+```
+
+使用设备/模式查询工具：
+
+```sh
+cmake --build build --target decklink-catalog
+# 列出设备：
+./build-sdk/bin/decklink-catalog
+# 只读查询某设备的输出模式。选择器必须显式写成index:<n>或id:<persistent-id>
+./build-sdk/bin/decklink-catalog --device index:0 --connection sdi --pixel-format v210
+./build-sdk/bin/decklink-catalog --device id:2697367084
+```
