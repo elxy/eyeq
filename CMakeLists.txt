@@ -16,10 +16,6 @@ message(STATUS "EyeQ version: ${GIT_VERSION}")
 
 # Optional DeckLink output backend (not part of the default player build).
 option(EYEQ_ENABLE_DECKLINK "Enable the DeckLink SDK backend (read-only catalog plus scheduled output) and its tools" OFF)
-option(EYEQ_BUILD_DECKLINK_TESTS "Build the DeckLink CPU/fake contract and backend tests (no GPU, no device)" OFF)
-option(EYEQ_BUILD_DECKLINK_GPU_TESTS "Build the GPU packing tests (needs libplacebo and a real Vulkan device at runtime; no SDK)" OFF)
-option(EYEQ_BUILD_DISPLAY_GPU_TESTS "Build the offscreen display/rendering tests (needs libplacebo and a real Vulkan device at runtime; no SDK, no window)" OFF)
-option(EYEQ_BUILD_PLAYER_TESTS "Build the SyncPlayer frame publication/control tests (CPU only, no GPU/SDK/window)" OFF)
 set(DECKLINK_SDK_ROOT "" CACHE PATH "Path to the Blackmagic DeckLink SDK root (read-only; used from phase 1-A)")
 
 # macOS requires Objective-C++ support (ICC profile auto-detection)
@@ -223,57 +219,10 @@ install(
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
-# DeckLink CPU/fake contract tests. No SDK, no GPU, no device.
-if(EYEQ_BUILD_DECKLINK_TESTS)
-  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/decklink/CMakeLists.txt")
-    message(FATAL_ERROR "EYEQ_BUILD_DECKLINK_TESTS=ON but tests/decklink/CMakeLists.txt is missing")
-  endif()
-  enable_testing()
-  add_subdirectory(tests/decklink)
-
-  # A-owned backend tests additionally need the SDK build.
-  if(EYEQ_ENABLE_DECKLINK)
-    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/decklink/backend/CMakeLists.txt")
-      message(FATAL_ERROR "EYEQ_ENABLE_DECKLINK and EYEQ_BUILD_DECKLINK_TESTS are ON but tests/decklink/backend/CMakeLists.txt is missing")
-    endif()
-    add_subdirectory(tests/decklink/backend)
-  endif()
-endif()
-
-# GPU packing tests plus their CPU oracle. They need libplacebo and a real Vulkan
-# device at runtime, but never the DeckLink SDK, so they can build and run with the
-# SDK disabled and DECKLINK_SDK_ROOT unset. A missing/unsuitable GPU is reported as
-# a test failure, not silently skipped.
-if(EYEQ_BUILD_DECKLINK_GPU_TESTS)
-  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/decklink/packer/CMakeLists.txt")
-    message(FATAL_ERROR "EYEQ_BUILD_DECKLINK_GPU_TESTS=ON but tests/decklink/packer/CMakeLists.txt is missing")
-  endif()
-  enable_testing()
-  add_subdirectory(tests/decklink/packer)
-endif()
-
-# Offscreen display/rendering tests. They need libplacebo and a real Vulkan
-# device at runtime but never the DeckLink SDK or a window, so they can build
-# and run with the SDK disabled and DECKLINK_SDK_ROOT unset. A missing/unsuitable
-# GPU is reported as a test failure, not silently skipped.
-if(EYEQ_BUILD_DISPLAY_GPU_TESTS)
-  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/display/CMakeLists.txt")
-    message(FATAL_ERROR "EYEQ_BUILD_DISPLAY_GPU_TESTS=ON but tests/display/CMakeLists.txt is missing")
-  endif()
-  enable_testing()
-  add_subdirectory(tests/display)
-  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/output/CMakeLists.txt")
-    message(FATAL_ERROR "EYEQ_BUILD_DISPLAY_GPU_TESTS=ON but tests/output/CMakeLists.txt is missing")
-  endif()
-  add_subdirectory(tests/output)
-endif()
-
-# Player frame publication/control tests. They run the real SyncPlayer and
-# VideoSource over locally synthesized YUV4MPEG2 files; no GPU, SDK, or window.
-if(EYEQ_BUILD_PLAYER_TESTS)
-  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tests/player/CMakeLists.txt")
-    message(FATAL_ERROR "EYEQ_BUILD_PLAYER_TESTS=ON but tests/player/CMakeLists.txt is missing")
-  endif()
-  enable_testing()
-  add_subdirectory(tests/player)
-endif()
+# Optional test targets. The switches, the target wiring and the documentation all
+# live in tests/ (see tests/README.md); every test target defaults to OFF, so the
+# normal player build is unaffected. enable_testing() is called here because ctest
+# expects a test file in the build root, and it generates the top-level test file
+# that delegates to the subdirectories.
+enable_testing()
+add_subdirectory(tests)

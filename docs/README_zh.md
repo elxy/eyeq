@@ -287,34 +287,9 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 ## DeckLink 输出
 
-DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。GPU 打包器（`src/output/frame_packer.hpp` / `.cpp`）通过异步读回环把非线性 full-range 浮点 RGB 转成 Video range 的 r210/v210。`eyeq` 播放器已为监看接入该链路（见上方“监看输出（DeckLink）”）：合成层只保留唯一渲染器，把同一份合成结果同时交给桌面预览与监视器输出，播放时监视器输出按 mode 时钟排程。音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。另有独立工具 `decklink-test-signal`，通过同一后端输出确定性 CPU 测试画面，运行时**会启用真实硬件输出**。自动化验证目前只在 fake SDK 上跑通原生写路径，打包器仅在本机 GPU 上验证，paced 监看路径则用 scripted fake sink 验证；这些是验证状态，不是运行行为限制。
+DeckLink SDI/HDMI 输出后端已有独立实现：设备/模式枚举、SDK 默认帧池、CPU 帧复制、带完成事件的调度播放、静帧与安全关闭。GPU 打包器（`src/output/frame_packer.hpp` / `.cpp`）通过异步读回环把非线性 full-range 浮点 RGB 转成 Video range 的 r210/v210。`eyeq` 播放器已为监看接入该链路（见上方“监看输出（DeckLink）”）：合成层只保留唯一渲染器，把同一份合成结果同时交给桌面预览与监视器输出，播放时监视器输出按 mode 时钟排程。音频与原生 HDR 直通均未实现，`decklink-catalog` 工具仍保持只读。另有独立工具 `decklink-test-signal`，通过同一后端输出确定性 CPU 测试画面，运行时**会启用真实硬件输出**，其用法与选项见 [tests/README_zh.md](../tests/README_zh.md)。
 
-可选 CMake 开关（默认全部为 `OFF`，不影响普通播放器构建）：
-
-| 开关 | 默认 | 用途 |
-|---|---|---|
-| `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建 CPU/fake 契约测试；配合 `EYEQ_ENABLE_DECKLINK` 还会构建确定性的 SDK 故障注入与输出后端测试。无需 GPU、设备 |
-| `EYEQ_ENABLE_DECKLINK` | `OFF` | 构建 SDK 后端（只读 catalog + 输出后端）与 `decklink-catalog`、`decklink-test-signal` 工具；需要 Apple Silicon macOS 与 `DECKLINK_SDK_ROOT`。同时为 `eyeq` 接入监看选项 |
-| `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 构建 GPU 打包测试：CPU oracle、真实 GPU 对比/读回测试、生命周期故障注入测试。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK，也不需要 DeckLink 设备 |
-| `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | 构建离屏显示/渲染测试：在无窗口的 headless Vulkan 设备上运行真实 `RenderContext`/`FrameRenderer`，覆盖 Fill/Slide/Grid、双实例交错、HDR override、ICC 隔离与 OSD 开关。运行时需要 libplacebo 与可用的 Vulkan 设备；不需要 SDK、窗口或 DeckLink 设备 |
-| `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | 构建纯 CPU 播放器测试：用本地合成的 YUV4MPEG2 文件驱动真实 `SyncPlayer`/`VideoSource`，覆盖帧快照发布、控制完成顺序、相对 seek 累积、多源 EOF 对齐、有界命令预算、Stop 取消与 seek 失败传播。无需 GPU、窗口、SDK 或 DeckLink 设备 |
-| `DECKLINK_SDK_ROOT` | *(空)* | DeckLink SDK 根目录（只读），`EYEQ_ENABLE_DECKLINK` 必需；不会下载或修改 |
-
-运行 CPU/fake 契约测试（无需 SDK）：
-
-```sh
-cmake -S . -B build -DEYEQ_BUILD_DECKLINK_TESTS=ON
-cmake --build build --target decklink_contract_test
-ctest --test-dir build --output-on-failure
-```
-
-运行播放器帧/控制测试（无需 GPU、窗口或 SDK）：
-
-```sh
-cmake -S . -B build-player -DEYEQ_BUILD_PLAYER_TESTS=ON
-cmake --build build-player --target player_sync_test
-ctest --test-dir build-player -R player_sync --output-on-failure
-```
+构建开关、测试目标与各测试集的验证状态也统一记录在 [tests/README_zh.md](../tests/README_zh.md)；测试目标默认全部为 `OFF`，不影响普通播放器构建。
 
 构建只读设备/模式查询后端与工具：
 
@@ -332,23 +307,6 @@ cmake --build build-sdk --target decklink-catalog
 
 该工具只做查询，不会启用输出、调度帧或修改设备配置。
 
-### 测试信号发生器
-
-`decklink-test-signal` 生成确定性的 CPU 测试画面，并通过同一输出后端发送，不经 `eyeq` 播放器、不依赖 GPU 打包器。它用于实机验证 SDI/HDMI 链路、模式时基、range 与运动顺序，运行时**会启用真实硬件输出**。
-
-当前自动化验证只在 fake SDK 上运行该工具与后端；这是验证状态而非运行行为：可执行文件确实会启用硬件输出。首轮计划先跑 SDI；HDMI 与 PQ 已接线但未经实机验收。
-
-```sh
-cmake --build build-sdk --target decklink-test-signal
-# 按模式的准确有理帧率输出 10 秒，SDI、v210、SDR：
-./build-sdk/bin/decklink-test-signal --device index:0 --connection sdi \
-  --pixel-format v210 --mode auto --seconds 10
-```
-
-选项：`--device index:<n>|id:<id>`（必填，选择器与 `decklink-catalog` 相同）、`--connection sdi|hdmi`、`--pixel-format r210|v210`、`--mode WxH@fps|auto`（auto 优先 3840x2160 50p；显式模式必须存在于设备原生列表）、`--hdr`（BT2020/PQ）、`--frames N` 与 `--seconds S`（互斥，默认 5 秒）、`--preroll N`（默认 4，上限为帧数；若设备帧池先满则提前开始播放，不等 Start 前不可能出现的完成事件）、`--drain-timeout-ms N`（默认 5000，是无进展超时而非整次运行死线）、`--still`（显示一次静帧，不 Start、不调度）与 `-h|--help`。退出码：0 成功，1 用法/请求/运行错误，2 DeckLink 驱动不可用。
-
-启用输出前，工具会在选定设备上只读查询 `bmdDeckLinkStatusBusy`；若设备报告忙、`IDeckLinkStatus` 缺失或查询失败则拒绝，且不会用 Enable/Disable 试探，也不会终止/抢占 DaVinci Resolve 等其他应用。该检查是瞬时快照而非设备锁，不能保证绝对排除并发占用。Ctrl-C/SIGTERM 只设置标志，由消费线程观察：停止提交新帧，随后关闭输出并消费已保留事件再退出。
-
 ### GPU 帧打包器
 
 `eyeq_frame_packer` 实现了 `FramePacker` 接缝：接收同一 `pl_gpu` 上可采样的非线性
@@ -358,32 +316,8 @@ full-range 浮点 RGB 纹理（`RGBA16F`、`RGBA32F` 或任意分量精度至少
 `pl_tex_download` + `pl_buf_poll` 输出 r210（大端）或 v210（小端）字节。在监看模式下
 `eyeq` 播放器把 packer 输出送到外接监视器（见上方“监看输出（DeckLink）”）。
 
-运行 GPU 测试（无需 SDK、无需 DeckLink 设备；需要真实 Vulkan GPU，无可用 GPU 时测试
-直接失败而不是跳过）：
-
-```sh
-cmake -S . -B build-gpu -DEYEQ_BUILD_DECKLINK_GPU_TESTS=ON
-cmake --build build-gpu
-ctest --test-dir build-gpu --output-on-failure
-```
-
-### 离屏显示/渲染测试
-
-`RenderContext` 拥有共享的 GPU 生命周期（log、Vulkan instance/device、FFmpeg Vulkan
-hw_device 与 queue-lock 回调），`FrameRenderer` 拥有每个目标独立的渲染资源，因此可以在
-同一个 context 上渲染多个目标。离屏测试不需要窗口，也不需要 DeckLink SDK：
-
-```sh
-cmake -S . -B build-display -DEYEQ_BUILD_DISPLAY_GPU_TESTS=ON
-cmake --build build-display --target display_renderer_gpu_test
-ctest --test-dir build-display -R display_renderer_gpu --output-on-failure
-```
-
-测试把 Fill/Slide/Grid（含参考/差异放大）渲染到不同的 full-range RGB 浮点目标，并对像素与
-几何做可失败断言；在同一 GPU 上把两个不同尺寸、不同色彩目标的 renderer 交错调用，检查一个
-renderer 的输出不受另一个影响、且另一个被销毁后仍可继续；还覆盖失败帧更新（有效→无效→有效）、
-目标局部 HDR nits override、ICC 隔离与 OSD 开关。它不验证窗口 present 路径、桌面视觉输出或任何
-硬件映射，这些仍属于人工/环境受限项。
+GPU 打包测试、离屏显示/渲染测试与监看组合层测试统一记录在
+[tests/README_zh.md](../tests/README_zh.md)。
 
 ### 监看组合层
 
@@ -398,44 +332,15 @@ renderer 的输出不受另一个影响、且另一个被销毁后仍可继续�
 内停止调度播放、排空 packer 并关闭自己拥有的 sink。
 
 配合 `EYEQ_ENABLE_DECKLINK=ON`，`eyeq` 播放器已为监看接入该层（见“监看输出（DeckLink）”）；
-音频与原生 HDR 直通仍未实现，paced 路径尚未在真实硬件上验证。
+音频与原生 HDR 直通仍未实现，paced 路径尚未在真实硬件上验证（见
+[tests/README_zh.md](../tests/README_zh.md)）。
 
-组合测试在无窗口的 headless Vulkan 设备上运行真实组合层，配合可真正返回 Still
-Busy/DeviceError/Closed 的 scripted fake sink：
+## 测试
 
-```sh
-cmake -S . -B build-monitor -DEYEQ_BUILD_DISPLAY_GPU_TESTS=ON
-cmake --build build-monitor --target monitor_output_gpu_test monitor_output_fault_test
-ctest --test-dir build-monitor -R monitor_output --output-on-failure
-```
-
-覆盖 SDR/PQ 与 r210/v210（含非紧凑 `row_bytes` 补齐）、已知黑场/色块/PQ 100nit 锚点、CPU
-打包 oracle、Fill/Slide/Grid/差异放大、Busy/取消/关闭与终态 sink 故障，
-以及 paced 播放（合成顺序、显示节拍严格递增、逐帧字节对 CPU oracle、队列满顶旧、暂停/恢复、
-恢复时回收冻结静帧的 packer 槽位），再加上一次注入真实读回失败的故障测试。
-`monitor_output_fault_test` 链接的是带故障注入 hook 的真实 `frame_packer.cpp`，确保注入确实
-命中。这些测试不验证窗口、真实硬件帧或 DeckLink 设备。
-
-纯 CPU 的已知答案与比较器突变测试属于 CPU 测试集，不需要 GPU：
-
-```sh
-cmake -S . -B build-cpu -DEYEQ_BUILD_DECKLINK_TESTS=ON
-cmake --build build-cpu
-ctest --test-dir build-cpu --output-on-failure
-```
-
-- `decklink_frame_packer_oracle`（纯 CPU）：用手工推导的已知答案（原色/互补色、色度滤波
-  权重与相位、补齐字节）校验独立参考实现，并用故意破坏的字节校验比较器会拒绝错误。
-- `frame_packer_gpu`：在格式边界附近的多组宽度、额外 stride、两种精度与编码、有限值
-  clamp、灰阶/码值锚点、色度相位脉冲上把真实 GPU 读回与参考逐字节对比，并包含 UHD
-  全帧校验。
-- `frame_packer_fault`：通过只存在于该测试目标中的测试钩子注入传输、读回、GPU 失败与
-  分配失败。
-
-本机 UHD 四槽短测（离屏，不代表端到端 4K50）：摊销约 1.0-1.1 ms/帧，submit-to-Ready
-`p50` 约 3-4 ms，帧字节约 33 MB（r210）或 22 MB（v210）；测试会打印当前数值，并分别
-报告映射主机缓冲与逻辑载体 payload，不声称测量驱动物理驻留。HDMI 与 PQ 已接线但未经
-实机验收。
+测试位于 `tests/`，由 [tests/CMakeLists.txt](../tests/CMakeLists.txt) 接入；构建开关、
+各测试集的运行方式与验证状态统一记录在 [tests/README_zh.md](../tests/README_zh.md)。
+所有测试目标默认 `OFF`，不影响普通播放器构建。没有任何测试集验证真实 DeckLink 硬件、
+窗口 present 路径或桌面视觉输出。
 
 ## 许可证
 
