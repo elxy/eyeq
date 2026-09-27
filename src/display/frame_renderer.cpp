@@ -597,10 +597,21 @@ void FrameRenderer::PresentToTarget(struct pl_frame &target, const DisplayState 
   display_render_->SetOsdOverlay(osd_overlay);
 
   const struct pl_frame &linear = display_render_->LinearResult();
+  if (osd_overlay) {
+    // The desktop target is usually the swapchain image, which is not
+    // sampleable, so the encoded result must be staged in a sampleable copy
+    // before the text overlay can be blended onto the real target.
+    struct pl_frame staged = target;
+    staged.planes[0].texture = display_render_->PrepareOsdStaging(target.planes[0].texture);
+    if (!EncodeToTarget(staged, linear, preview)) {
+      display_render_->PresentTo(staged, &linear, &preview);
+    }
+    display_render_->PlotOsdText(target.planes[0].texture, staged.planes[0].texture, target.color.transfer);
+    return;
+  }
   if (!EncodeToTarget(target, linear, preview)) {
     display_render_->PresentTo(target, &linear, &preview);
   }
-  display_render_->PlotOsdText(target.planes[0].texture, target.color.transfer);
 }
 
 void FrameRenderer::ValidateLinearResultFinite() {

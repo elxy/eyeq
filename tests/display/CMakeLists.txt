@@ -42,6 +42,28 @@ add_test(NAME display_renderer_gpu COMMAND display_renderer_gpu_test)
 
 set_tests_properties(display_renderer_gpu PROPERTIES TIMEOUT 600)
 
+# Present-target contract tests. The desktop presenter never hands the renderer a
+# plain offscreen texture: the wrapped swapchain image is not sampleable, and
+# libplacebo only *logs* a validation failure without failing the dispatch, so a
+# pass that samples the target corrupts the frame silently (the pink-screen OSD
+# bug). These tests drive every present path against a swapchain-like target and
+# assert both that no libplacebo error is logged and that the result matches an
+# equivalent sampleable target. Headless Vulkan device; no window, no SDK.
+add_executable(present_target_gpu_test
+  present_target_gpu_test.cpp
+  ${_display_test_sources})
+target_include_directories(present_target_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(present_target_gpu_test PRIVATE
+  spdlog::spdlog
+  Libplacebo::Libplacebo
+  SDL3::SDL3
+  SDL3_ttf::SDL3_ttf
+  FFmpeg::avcodec
+  FFmpeg::avformat
+  FFmpeg::avutil)
+add_test(NAME present_target_gpu COMMAND present_target_gpu_test)
+set_tests_properties(present_target_gpu PROPERTIES TIMEOUT 600)
+
 # Display-linear contract and wire-encode tests. CPU oracles first, then the real
 # OutputEncoder on a headless Vulkan device. Only the context, the mapping target
 # and the encoder are compiled in: no window, no OSD, no DeckLink SDK.

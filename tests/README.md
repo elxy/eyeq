@@ -111,6 +111,26 @@ override, ICC isolation and the OSD enable/disable switch. They do not verify th
 window present path, desktop visual output or any hardware mapping; those remain
 manual/environment-limited.
 
+`present_target_gpu_test` covers the presentation-target contract that the plain
+offscreen tests miss. The desktop presenter hands the renderer a wrapped
+swapchain image, which libplacebo requests with
+`VK_IMAGE_USAGE_COLOR_ATTACHMENT | VK_IMAGE_USAGE_TRANSFER_DST` only, so the
+wrapped `pl_tex` is never sampleable. A pass that samples it fails libplacebo
+validation, but `pl_pass_run()` only logs the failure and `pl_dispatch_finish()`
+still reports success, so the renderer silently writes garbage (the OSD
+"pink screen" bug). The test mirrors the swapchain capabilities on a headless
+target (`sampleable=false`, `renderable`/`blit_dst`) and drives the whole present
+matrix (Fill/Slide/Grid, SDR BT.1886 / HDR PQ / sRGB targets, the letterboxed
+preview, the F32 amplification path and the text OSD) against it and against an
+equivalent sampleable target. Each case asserts that no libplacebo error is
+logged (an installed log trap turns a silent validation failure into a hard
+test failure) and that both targets produce identical pixels:
+
+```sh
+cmake --build build-display --target present_target_gpu_test
+ctest --test-dir build-display -R present_target_gpu --output-on-failure
+```
+
 ## Monitor composition-layer tests
 
 The composition tests exercise the real layer against a headless Vulkan device and a

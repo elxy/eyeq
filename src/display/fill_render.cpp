@@ -54,8 +54,8 @@ FillRender::~FillRender() {
     }
   }
 
-  if (osd_scratch_) {
-    pl_tex_destroy(gpu_, &osd_scratch_);
+  if (osd_staging_) {
+    pl_tex_destroy(gpu_, &osd_staging_);
   }
 
   if (amp_dp_) {
@@ -314,23 +314,32 @@ void FillRender::AmplifyFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], c
   }
 }
 
-void FillRender::PlotOsdText(pl_tex target, enum pl_color_transfer target_trc) {
-  if (!osd_overlay_ || !target) {
-    return;
+pl_tex FillRender::PrepareOsdStaging(pl_tex target) {
+  if (!target) {
+    throw std::invalid_argument("FillRender::PrepareOsdStaging: null target");
   }
-
-  // Blend the text overlay into a scratch texture, then copy the scratch to the
-  // target: the target is also the blend source, and sampling plus writing one
-  // texture in a single pass is a feedback hazard.
-  struct pl_tex_params scratch_params = {
+  // Same size and format as the presentation target, but sampleable so the OSD
+  // blend can read the encoded result. The target is usually the swapchain
+  // image, which libplacebo wraps without VK_IMAGE_USAGE_SAMPLED_BIT.
+  struct pl_tex_params staging_params = {
       .w = target->params.w,
       .h = target->params.h,
       .format = target->params.format,
       .sampleable = true,
       .renderable = true,
   };
-  if (!pl_tex_recreate(gpu_, &osd_scratch_, &scratch_params)) {
-    throw std::runtime_error("Failed to create the OSD blend scratch texture");
+  if (!pl_tex_recreate(gpu_, &osd_staging_, &staging_params)) {
+    throw std::runtime_error("Failed to create the OSD staging texture");
+  }
+  return osd_staging_;
+}
+
+void FillRender::PlotOsdText(pl_tex target, pl_tex encoded, enum pl_color_transfer target_trc) {
+  if (!osd_overlay_ || !target || !encoded) {
+    return;
+  }
+  if (!target->params.renderable) {
+    throw std::invalid_argument("FillRender::PlotOsdText: target is not renderable");
   }
 
   // The text is blended in the *encoded* target domain (it is a desktop-only
@@ -344,56 +353,36 @@ void FillRender::PlotOsdText(pl_tex target, enum pl_color_transfer target_trc) {
       },
   };
 
-  {
-    pl_shader shader = pl_dispatch_begin(osd_dp_);
-    struct pl_shader_desc desc[2];
-    desc[0] = {
-        .desc = {.name = "src_tex", .type = PL_DESC_SAMPLED_TEX},
-        .binding = {.object = target, .sample_mode = PL_TEX_SAMPLE_NEAREST},
-    };
-    desc[1] = {
-        .desc = {.name = "osd_tex", .type = PL_DESC_SAMPLED_TEX},
-        .binding = {.object = osd_overlay_, .sample_mode = PL_TEX_SAMPLE_NEAREST},
-    };
-    struct pl_custom_shader params = {
-        .body = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
-                "vec2 pos = gl_FragCoord.xy / tex_size;\n"
-                "color = texture(src_tex, pos);\n"
-                "vec4 osd_color = texture(osd_tex, pos);\n"
-                "osd_color.rgb *= ref_white;\n"
-                "color.rgb = mix(color.rgb, osd_color.rgb, osd_color.a);\n",
-        .output = PL_SHADER_SIG_COLOR,
-        .descriptors = desc,
-        .num_descriptors = 2,
-        .variables = vars,
-        .num_variables = 1,
-    };
-    pl_shader_custom(shader, &params);
-    struct pl_dispatch_params dp_params = {.shader = &shader, .target = osd_scratch_};
-    if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
-      throw std::runtime_error("pl_dispatch_finish failed (OSD text blend).");
-    }
-  }
-
-  {
-    pl_shader shader = pl_dispatch_begin(osd_dp_);
-    struct pl_shader_desc desc = {
-        .desc = {.name = "src_tex", .type = PL_DESC_SAMPLED_TEX},
-        .binding = {.object = osd_scratch_, .sample_mode = PL_TEX_SAMPLE_NEAREST},
-    };
-    struct pl_custom_shader params = {
-        .body = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
-                "vec2 pos = gl_FragCoord.xy / tex_size;\n"
-                "color = texture(src_tex, pos);\n",
-        .output = PL_SHADER_SIG_COLOR,
-        .descriptors = &desc,
-        .num_descriptors = 1,
-    };
-    pl_shader_custom(shader, &params);
-    struct pl_dispatch_params dp_params = {.shader = &shader, .target = target};
-    if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
-      throw std::runtime_error("pl_dispatch_finish failed (OSD text copy).");
-    }
+  // The encoded content is read from the staging copy, never from the target:
+  // the blend both samples and writes the target size, and the target may not
+  // even be sampleable (swapchain).
+  pl_shader shader = pl_dispatch_begin(osd_dp_);
+  struct pl_shader_desc desc[2];
+  desc[0] = {
+      .desc = {.name = "src_tex", .type = PL_DESC_SAMPLED_TEX},
+      .binding = {.object = encoded, .sample_mode = PL_TEX_SAMPLE_NEAREST},
+  };
+  desc[1] = {
+      .desc = {.name = "osd_tex", .type = PL_DESC_SAMPLED_TEX},
+      .binding = {.object = osd_overlay_, .sample_mode = PL_TEX_SAMPLE_NEAREST},
+  };
+  struct pl_custom_shader params = {
+      .body = "vec2 tex_size = vec2(textureSize(src_tex, 0));\n"
+              "vec2 pos = gl_FragCoord.xy / tex_size;\n"
+              "color = texture(src_tex, pos);\n"
+              "vec4 osd_color = texture(osd_tex, pos);\n"
+              "osd_color.rgb *= ref_white;\n"
+              "color.rgb = mix(color.rgb, osd_color.rgb, osd_color.a);\n",
+      .output = PL_SHADER_SIG_COLOR,
+      .descriptors = desc,
+      .num_descriptors = 2,
+      .variables = vars,
+      .num_variables = 1,
+  };
+  pl_shader_custom(shader, &params);
+  struct pl_dispatch_params dp_params = {.shader = &shader, .target = target};
+  if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
+    throw std::runtime_error("pl_dispatch_finish failed (OSD text blend).");
   }
 }
 

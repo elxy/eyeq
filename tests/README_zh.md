@@ -99,6 +99,21 @@ renderer的输出不受另一个影响、且另一个被销毁后仍可继续；
 目标局部HDR nits override、ICC隔离与OSD开关。它不验证窗口present路径、桌面视觉输出或任何
 硬件映射，这些仍属于人工/环境受限项。
 
+`present_target_gpu_test`覆盖普通离屏测试漏掉的呈现目标契约。桌面呈现传给renderer的是
+被包装的swapchain图像，libplacebo只以`VK_IMAGE_USAGE_COLOR_ATTACHMENT |
+VK_IMAGE_USAGE_TRANSFER_DST`请求它，因此包装后的`pl_tex`永远不可采样。采样它的pass会
+被libplacebo校验拒绝，但`pl_pass_run()`只打印错误，`pl_dispatch_finish()`仍返回成功，
+renderer于是静默写入垃圾（OSD粉屏bug）。该测试在headless目标上复刻swapchain能力
+（`sampleable=false`、`renderable`/`blit_dst`），把整条呈现矩阵（Fill/Slide/Grid、
+SDR BT.1886 / HDR PQ / sRGB目标、letterbox预览、F32差异放大路径、文字OSD）分别渲染到
+该目标与等价的`sampleable`目标，每个用例都断言：不产生libplacebo错误（安装log陷阱，
+把静默校验失败变成硬性失败），且两个目标逐像素一致：
+
+```sh
+cmake --build build-display --target present_target_gpu_test
+ctest --test-dir build-display -R present_target_gpu --output-on-failure
+```
+
 ## 监看组合层测试
 
 组合测试在无窗口的headless Vulkan设备上运行真实组合层，配合可真正返回Still

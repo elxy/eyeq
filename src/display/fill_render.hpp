@@ -92,8 +92,20 @@ public:
   /*
    * Blends the text OSD overlay onto an already-encoded target. Kept separate
    * from the comparison geometry so the linear result stays OSD-free.
+   *
+   * @p encoded must be a sampleable copy of the encoded content: the desktop
+   * presentation target (swapchain) cannot be sampled, so the caller stages the
+   * encode/present result through PrepareOsdStaging() first.
    */
-  void PlotOsdText(pl_tex target, enum pl_color_transfer target_trc);
+  void PlotOsdText(pl_tex target, pl_tex encoded, enum pl_color_transfer target_trc);
+
+  /*
+   * Returns a sampleable, renderable texture matching the presentation target's
+   * size and format. The swapchain image is wrapped with COLOR_ATTACHMENT |
+   * TRANSFER_DST only, so it is never sampleable; the OSD blend needs the
+   * encoded content as a sample source, hence this explicit staging copy.
+   */
+  pl_tex PrepareOsdStaging(pl_tex target);
 
 protected:
   pl_gpu gpu_;
@@ -130,10 +142,10 @@ protected:
 
   pl_dispatch osd_dp_;
   pl_tex osd_overlay_ = nullptr; // text OSD overlay (provided externally)
-  // Scratch texture for the desktop OSD blend. The target is also the blend
-  // source, so the blend is written here first and then copied to the target;
-  // sampling and writing one texture in a single pass is a feedback hazard.
-  pl_tex osd_scratch_ = nullptr;
+  // Staging texture for the encoded content the desktop OSD blend samples. The
+  // presentation target itself cannot be sampled (see PrepareOsdStaging), and
+  // sampling plus writing one texture in a single pass is a feedback hazard.
+  pl_tex osd_staging_ = nullptr;
 
   // The pl_frame that currently holds the public display-linear result.
   struct pl_frame *result_frame_ = nullptr;

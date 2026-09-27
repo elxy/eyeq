@@ -156,7 +156,7 @@ struct OffscreenTarget {
 };
 
 OffscreenTarget CreateTarget(pl_gpu gpu, int width, int height, enum pl_color_primaries primaries,
-                             enum pl_color_transfer transfer) {
+                             enum pl_color_transfer transfer, bool sampleable = true) {
   pl_fmt format = pl_find_fmt(
       gpu, PL_FMT_FLOAT, 4, 32, 32,
       static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
@@ -167,7 +167,7 @@ OffscreenTarget CreateTarget(pl_gpu gpu, int width, int height, enum pl_color_pr
       .w = width,
       .h = height,
       .format = format,
-      .sampleable = true,
+      .sampleable = sampleable,
       .renderable = true,
       .host_readable = true,
   };
@@ -1032,6 +1032,42 @@ int main() {
         renderer.Render(target.frame, on);
         std::vector<float> with = DownloadTarget(gpu, target);
         Check(!AllClose(without, with, 1e-5f), "OSD-enabled renderer changes the image when show_osd is set");
+
+        // Regression: the desktop presentation target (the swapchain image) is
+        // wrapped with COLOR_ATTACHMENT | TRANSFER_DST only, so it is never
+        // sampleable. The OSD blend must stage the encoded result instead of
+        // sampling the target: libplacebo only logs the failed validation (it
+        // does not fail the dispatch), so the old code silently copied the
+        // stale scratch over the frame and turned the screen pink.
+        //
+        // A dedicated renderer is used, and the non-sampleable target is drawn
+        // first, so a stale blend from an earlier subtest cannot mask the bug.
+        {
+          EYEQ::FrameRenderer::Config nonsampleable_config = fill_config;
+          nonsampleable_config.enable_osd = true;
+          EYEQ::FrameRenderer nonsampleable_renderer(context, nonsampleable_config);
+          std::map<int, std::shared_ptr<AVFrame>> osd_frames;
+          osd_frames[0] = source;
+          Check(nonsampleable_renderer.FeedFrames(osd_frames).empty(), "OSD regression source accepted");
+          auto osd_on = state;
+          osd_on.show_osd = true;
+
+          auto nonsampleable_target =
+              CreateTarget(gpu, 96, 72, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886, /*sampleable=*/false);
+          Check(!nonsampleable_target.frame.planes[0].texture->params.sampleable,
+                "swapchain-like target is not sampleable");
+          nonsampleable_renderer.Render(nonsampleable_target.frame, osd_on);
+          std::vector<float> nonsampleable_out = DownloadTarget(gpu, nonsampleable_target);
+
+          auto sampleable_target = CreateTarget(gpu, 96, 72, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
+          nonsampleable_renderer.Render(sampleable_target.frame, osd_on);
+          std::vector<float> sampleable_out = DownloadTarget(gpu, sampleable_target);
+
+          Check(AllClose(sampleable_out, nonsampleable_out, 1e-5f),
+                "OSD text blends identically onto a non-sampleable target");
+          Check(DestroyTarget(gpu, sampleable_target), "sampleable OSD target destroyed");
+          Check(DestroyTarget(gpu, nonsampleable_target), "non-sampleable OSD target destroyed");
+        }
       }
       Check(DestroyTarget(gpu, target), "OSD target destroyed");
     }
