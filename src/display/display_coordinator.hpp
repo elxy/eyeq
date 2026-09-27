@@ -3,9 +3,9 @@
 #include <cstdint>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern "C" {
@@ -44,9 +44,10 @@ enum class IccMode {
  * and neither knows about the source videos, the comparison mode or the HDR
  * mapping algorithm.
  *
- * Threading: not internally synchronized. The player serializes FeedFrames (the
- * decode thread) against RenderScene/PresentTo (the UI thread) exactly like the
- * previous Window::render_mutex_ did.
+ * Threading: UI thread only. The 2C-1 synchronized player publishes frame
+ * snapshots, so FeedFrames() is no longer called from the decode thread; every
+ * public method must be called from the thread that constructed this object. There
+ * is no internal mutex; Debug builds assert the calling thread.
  */
 class DisplayCoordinator {
 public:
@@ -174,12 +175,12 @@ private:
   uint64_t ComputeSceneKey(const DisplayState &state) const;
   void ApplyPrecision(WorkPrecision precision);
   void InvalidateScene();
-  // Locked internals: FeedFrames/RenderScene/PresentTo all serialize on
-  // mutex_ (the same single-writer contract the old Window::render_mutex_ had).
+  // Debug-only UI-thread assertion; a no-op in release builds.
+  void AssertUiThread() const;
   const RenderedFrame &ComposeLocked(const DisplayState &state);
   void PresentLocked(struct pl_frame &target, const DisplayState &state);
 
-  mutable std::mutex mutex_;
+  std::thread::id ui_thread_id_;
   std::unique_ptr<FrameRenderer> renderer_;
   ColorspaceHintFunc presenter_hint_;
 

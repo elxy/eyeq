@@ -1,7 +1,7 @@
 #include "display/display_coordinator.hpp"
 
+#include <cassert>
 #include <cmath>
-#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -29,9 +29,10 @@ uint64_t Quantize(float value) {
 } // namespace
 
 DisplayCoordinator::DisplayCoordinator(RenderContext &context, const Config &config, ColorspaceHintFunc presenter_hint)
-    : presenter_hint_(std::move(presenter_hint)), mapping_target_(config.mapping_target),
-      work_precision_(config.work_precision), icc_mode_(config.icc_mode), canvas_w_(config.canvas_w),
-      canvas_h_(config.canvas_h), validate_difference_result_(config.validate_difference_result) {
+    : ui_thread_id_(std::this_thread::get_id()), presenter_hint_(std::move(presenter_hint)),
+      mapping_target_(config.mapping_target), work_precision_(config.work_precision), icc_mode_(config.icc_mode),
+      canvas_w_(config.canvas_w), canvas_h_(config.canvas_h),
+      validate_difference_result_(config.validate_difference_result) {
   ValidateMappingTarget(mapping_target_);
 
   FrameRenderer::Config renderer_config;
@@ -77,6 +78,7 @@ DisplayCoordinator::DisplayCoordinator(RenderContext &context, const Config &con
 DisplayCoordinator::~DisplayCoordinator() = default;
 
 void DisplayCoordinator::SetIccMode(IccMode mode) {
+  AssertUiThread();
   if (icc_mode_ == mode) {
     return;
   }
@@ -93,6 +95,7 @@ bool DisplayCoordinator::IsIccActive() const {
 
 void DisplayCoordinator::LoadICCProfile(std::vector<uint8_t> data, const std::string &source,
                                         std::optional<int> video_id) {
+  AssertUiThread();
   if (icc_mode_ == IccMode::MonitoringDisabled) {
     Logger->info("Monitoring mode: ICC profile '{}' is not loaded or applied", source);
     return;
@@ -101,18 +104,25 @@ void DisplayCoordinator::LoadICCProfile(std::vector<uint8_t> data, const std::st
 }
 
 bool DisplayCoordinator::GetICCTargetColorSpace(struct pl_color_space *out) const {
+  AssertUiThread();
   if (icc_mode_ != IccMode::Enabled) {
     return false;
   }
   return renderer_->GetICCTargetColorSpace(out);
 }
 
-void DisplayCoordinator::SetMainSource(int id) { renderer_->SetMainSource(id); }
+void DisplayCoordinator::SetMainSource(int id) {
+  AssertUiThread();
+  renderer_->SetMainSource(id);
+}
 
-void DisplayCoordinator::SetSdrWhiteOnHdr(float nits) { renderer_->SetSdrWhiteOnHdr(nits); }
+void DisplayCoordinator::SetSdrWhiteOnHdr(float nits) {
+  AssertUiThread();
+  renderer_->SetSdrWhiteOnHdr(nits);
+}
 
 void DisplayCoordinator::SetTargetDisplayNits(double nits, bool override_enabled) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   // Historical, opt-in override of the source HDR max_luma. It never changes the
   // monitor/comparison target: the renderer's setter also nudges its own default
   // mapping target, so the coordinator re-applies the mapping target it owns.
@@ -122,7 +132,7 @@ void DisplayCoordinator::SetTargetDisplayNits(double nits, bool override_enabled
 }
 
 void DisplayCoordinator::SetMonitorTarget(float peak_nits, float sdr_white_nits) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   mapping_target_.peak_nits = peak_nits;
   mapping_target_.sdr_white_nits = sdr_white_nits;
   ValidateMappingTarget(mapping_target_);
@@ -131,7 +141,7 @@ void DisplayCoordinator::SetMonitorTarget(float peak_nits, float sdr_white_nits)
 }
 
 void DisplayCoordinator::SetHdrVividEnabled(bool enabled) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   if (renderer_->IsHdrVividEnabled() == enabled) {
     return;
   }
@@ -140,7 +150,7 @@ void DisplayCoordinator::SetHdrVividEnabled(bool enabled) {
 }
 
 void DisplayCoordinator::SetMappingTarget(const MappingTarget &target) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   ValidateMappingTarget(target);
   mapping_target_ = target;
   renderer_->SetMappingTarget(mapping_target_, work_precision_);
@@ -148,8 +158,15 @@ void DisplayCoordinator::SetMappingTarget(const MappingTarget &target) {
 }
 
 void DisplayCoordinator::ReconfigurePrecision(WorkPrecision precision) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   ApplyPrecision(precision);
+}
+
+void DisplayCoordinator::AssertUiThread() const {
+#ifndef NDEBUG
+  assert(ui_thread_id_ == std::this_thread::get_id() &&
+         "DisplayCoordinator must be used from the UI thread that constructed it");
+#endif
 }
 
 void DisplayCoordinator::ApplyPrecision(WorkPrecision precision) {
@@ -169,7 +186,7 @@ void DisplayCoordinator::InvalidateScene() {
 }
 
 void DisplayCoordinator::SetCanvasSize(int width, int height) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   if (width <= 0 || height <= 0) {
     throw std::invalid_argument(fmt::format("DisplayCoordinator::SetCanvasSize: invalid size {}x{}", width, height));
   }
@@ -182,11 +199,12 @@ void DisplayCoordinator::SetCanvasSize(int width, int height) {
 }
 
 CanvasLayout DisplayCoordinator::canvas_layout(int window_w, int window_h) const {
+  AssertUiThread();
   return ComputeCanvasLayout(canvas_w_, canvas_h_, window_w, window_h, 1.0f);
 }
 
 std::vector<int> DisplayCoordinator::FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   std::vector<int> failed = renderer_->FeedFrames(frames);
   if (failed.empty()) {
     ++feed_count_;
@@ -227,7 +245,7 @@ uint64_t DisplayCoordinator::ComputeSceneKey(const DisplayState &state) const {
 }
 
 const RenderedFrame &DisplayCoordinator::RenderScene(const DisplayState &state) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   return ComposeLocked(state);
 }
 
@@ -277,7 +295,7 @@ const RenderedFrame &DisplayCoordinator::ComposeLocked(const DisplayState &state
 }
 
 void DisplayCoordinator::PresentTo(struct pl_frame &target, const DisplayState &state) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  AssertUiThread();
   ComposeLocked(state);
   PresentLocked(target, state);
 }
@@ -301,6 +319,7 @@ void DisplayCoordinator::PresentLocked(struct pl_frame &target, const DisplaySta
 }
 
 void DisplayCoordinator::RecalibrateICC(const struct pl_color_space *target_color) {
+  AssertUiThread();
   if (icc_mode_ != IccMode::Enabled) {
     return;
   }

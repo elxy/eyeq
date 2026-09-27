@@ -39,14 +39,13 @@ namespace EYEQ {
  * instance without a font or SDL window is possible.
  *
  * Threading contract: this class is not internally synchronized. The caller
- * must serialize every state operation on one instance, including ICC and
- * parameter updates, FeedFrames(), Render() and destruction. In the player,
- * Window::render_mutex_ serializes FeedFrames (decode thread) against Render
- * (main thread), including the colorspace-hint callback invoked from
- * FeedFrames. The parameter setters and LoadICCProfile/InitRender are used
- * during startup, before the player starts feeding frames, and are not covered
- * by that mutex. Distinct instances share only the RenderContext and must not
- * be used concurrently during this phase.
+ * must serialize every state operation on one instance from a single thread,
+ * including ICC and parameter updates, FeedFrames(), Render() and destruction.
+ * In the player that thread is the UI thread: the 2C-1 synchronized player
+ * publishes frame snapshots, so FeedFrames() is no longer called from the decode
+ * thread. The colorspace-hint callback runs inside FeedFrames() on that same
+ * thread. Distinct instances share only the RenderContext and must not be used
+ * concurrently during this phase.
  */
 class FrameRenderer {
 public:

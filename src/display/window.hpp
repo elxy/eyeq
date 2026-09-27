@@ -161,7 +161,7 @@ protected:
   pl_dispatch render_save_dp_ = nullptr; // pass-through shader to blit intermediate -> swapchain
 
   // Serializes the swapchain start/present/submit against the colorspace-hint
-  // callback. The coordinator has its own mutex for FeedFrames/RenderScene.
+  // callback. The coordinator itself is UI-thread only (no internal mutex).
   std::mutex render_mutex_;
 
   void InitWindow(const std::string &title, int video_width, int video_height, SDL_DisplayID display_id);
