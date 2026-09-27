@@ -731,6 +731,13 @@ void MonitorOutput::TickPaced() {
     return;
   }
 
+  // A previous StopScheduled has not been confirmed idle yet (PlaybackStopped not
+  // received). Do not try to start a new session while the backend is still Stopping;
+  // this makes a rapid pause->play transition safe.
+  if (stop_pending_) {
+    return;
+  }
+
   // Paused: once every already-queued frame has been scheduled, stop the session so
   // the still path can take over (pause freezes the last frame). With the switch off
   // the session is left running and the hardware is expected to hold the last frame.
