@@ -143,10 +143,6 @@ MonitorOutput::MonitorOutput(RenderContext &context, DisplayCoordinator &coordin
     target_.frame.color.hdr.max_luma = target_peak;
 
     encoder_ = std::make_unique<OutputEncoder>(context.log(), gpu);
-    // The playback/monitor path must never pay for a full-frame NaN readback; the
-    // GPU-side gate reduces the common result to one flag word (V2.1 3.2, review
-    // decision). It is required, so a GPU without compute/SSBO fails fast here.
-    finite_gate_ = std::make_unique<FiniteGate>(context.log(), gpu);
     packer_ = std::make_unique<FramePacker>(gpu, ToPackConfig(output_));
   } catch (...) {
     // The destructor will not run for a throwing constructor; release the raw GPU
@@ -359,18 +355,6 @@ MonitorOutput::SubmitOutcome MonitorOutput::Submit(Request &request) {
 bool MonitorOutput::EncodeAndPack(const RenderedFrame &frame, const SubmissionInfo &info, StagingSlot **slot,
                                   std::string *stage, std::string *reason) {
   *slot = nullptr;
-
-  // GPU-side NaN/Inf gate: the only readback is a single flag word, so continuous
-  // playback never downloads a full frame. A non-finite result is a hard error.
-  try {
-    finite_gate_->Validate(frame.texture);
-    ++diagnostics_.finite_checks;
-  } catch (const std::exception &e) {
-    ++diagnostics_.finite_failures;
-    *stage = "finite";
-    *reason = e.what();
-    return false;
-  }
 
   try {
     // Encode the common display-linear result into the wire transfer. Transfer

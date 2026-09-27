@@ -100,6 +100,14 @@ namespace EYEQ {
  * last request outcome. Completion events (Completed/DisplayedLate/Dropped/Flushed)
  * are counted for diagnostics and late/dropped are logged at TRACE; they are never
  * reported as a failure.
+ *
+ * NaN/Inf policy: unlike the desktop difference path (FrameRenderer::
+ * SetValidateLinearResult), this module does not validate the common result for
+ * NaN/Inf, neither with a full-frame readback nor with a GPU-side reduction. A
+ * non-finite sample is treated as a source/upstream problem, not as an EyeQ failure
+ * to police; the encode/pack clamp then produces a usable (possibly wrong) code
+ * value. This is a deliberate policy decision, recorded here so no reader assumes a
+ * silent gate exists.
  */
 class MonitorOutput {
 public:
@@ -137,8 +145,6 @@ public:
     uint64_t still_busy = 0;
     uint64_t displayed = 0;
     uint64_t pack_failed = 0;
-    uint64_t finite_checks = 0;
-    uint64_t finite_failures = 0;
     // Playback (paced) counters.
     uint64_t paced_submits = 0;      // paced frames enqueued (encode + pack started)
     uint64_t paced_scheduled = 0;    // paced frames accepted by TrySchedule
@@ -308,7 +314,6 @@ private:
 
   Target target_;
   std::unique_ptr<OutputEncoder> encoder_;
-  std::unique_ptr<FiniteGate> finite_gate_;
   std::unique_ptr<FramePacker> packer_;
 
   bool closed_ = false;

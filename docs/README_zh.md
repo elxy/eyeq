@@ -393,8 +393,9 @@ renderer 的输出不受另一个影响、且另一个被销毁后仍可继续�
 `FrameSink`；main 在同一线程用 `Tick()`（或底层的 `Submit()`/`Pump()`）推进。静帧路径同一
 时刻只允许一个在途请求，在途时新请求返回 Busy，不会被读取或映射。播放路径
 （`SetPlayback(true)`）把新合成帧通过 packer 环流水提交，每帧排到下一个显示节拍点，
-队列满时顶掉最旧的未排帧。两条路径都会经过 GPU 内 NaN/Inf 检查，因此播放路径每帧都不做
-全帧读回。`Close()` 在同一个总 deadline 内停止调度播放、排空 packer 并关闭自己拥有的 sink。
+队列满时顶掉最旧的未排帧。与桌面差分路径不同，该层**不校验**公共结果的 NaN/Inf（既不做全帧
+读回，也不做 GPU 内归约）：非有限值在这里被视为源/上游的问题。`Close()` 在同一个总 deadline
+内停止调度播放、排空 packer 并关闭自己拥有的 sink。
 
 配合 `EYEQ_ENABLE_DECKLINK=ON`，`eyeq` 播放器已为监看接入该层（见“监看输出（DeckLink）”）；
 音频与原生 HDR 直通仍未实现，paced 路径尚未在真实硬件上验证。
@@ -409,11 +410,11 @@ ctest --test-dir build-monitor -R monitor_output --output-on-failure
 ```
 
 覆盖 SDR/PQ 与 r210/v210（含非紧凑 `row_bytes` 补齐）、已知黑场/色块/PQ 100nit 锚点、CPU
-打包 oracle、Fill/Slide/Grid/差异放大、Busy/取消/关闭与终态 sink 故障、GPU 内 NaN 闸门，
+打包 oracle、Fill/Slide/Grid/差异放大、Busy/取消/关闭与终态 sink 故障，
 以及 paced 播放（合成顺序、显示节拍严格递增、逐帧字节对 CPU oracle、队列满顶旧、暂停/恢复、
-播放路径无全帧读回断言），再加上一次注入真实读回失败的故障测试。`monitor_output_fault_test`
-链接的是带故障注入 hook 的真实 `frame_packer.cpp`，确保注入确实命中。这些测试不验证窗口、
-真实硬件帧或 DeckLink 设备。
+恢复时回收冻结静帧的 packer 槽位），再加上一次注入真实读回失败的故障测试。
+`monitor_output_fault_test` 链接的是带故障注入 hook 的真实 `frame_packer.cpp`，确保注入确实
+命中。这些测试不验证窗口、真实硬件帧或 DeckLink 设备。
 
 纯 CPU 的已知答案与比较器突变测试属于 CPU 测试集，不需要 GPU：
 

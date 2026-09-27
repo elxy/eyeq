@@ -427,9 +427,11 @@ low-level `Submit()`/`Pump()`). The still path keeps at most one request in flig
 reports a request that arrives meanwhile as Busy without reading or mapping it. The
 paced playback path (enabled with `SetPlayback(true)`) pipelines new composed frames
 through the packer ring, schedules each at the next display tick and drops the oldest
-unscheduled frame on overflow. The GPU finite gate runs on both paths, so the
-playback path never performs a full-frame readback. `Close()` stops scheduled
-playback, drains the packer, and closes the owned sink within one total deadline.
+unscheduled frame on overflow. Unlike the desktop difference path, this layer does
+not validate the common result for NaN/Inf (no full-frame readback and no GPU-side
+reduction): a non-finite sample is treated as a source/upstream problem there.
+`Close()` stops scheduled playback, drains the packer, and closes the owned sink
+within one total deadline.
 
 With `EYEQ_ENABLE_DECKLINK=ON` the `eyeq` player is wired to this layer for external
 monitoring (see "Monitoring Output (DeckLink)"); audio and native HDR passthrough are
@@ -447,12 +449,12 @@ ctest --test-dir build-monitor -R monitor_output --output-on-failure
 They cover SDR/PQ with r210/v210 (including non-tight `row_bytes` padding), known
 black/colour/PQ-100-nit anchors, the CPU packing oracle, Fill/Slide/Grid/difference
 amplification, Busy/priority/cancel/close and terminal sink failures, a fault-injected
-real readback failure, the GPU finite gate, and paced playback (composition order,
-strictly increasing display ticks, per-frame bytes against the CPU oracle, queue
-overflow dropping the oldest unscheduled frame, pause/resume and the no-full-frame-
-readback assertion). `monitor_output_fault_test` links a fault-injection build of the
-real `frame_packer.cpp`, so the injection cannot silently miss. These tests do not
-verify a window, real hardware frames or a DeckLink device.
+real readback failure, and paced playback (composition order, strictly increasing
+display ticks, per-frame bytes against the CPU oracle, queue overflow dropping the
+oldest unscheduled frame, pause/resume and the freeze-still slot reclaim).
+`monitor_output_fault_test` links a fault-injection build of the real
+`frame_packer.cpp`, so the injection cannot silently miss. These tests do not verify a
+window, real hardware frames or a DeckLink device.
 
 The CPU-only known-answer and comparator-mutation tests belong to the CPU test suite
 and need no GPU:

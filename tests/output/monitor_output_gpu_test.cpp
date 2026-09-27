@@ -826,69 +826,6 @@ int DriveController(MonitorOutput &controller, int max_ticks = 100000) {
   return -1;
 }
 
-// The GPU-side finite gate replaces the full-frame readback on the playback/monitor
-// path: it detects NaN/Inf (hard error) while only reading back one flag word. The
-// full-frame readback counter must stay at zero throughout.
-void TestGpuFiniteGate(EYEQ::RenderContext &context) {
-  std::fprintf(stdout, "[GPU finite gate]\n");
-  pl_gpu gpu = context.gpu();
-  const auto caps =
-      static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
-  pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
-  if (format == nullptr) {
-    throw std::runtime_error("no rgba32f host-writable format for the finite-gate test");
-  }
-  struct pl_tex_params params = {.w = 4, .h = 1, .format = format, .sampleable = true, .host_writable = true};
-  pl_tex tex = pl_tex_create(gpu, &params);
-  if (tex == nullptr) {
-    throw std::runtime_error("finite-gate probe texture creation failed");
-  }
-
-  auto upload = [&](const std::vector<float> &rgba) {
-    struct pl_tex_transfer_params transfer = {
-        .tex = tex,
-        .row_pitch = 4 * 4 * sizeof(float),
-        .ptr = const_cast<float *>(rgba.data()),
-    };
-    if (!pl_tex_upload(gpu, &transfer)) {
-      throw std::runtime_error("finite-gate probe upload failed");
-    }
-  };
-
-  const float nan = std::numeric_limits<float>::quiet_NaN();
-  const float inf = std::numeric_limits<float>::infinity();
-
-  EYEQ::ResetLinearTextureReadbackCount();
-  {
-    EYEQ::FiniteGate gate(context.log(), gpu);
-    std::vector<float> finite(16, 0.25f);
-    upload(finite);
-    bool ok = true;
-    try {
-      gate.Validate(tex);
-    } catch (const std::exception &) {
-      ok = false;
-    }
-    Check(ok, "the GPU gate accepts a finite texture");
-
-    for (float poison : {nan, inf, -inf}) {
-      std::vector<float> bad(16, 0.25f);
-      bad[4] = poison;
-      upload(bad);
-      bool threw = false;
-      try {
-        gate.Validate(tex);
-      } catch (const std::runtime_error &) {
-        threw = true;
-      }
-      Check(threw, std::isnan(poison) ? "the GPU gate rejects NaN" : "the GPU gate rejects Inf");
-      upload(finite); // restore for the next iteration
-    }
-  }
-  Check(EYEQ::LinearTextureReadbackCount() == 0, "the GPU gate never triggers a full-frame readback");
-  pl_tex_destroy(gpu, &tex);
-}
-
 // ---------------------------------------------------------------------------
 // Paced playback (continuous monitor output) tests.
 // ---------------------------------------------------------------------------
@@ -916,7 +853,7 @@ void ComposeSolid(EYEQ::DisplayCoordinator &coordinator, AVStream *stream, int w
 
 // Continuous paced submissions must reach the sink in composition order, at strictly
 // increasing display ticks, with bytes that match the independent CPU packing oracle
-// of the frame's own target, and without any full-frame readback on the way.
+// of the frame's own target.
 void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context, AVStream *stream) {
   std::fprintf(stdout, "[paced playback: order, display ticks, bytes vs oracle]\n");
   const int w = 64;
@@ -928,7 +865,6 @@ void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context, AVStream *stre
   eyeq_test::ScriptedFrameSink *sink = scripted.get();
   MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
 
-  EYEQ::ResetLinearTextureReadbackCount();
   monitor.SetPlayback(true);
 
   const int kFrames = 5;
@@ -969,9 +905,6 @@ void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context, AVStream *stre
     Check(stats.mismatch == 0, "paced frame " + std::to_string(i) + " bytes match the CPU oracle");
   }
   Check(monitor.diagnostics().paced_submits == static_cast<uint64_t>(kFrames), "every composition was paced-submitted");
-  Check(monitor.diagnostics().finite_checks == static_cast<uint64_t>(kFrames),
-        "the GPU finite gate ran on every paced frame");
-  Check(EYEQ::LinearTextureReadbackCount() == 0, "paced playback never does a full-frame readback");
   Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "paced monitor closed");
 }
 
@@ -1030,7 +963,6 @@ void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
   eyeq_test::ScriptedFrameSink *sink = scripted.get();
   MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
 
-  EYEQ::ResetLinearTextureReadbackCount();
   monitor.SetPlayback(true);
   ComposeSolid(*coordinator, stream, w, h, Color{0.9f, 0.1f, 0.1f});
   monitor.Tick();
@@ -1067,7 +999,6 @@ void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
       eyeq_test::CompareFrame(sink->schedule_calls().back().bytes.data(), w, h, resolved.layout.row_bytes, latest_rgb,
                               resolved.layout.pixel_format, resolved.color.encoding.primaries);
   Check(stats.mismatch == 0, "resume jumps to the latest composed frame");
-  Check(EYEQ::LinearTextureReadbackCount() == 0, "pause/resume never does a full-frame readback");
   Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "pause/resume monitor closed");
 }
 
@@ -1329,7 +1260,6 @@ int main() {
     TestClose(gpu, context, owner.stream);
     TestIsolation(gpu, context, owner.stream);
     TestUhdOnce(gpu, context, owner.stream);
-    TestGpuFiniteGate(context);
     TestPacedPlaybackOrderAndBytes(context, owner.stream);
     TestPacedOverflowDropsOldest(context, owner.stream);
     TestPacedPauseResume(context, owner.stream);
