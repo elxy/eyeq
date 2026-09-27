@@ -25,6 +25,14 @@ constexpr int kMaxSinkEventsPerPump = 8;
 // is enough to land the reference frame on time; anything later is dropped by the
 // sink (DisplayedLate/Dropped) rather than slowing the monitor down.
 constexpr int kSubmitLeadFrames = 1;
+// Pause transition choice. The plan's primary behavior is to stop enqueuing new
+// frames and let the hardware hold the last frame, but that run-empty hold is not yet
+// confirmed on real hardware. We therefore take the guaranteed-correct fallback: once
+// the paced queue has drained, stop the scheduled session (waiting for the confirmed
+// PlaybackStopped notification) and display the current frame as a still, which also
+// keeps seek/frame-step working while paused. Set this to false to rely on the
+// unverified hardware hold instead (the still path then stays unused after playback).
+constexpr bool kPauseStopsScheduledPlayback = true;
 
 using Clock = std::chrono::steady_clock;
 
@@ -724,9 +732,12 @@ void MonitorOutput::TickPaced() {
   }
 
   // Paused: once every already-queued frame has been scheduled, stop the session so
-  // the still path can take over (pause freezes the last frame).
+  // the still path can take over (pause freezes the last frame). With the switch off
+  // the session is left running and the hardware is expected to hold the last frame.
   if (!playback_requested_ && paced_.empty()) {
-    StopPlaybackSession();
+    if (kPauseStopsScheduledPlayback) {
+      StopPlaybackSession();
+    }
     return;
   }
 
