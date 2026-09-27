@@ -18,7 +18,7 @@ enum class PackDrain { Idle, TimedOut, Failed };
 
 // GPU packer for one DeckLink output. It converts a sampled, nonlinear full-range
 // float RGB texture on the same pl_gpu into r210/v210 Video-range bytes, using a
-// fixed ring of four staging slots and asynchronous pl_tex_download + pl_buf_poll
+// fixed ring of two staging slots and asynchronous pl_tex_download + pl_buf_poll
 // readback. A private Impl owns all GPU resources; the public seam is unchanged.
 //
 // Ownership and failure semantics (explicit and uniform):

@@ -227,7 +227,7 @@ void TestUhdShortBench(GpuDevice &device) {
   const int width = 3840;
   const int height = 2160;
   constexpr int kFrames = 16;
-  constexpr int kRing = 4;
+  constexpr int kRing = 2;
   const std::vector<float> rgb = MakePattern(width, height, 7, true);
   for (PixelFormat format : {PixelFormat::R210, PixelFormat::V210}) {
     const PackConfig config = MakeConfig(width, height, format, Sdr709(), 0);

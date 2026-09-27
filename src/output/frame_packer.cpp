@@ -37,7 +37,7 @@ namespace EYEQ {
 
 namespace {
 
-constexpr int kSlotCount = 4;
+constexpr int kSlotCount = 2;
 constexpr int kDrainPollIntervalMs = 1;
 
 using Clock = std::chrono::steady_clock;

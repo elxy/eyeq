@@ -79,9 +79,9 @@ pl_buf HookCountCreateBuf(pl_gpu gpu, const struct pl_buf_params *params) {
   return pl_buf_create(gpu, params);
 }
 
-pl_buf HookFailNthCreateBuf(pl_gpu gpu, const struct pl_buf_params *params) {
+pl_buf HookFailSecondCreateBuf(pl_gpu gpu, const struct pl_buf_params *params) {
   ++g_buf_created;
-  if (g_buf_created == 3) {
+  if (g_buf_created == 2) {
     return nullptr;
   }
   return pl_buf_create(gpu, params);
@@ -125,14 +125,15 @@ void TestRingFull() {
   pl_tex source = UploadSource(device.gpu(), config.layout.width, config.layout.height,
                                FlatPattern(config.layout.width, config.layout.height), false);
 
-  StagingSlot *slots[4] = {};
-  for (int i = 0; i < 4; ++i) {
+  // The fixed ring is two slots deep (R4).
+  StagingSlot *slots[2] = {};
+  for (int i = 0; i < 2; ++i) {
     slots[i] = packer.Submit(source, static_cast<uint64_t>(i));
     CHECK(slots[i] != nullptr);
   }
-  CHECK(packer.Submit(source, 4) == nullptr); // ring full, no new input consumed
+  CHECK(packer.Submit(source, 2) == nullptr); // ring full, no new input consumed
 
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < 2; ++i) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(20000);
     while (packer.Poll(slots[i]) == PackPoll::NotReady) {
       CHECK(Clock::now() < deadline);
@@ -141,11 +142,11 @@ void TestRingFull() {
     CHECK(packer.Size(slots[i]) == config.layout.image_bytes);
     CHECK(packer.Bytes(slots[i]) != nullptr);
   }
-  CHECK(packer.Submit(source, 5) == nullptr); // still full while Ready
-  for (int i = 0; i < 4; ++i) {
+  CHECK(packer.Submit(source, 3) == nullptr); // still full while Ready
+  for (int i = 0; i < 2; ++i) {
     packer.Reap(slots[i]);
   }
-  CHECK(packer.Submit(source, 6) != nullptr);
+  CHECK(packer.Submit(source, 4) != nullptr);
   CHECK(packer.Shutdown(20000) == PackDrain::Idle);
   pl_tex_destroy(device.gpu(), &source);
 }
@@ -495,13 +496,13 @@ void TestConstructorValidationAndRollback() {
     CHECK(threw);
   }
 
-  // Failing the third buffer allocation must destroy the carriers/buffers already
-  // created for the first two slots (and the third carrier).
+  // Failing the second buffer allocation must destroy the carrier/buffer already
+  // created for the first slot (and the second carrier).
   ResetCounters();
   {
     Hooks hooks;
     hooks.tex_create = HookCountCreateTex;
-    hooks.buf_create = HookFailNthCreateBuf;
+    hooks.buf_create = HookFailSecondCreateBuf;
     hooks.tex_destroy = HookCountDestroyTex;
     hooks.buf_destroy = HookCountDestroyBuf;
     frame_packer_test::MutableHooks() = hooks;
@@ -512,10 +513,10 @@ void TestConstructorValidationAndRollback() {
       threw = true;
     }
     CHECK(threw);
-    CHECK(g_tex_created == 3);
-    CHECK(g_buf_created == 3);
-    CHECK(g_tex_destroyed == 3);
-    CHECK(g_buf_destroyed == 2);
+    CHECK(g_tex_created == 2);
+    CHECK(g_buf_created == 2);
+    CHECK(g_tex_destroyed == 2);
+    CHECK(g_buf_destroyed == 1);
     frame_packer_test::MutableHooks() = Hooks{};
   }
 
