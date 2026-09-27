@@ -738,6 +738,28 @@ void MonitorOutput::TickPaced() {
     return;
   }
 
+  // A freeze still can still be draining its readback when playback resumes right
+  // after a pause; its bytes were never displayed and are moot now. Drain the slot
+  // one poll per turn (never blocking) so the paced queue regains the full ring
+  // within a few ticks. Abort is not used here: an aborted slot is only reclaimed
+  // once its SOURCE texture polls idle, and the encode target keeps being rewritten
+  // every paced frame, which would starve the reclamation for the whole session.
+  if (request_in_flight_) {
+    const PackPoll drain = slot_ != nullptr ? packer_->Poll(slot_) : PackPoll::Failed;
+    if (drain == PackPoll::Ready) {
+      packer_->Reap(slot_);
+      slot_ = nullptr;
+      request_in_flight_ = false;
+      SetResult(Outcome::None, "", "");
+    } else if (drain == PackPoll::Failed) {
+      // Mirror the still path: a readback failure is reported and the module stops.
+      // The slot stays retained until Close() reclaims it.
+      request_in_flight_ = false;
+      SetResult(Outcome::Failed, "pack", "freeze still readback failed on resume");
+      failed_ = true;
+    }
+  }
+
   // Paused: once every already-queued frame has been scheduled, stop the session so
   // the still path can take over (pause freezes the last frame). With the switch off
   // the session is left running and the hardware is expected to hold the last frame.

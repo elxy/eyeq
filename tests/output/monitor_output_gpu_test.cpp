@@ -1071,6 +1071,46 @@ void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
   Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "pause/resume monitor closed");
 }
 
+// Resuming playback right after a pause must reclaim the freeze still's packer
+// slot: without the reclaim the still's undrained readback holds one ring slot for
+// the whole playback session and the paced queue caps at ring-1.
+void TestPacedResumeReclaimsStillSlot(EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[paced playback: resume reclaims the freeze still's slot]\n");
+  const int w = 64;
+  const int h = 48;
+  auto resolved = BuildResolved(w, h, EYEQ::PixelFormat::V210, false, 100.0, 0);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
+  auto fake = std::make_unique<EYEQ::test::FakeFrameSink>(8);
+  auto scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(*fake);
+  eyeq_test::ScriptedFrameSink *sink = scripted.get();
+  MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
+
+  monitor.SetPlayback(true);
+  ComposeSolid(*coordinator, stream, w, h, Color{0.9f, 0.1f, 0.1f});
+  monitor.Tick();
+  Check(DriveTicks(monitor, [&]() { return sink->schedule_calls().size() >= 1; }), "the first paced frame schedules");
+
+  // Pause: the first tick issues StopScheduled, the second confirms it and
+  // submits the freeze still. Do NOT drain the still's readback past this point.
+  monitor.SetPlayback(false);
+  monitor.Tick();
+  monitor.Tick();
+  Check(monitor.in_flight(), "the freeze still is in flight with its pack slot pending");
+
+  // Resume immediately, then saturate the paced queue against a busy sink.
+  monitor.SetPlayback(true);
+  sink->ScriptSchedule(EYEQ::ScheduleOutcome::Busy, 1000);
+  const int kFrames = 8; // comfortably more than the ring capacity
+  for (int i = 0; i < kFrames; ++i) {
+    ComposeSolid(*coordinator, stream, w, h, Color{0.05f + 0.12f * i, 0.3f, 0.1f});
+    monitor.Tick();
+    YieldToGpu();
+  }
+  const std::size_t capacity = static_cast<std::size_t>(EYEQ::FramePacker::kRingCapacity);
+  Check(monitor.paced_pending() == capacity, "resume reclaimed the still slot: the paced queue reaches the full ring");
+  Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "reclaim monitor closed");
+}
+
 void TestSharedResultAndResubmit(EYEQ::RenderContext &context, AVStream *stream) {
   std::fprintf(stdout, "[shared result, resize/OSD stability, resubmission]\n");
   const int w = 64;
@@ -1293,6 +1333,7 @@ int main() {
     TestPacedPlaybackOrderAndBytes(context, owner.stream);
     TestPacedOverflowDropsOldest(context, owner.stream);
     TestPacedPauseResume(context, owner.stream);
+    TestPacedResumeReclaimsStillSlot(context, owner.stream);
     TestSharedResultAndResubmit(context, owner.stream);
     TestRecomposeWhileInFlight(context, owner.stream);
     TestCancelFailureClose(context, owner.stream);
