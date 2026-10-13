@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -258,6 +259,7 @@ private:
   bool source_max_luma_enabled_ = false;
   double source_max_luma_nits_ = 0.0;
   bool source_max_luma_logged_ = false; // one-time log for the max_luma override
+  std::set<int> rgb_limited_warned_;    // video ids already warned about an ignored RGB limited-range tag
 
   // Dynamic HDR (HDR Vivid). The shader instance is shared and its parameters
   // are set immediately before the source mapping of one video; the mapping is

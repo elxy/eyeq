@@ -9,6 +9,10 @@
 
 #include <spdlog/fmt/fmt.h>
 
+extern "C" {
+#include <libavutil/pixdesc.h>
+}
+
 #include "log.hpp"
 #include "platform_icc.h"
 #include "slide_render.hpp"
@@ -388,6 +392,22 @@ std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<A
         av_frames_.try_emplace(i, frame, context_->gpu(), context_->hw_device());
       }
       pl_frames_[i] = av_frames_.at(i).GetPLFrame();
+
+      // libplacebo's pl_frame_from_avframe() forces full range for RGB pixel
+      // formats (FFmpeg treats color_range as YUV-only), so a limited-range tag
+      // on an RGB frame, e.g. from setparams=range=limited, is silently dropped.
+      if (frame->color_range == AVCOL_RANGE_MPEG && pl_frames_[i]->repr.sys == PL_COLOR_SYSTEM_RGB &&
+          rgb_limited_warned_.insert(i).second) {
+        const int depth = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format))->comp[0].depth;
+        const long long black = 16LL << (depth - 8);
+        const long long span = 219LL << (depth - 8);
+        const long long max = (1LL << depth) - 1;
+        Logger->warn("Video #{}: RGB frame is tagged as limited range (tv), but libplacebo always treats RGB as full "
+                     "range, so the tag is ignored and the picture is shown as full range. To display limited-range "
+                     "RGB, expand it in the filter, e.g. lutrgb=r='clip(floor((val-{})*{}/{}+0.5),0,{})' (same for g "
+                     "and b)",
+                     i, black, max, span, max);
+      }
 
       // Correct the source HDR mastering/content peak when the user asked for it
       // (--source-max-luma). This is the untrusted-metadata path (HLG / DPX
