@@ -21,7 +21,6 @@
 #include <vector>
 
 extern "C" {
-#include <libavformat/avformat.h>
 #include <libavutil/frame.h>
 }
 #include <libplacebo/gpu.h>
@@ -58,34 +57,10 @@ void Skip(const std::string &what) {
   std::fprintf(stderr, "  SKIP %s\n", what.c_str());
 }
 
-struct SourceOwner {
-  AVFormatContext *format = nullptr;
-  AVStream *stream = nullptr;
-  SourceOwner() {
-    format = avformat_alloc_context();
-    if (!format) {
-      throw std::runtime_error("avformat_alloc_context failed");
-    }
-    stream = avformat_new_stream(format, nullptr);
-    if (!stream) {
-      avformat_free_context(format);
-      format = nullptr;
-      throw std::runtime_error("avformat_new_stream failed");
-    }
-  }
-  ~SourceOwner() {
-    if (format) {
-      avformat_free_context(format);
-    }
-  }
-  SourceOwner(const SourceOwner &) = delete;
-  SourceOwner &operator=(const SourceOwner &) = delete;
-};
-
 using Color = std::array<float, 3>;
 using PixelFunc = std::function<Color(int, int)>;
 
-std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, const PixelFunc &pixel) {
+std::shared_ptr<AVFrame> MakeFrame(int width, int height, const PixelFunc &pixel) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -112,11 +87,10 @@ std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, cons
       r[x] = c[0];
     }
   }
-  frame->opaque = stream;
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
-std::shared_ptr<AVFrame> MakeBrokenFrame(AVStream *stream, int width, int height) {
+std::shared_ptr<AVFrame> MakeBrokenFrame(int width, int height) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -124,7 +98,6 @@ std::shared_ptr<AVFrame> MakeBrokenFrame(AVStream *stream, int width, int height
   frame->format = AV_PIX_FMT_PAL8;
   frame->width = width;
   frame->height = height;
-  frame->opaque = stream;
   if (av_frame_get_buffer(frame, 32) < 0) {
     av_frame_free(&frame);
     throw std::runtime_error("av_frame_get_buffer failed");
@@ -312,11 +285,11 @@ std::vector<uint8_t> DownloadTexture8(pl_gpu gpu, pl_tex tex) {
 // ---------------------------------------------------------------------------
 // Single renderer + scene cache
 // ---------------------------------------------------------------------------
-void TestSceneCacheAndIdentity(EYEQ::RenderContext &context, AVStream *stream) {
+void TestSceneCacheAndIdentity(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[single renderer and scene cache]\n");
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_2020, 1000.0f);
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 64, 48, mt);
-  auto source = MakeFrame(stream, 64, 48, [](int, int) { return Color{0.4f, 0.4f, 0.4f}; });
+  auto source = MakeFrame(64, 48, [](int, int) { return Color{0.4f, 0.4f, 0.4f}; });
 
   coordinator->SetMainSource(5);
   Check(coordinator->FeedFrames({{5, source}}).empty(), "feed accepted");
@@ -343,7 +316,7 @@ void TestSceneCacheAndIdentity(EYEQ::RenderContext &context, AVStream *stream) {
   Check(moved.identity.render_id == 2 && moved.identity.scene_revision == 2, "the new result gets a new identity");
 
   // A new feed is a new scene even with the same state.
-  auto source2 = MakeFrame(stream, 64, 48, [](int, int) { return Color{0.6f, 0.6f, 0.6f}; });
+  auto source2 = MakeFrame(64, 48, [](int, int) { return Color{0.6f, 0.6f, 0.6f}; });
   coordinator->FeedFrames({{5, source2}});
   const EYEQ::RenderedFrame &fed = coordinator->RenderScene(state);
   Check(coordinator->scene_render_count() == 3 && fed.identity.render_id == 3, "a new feed recomposes the scene");
@@ -352,11 +325,11 @@ void TestSceneCacheAndIdentity(EYEQ::RenderContext &context, AVStream *stream) {
 // ---------------------------------------------------------------------------
 // Fixed mapping target + resize does not re-run the source mapping
 // ---------------------------------------------------------------------------
-void TestFixedMappingTargetAndResize(EYEQ::RenderContext &context, AVStream *stream) {
+void TestFixedMappingTargetAndResize(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[fixed mapping target and resize]\n");
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_2020, 1000.0f);
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 64, 48, mt);
-  auto source = MakeFrame(stream, 64, 48, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
+  auto source = MakeFrame(64, 48, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
   coordinator->SetMainSource(5);
   coordinator->FeedFrames({{5, source}});
   EYEQ::DisplayState state = MakeState({5}, 5);
@@ -405,12 +378,12 @@ void TestFixedMappingTargetAndResize(EYEQ::RenderContext &context, AVStream *str
 // Differences are reported, not assumed equal. Dither is disabled on both sides
 // so only the structural path is compared; the ICC case is compared too.
 // ---------------------------------------------------------------------------
-void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std::vector<uint8_t> *icc,
-                      const std::string &icc_source, const char *label) {
+void CompareOldAndNew(EYEQ::RenderContext &context, const std::vector<uint8_t> *icc, const std::string &icc_source,
+                      const char *label) {
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 203.0f);
   const int w = 96;
   const int h = 48;
-  auto source = MakeFrame(stream, w, h, [](int x, int y) {
+  auto source = MakeFrame(w, h, [](int x, int y) {
     const float v = (x + y) / static_cast<float>(192);
     return Color{v, 0.5f * v, 1.0f - v};
   });
@@ -456,9 +429,9 @@ void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std:
   pl_tex_destroy(context.gpu(), &old_target.tex);
 }
 
-void TestMigratedBaselineCompatibility(EYEQ::RenderContext &context, AVStream *stream) {
+void TestMigratedBaselineCompatibility(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[V2-1 migrated-baseline compatibility]\n");
-  CompareOldAndNew(context, stream, nullptr, "", "no ICC");
+  CompareOldAndNew(context, nullptr, "", "no ICC");
   std::vector<uint8_t> icc_data;
   std::string icc_source;
   for (const auto &candidate : IccProfileCandidates()) {
@@ -471,7 +444,7 @@ void TestMigratedBaselineCompatibility(EYEQ::RenderContext &context, AVStream *s
   if (icc_data.empty()) {
     Skip("ICC compatibility: no system ICC profile found");
   } else {
-    CompareOldAndNew(context, stream, &icc_data, icc_source, "global ICC");
+    CompareOldAndNew(context, &icc_data, icc_source, "global ICC");
   }
 }
 
@@ -549,7 +522,7 @@ void TestPerformanceRecording(EYEQ::RenderContext &context) {
 // ---------------------------------------------------------------------------
 // sRGB desktop final hop and dither (closure b)
 // ---------------------------------------------------------------------------
-void TestPresentDither(EYEQ::RenderContext &context, AVStream *stream) {
+void TestPresentDither(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[sRGB desktop final hop and dither]\n");
   pl_gpu gpu = context.gpu();
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 203.0f);
@@ -563,7 +536,7 @@ void TestPresentDither(EYEQ::RenderContext &context, AVStream *stream) {
   renderer.SetMappingTarget(mt, EYEQ::WorkPrecision::F16);
   // A near-flat horizontal gradient: a smooth 8-bit ramp is exactly where
   // quantization banding shows up.
-  auto source = MakeFrame(stream, 256, 32, [](int x, int) {
+  auto source = MakeFrame(256, 32, [](int x, int) {
     const float v = static_cast<float>(x + 1) / 257.0f;
     return Color{v, v, v};
   });
@@ -600,7 +573,7 @@ void TestPresentDither(EYEQ::RenderContext &context, AVStream *stream) {
 // ---------------------------------------------------------------------------
 // ICC mode isolation
 // ---------------------------------------------------------------------------
-void TestIccModeIsolation(EYEQ::RenderContext &context, AVStream *stream) {
+void TestIccModeIsolation(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[ICC mode isolation]\n");
   std::vector<uint8_t> icc_data;
   std::filesystem::path icc_path;
@@ -617,7 +590,7 @@ void TestIccModeIsolation(EYEQ::RenderContext &context, AVStream *stream) {
   }
 
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 203.0f);
-  auto source = MakeFrame(stream, 32, 32, [](int, int) { return Color{0.4f, 0.5f, 0.6f}; });
+  auto source = MakeFrame(32, 32, [](int, int) { return Color{0.4f, 0.5f, 0.6f}; });
 
   {
     // Plain desktop: ICC stays available (global and per-video).
@@ -676,11 +649,11 @@ void TestIccModeIsolation(EYEQ::RenderContext &context, AVStream *stream) {
 // ---------------------------------------------------------------------------
 // Precision reconfiguration with the borrow guard
 // ---------------------------------------------------------------------------
-void TestPrecisionReconfigure(EYEQ::RenderContext &context, AVStream *stream) {
+void TestPrecisionReconfigure(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[precision reconfiguration]\n");
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_2020, 1000.0f);
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 48, 32, mt);
-  auto source = MakeFrame(stream, 48, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
+  auto source = MakeFrame(48, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
   coordinator->SetMainSource(5);
   coordinator->FeedFrames({{5, source}});
   EYEQ::DisplayState state = MakeState({5}, 5);
@@ -713,12 +686,12 @@ void TestPrecisionReconfigure(EYEQ::RenderContext &context, AVStream *stream) {
 // Target semantics: --source-max-luma is a source-only override and never moves
 // the mapping target; --target-display-nits is the single mapping/monitor peak.
 // ---------------------------------------------------------------------------
-void TestTargetSemantics(EYEQ::RenderContext &context, AVStream *stream) {
+void TestTargetSemantics(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[target semantics]\n");
   const EYEQ::MappingTarget base = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 600.0f);
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 64, 48, base);
   coordinator->SetMainSource(5);
-  coordinator->FeedFrames({{5, MakeFrame(stream, 32, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; })}});
+  coordinator->FeedFrames({{5, MakeFrame(32, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; })}});
   EYEQ::DisplayState state = MakeState({5}, 5);
   coordinator->RenderScene(state);
 
@@ -823,11 +796,11 @@ void TestNanInfPolicy(EYEQ::RenderContext &context) {
 // ---------------------------------------------------------------------------
 // Feed failure is reported, not silently accepted
 // ---------------------------------------------------------------------------
-void TestFeedFailure(EYEQ::RenderContext &context, AVStream *stream) {
+void TestFeedFailure(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[feed failure]\n");
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 203.0f);
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 32, 32, mt);
-  auto broken = MakeBrokenFrame(stream, 32, 32);
+  auto broken = MakeBrokenFrame(32, 32);
   const uint64_t feeds_before = coordinator->feed_count();
   const std::vector<int> failed = coordinator->FeedFrames({{5, broken}});
   Check(failed.size() == 1 && failed.front() == 5, "a frame the mapper cannot consume is reported by id");
@@ -845,18 +818,17 @@ int main() {
       std::fprintf(stderr, "FATAL: no headless Vulkan device\n");
       return 1;
     }
-    SourceOwner owner;
 
-    TestSceneCacheAndIdentity(context, owner.stream);
-    TestFixedMappingTargetAndResize(context, owner.stream);
-    TestPresentDither(context, owner.stream);
-    TestIccModeIsolation(context, owner.stream);
-    TestMigratedBaselineCompatibility(context, owner.stream);
-    TestPrecisionReconfigure(context, owner.stream);
-    TestTargetSemantics(context, owner.stream);
+    TestSceneCacheAndIdentity(context);
+    TestFixedMappingTargetAndResize(context);
+    TestPresentDither(context);
+    TestIccModeIsolation(context);
+    TestMigratedBaselineCompatibility(context);
+    TestPrecisionReconfigure(context);
+    TestTargetSemantics(context);
     TestPerformanceRecording(context);
     TestNanInfPolicy(context);
-    TestFeedFailure(context, owner.stream);
+    TestFeedFailure(context);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FATAL: %s\n", e.what());
     ++g_failures;

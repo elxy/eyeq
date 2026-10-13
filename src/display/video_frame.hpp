@@ -30,10 +30,7 @@ public:
 
 private:
   // Caller-owned source frame. It keeps the pixel buffers reachable, but the
-  // clone below means the buffers are in fact shared by reference count. The
-  // clone does not extend the lifetime of the AVStream stored in
-  // AVFrame::opaque: the caller must keep that stream's owner alive for as long
-  // as this VideoFrame (or any pl_frame obtained from it) is referenced.
+  // clone below means the buffers are in fact shared by reference count.
   std::shared_ptr<AVFrame> frame_;
 
   // Private frame header that map/transfer operate on. The FFmpeg helpers move

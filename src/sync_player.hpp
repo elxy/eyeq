@@ -57,10 +57,7 @@ struct FrameMetadata {
  * @brief One complete frame publication.
  *
  * `frames` holds shared_ptr<AVFrame> references, so consuming the snapshot keeps
- * the frame data alive independent of the decode cursor. The AVStream stored in
- * AVFrame::opaque is NOT kept alive by this object; callers must ensure the
- * VideoSource owners outlive the snapshot (SyncPlayer::Stop drops the slot
- * before the sources are destroyed).
+ * the frame data alive independent of the decode cursor.
  */
 struct FrameSnapshot {
   uint64_t generation = 0;

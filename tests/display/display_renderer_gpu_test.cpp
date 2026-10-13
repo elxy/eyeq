@@ -64,40 +64,12 @@ void Skip(const std::string &what) {
   std::fprintf(stderr, "  SKIP %s\n", what.c_str());
 }
 
-struct SourceOwner {
-  AVFormatContext *format = nullptr;
-  AVStream *stream = nullptr;
-
-  SourceOwner() {
-    format = avformat_alloc_context();
-    if (!format) {
-      throw std::runtime_error("avformat_alloc_context failed");
-    }
-    stream = avformat_new_stream(format, nullptr);
-    if (!stream) {
-      avformat_free_context(format);
-      format = nullptr;
-      throw std::runtime_error("avformat_new_stream failed");
-    }
-  }
-
-  ~SourceOwner() {
-    if (format) {
-      avformat_free_context(format);
-    }
-  }
-
-  SourceOwner(const SourceOwner &) = delete;
-  SourceOwner &operator=(const SourceOwner &) = delete;
-};
-
 using Color = std::array<float, 3>;
 using PixelFunc = std::function<Color(int, int)>;
 
 // Build a full-range GBRPF32LE software frame. GBR planar data is stored as
-// G/B/R in planes 0/1/2. The frame carries an AVStream in opaque to model the
-// decode path (pl_frame_copy_stream_props reads stream side data).
-std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, const PixelFunc &pixel) {
+// G/B/R in planes 0/1/2.
+std::shared_ptr<AVFrame> MakeFrame(int width, int height, const PixelFunc &pixel) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -124,13 +96,12 @@ std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, cons
       r[x] = c[0];
     }
   }
-  frame->opaque = stream;
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
 // Allocate a frame of an arbitrary pixel format without filling meaningful
 // data. Used to exercise the unsupported-format failure path.
-std::shared_ptr<AVFrame> MakeRawFrame(AVStream *stream, int width, int height, AVPixelFormat format) {
+std::shared_ptr<AVFrame> MakeRawFrame(int width, int height, AVPixelFormat format) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -144,7 +115,6 @@ std::shared_ptr<AVFrame> MakeRawFrame(AVStream *stream, int width, int height, A
     av_frame_free(&frame);
     throw std::runtime_error("av_frame_get_buffer failed for unsupported-format probe");
   }
-  frame->opaque = stream;
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
@@ -485,8 +455,6 @@ int main() {
       Check(rejected, "FrameRenderer rejects an unsupported display mode");
     }
 
-    SourceOwner owner;
-
     // Track the lifetime of the AVStream the frames reference; the renderer
     // must not outlive it.
     {
@@ -497,8 +465,7 @@ int main() {
     // --------------------------- Fill spatial markers, crop, target resize
     {
       const int src_w = 64, src_h = 48;
-      auto frame =
-          MakeFrame(owner.stream, src_w, src_h, [&](int x, int y) { return QuadrantPixel(x, y, src_w, src_h); });
+      auto frame = MakeFrame(src_w, src_h, [&](int x, int y) { return QuadrantPixel(x, y, src_w, src_h); });
       frame->crop_left = 8;
       frame->crop_top = 4;
       frame->crop_right = 8;
@@ -586,8 +553,8 @@ int main() {
       // ref + gain * (test - ref), hard-clipped to the target range. The old
       // gamma/PQ-domain expectation (0.6 code at gain 2) is deliberately not
       // reproduced (V2.1 D1).
-      auto dis = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.4f, 0.4f, 0.4f}; });
-      auto ref = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.2f, 0.2f, 0.2f}; });
+      auto dis = MakeFrame(32, 32, [](int, int) { return Color{0.4f, 0.4f, 0.4f}; });
+      auto ref = MakeFrame(32, 32, [](int, int) { return Color{0.2f, 0.2f, 0.2f}; });
       EYEQ::FrameRenderer renderer(context, fill_config);
       std::map<int, std::shared_ptr<AVFrame>> frames;
       frames[0] = dis;
@@ -635,8 +602,8 @@ int main() {
 
     // ----------------------------------------------------------------- Slide
     {
-      auto left = MakeFrame(owner.stream, 32, 16, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
-      auto right = MakeFrame(owner.stream, 32, 16, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
+      auto left = MakeFrame(32, 16, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
+      auto right = MakeFrame(32, 16, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
       EYEQ::FrameRenderer::Config config = fill_config;
       config.mode = EYEQ::DisplayMode::Slide;
       EYEQ::FrameRenderer renderer(context, config);
@@ -659,8 +626,8 @@ int main() {
 
     // ------------------------------------------------------------------ Grid
     {
-      auto red = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
-      auto blue = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
+      auto red = MakeFrame(32, 32, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
+      auto blue = MakeFrame(32, 32, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
       red->crop_left = 4;
       red->crop_top = 4;
       red->crop_right = 4;
@@ -697,8 +664,8 @@ int main() {
 
     // ------------------------------------------- two renderers, interleaved
     {
-      auto source = MakeFrame(owner.stream, 80, 45,
-                              [](int x, int y) { return Color{static_cast<float>(x % 2), (y % 3) / 2.0f, 0.25f}; });
+      auto source =
+          MakeFrame(80, 45, [](int x, int y) { return Color{static_cast<float>(x % 2), (y % 3) / 2.0f, 0.25f}; });
 
       auto targetA = CreateTarget(gpu, 160, 90, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
       auto targetB = CreateTarget(gpu, 128, 96, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
@@ -759,7 +726,7 @@ int main() {
       if (unsupported == AV_PIX_FMT_NONE) {
         Skip("first-construction failure leak test: no unsupported software pixel format on this GPU");
       } else {
-        auto bad = MakeRawFrame(owner.stream, 32, 32, unsupported);
+        auto bad = MakeRawFrame(32, 32, unsupported);
         int refs_before = av_buffer_get_ref_count(bad->buf[0]);
         {
           // A failing constructor must release the private AVFrame and the
@@ -783,7 +750,7 @@ int main() {
 
     // ------------------------------------------ failed frame update recovery
     {
-      auto good = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
+      auto good = MakeFrame(32, 32, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
       int good_refs_before = av_buffer_get_ref_count(good->buf[0]);
       AVPixelFormat unsupported = FindUnsupportedFormat(gpu);
 
@@ -801,7 +768,7 @@ int main() {
         if (unsupported == AV_PIX_FMT_NONE) {
           Skip("failed-frame-update test: no unsupported software pixel format on this GPU");
         } else {
-          auto bad = MakeRawFrame(owner.stream, 32, 32, unsupported);
+          auto bad = MakeRawFrame(32, 32, unsupported);
           AVFrame *bad_raw = bad.get();
           AVPixelFormat bad_format_before = static_cast<AVPixelFormat>(bad_raw->format);
           uint8_t *bad_data0_before = bad_raw->data[0];
@@ -847,7 +814,7 @@ int main() {
       renderer_a.SetMainSource(0);
       renderer_b.SetMainSource(0);
 
-      auto pq_frame = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
+      auto pq_frame = MakeFrame(32, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
       pq_frame->color_primaries = AVCOL_PRI_BT2020;
       pq_frame->color_trc = AVCOL_TRC_SMPTE2084;
 
@@ -864,7 +831,7 @@ int main() {
       Check(mapped_b != nullptr && std::fabs(mapped_b->color.hdr.max_luma - 800.0f) > 0.5f,
             "renderer B without an override keeps its own max_luma");
 
-      auto sdr = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
+      auto sdr = MakeFrame(32, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
       std::map<int, std::shared_ptr<AVFrame>> sdr_frames;
       sdr_frames[0] = sdr;
       renderer_a.FeedFrames(sdr_frames);
@@ -880,7 +847,7 @@ int main() {
       const float pq_100 = PqCodeForNits(100.0f);
       Check(std::fabs(pq_100 - 0.5081f) < 0.001f, "ST2084 code for 100 nits matches the known value");
 
-      auto pq_source = MakeFrame(owner.stream, 32, 32, [&](int, int) { return Color{pq_100, pq_100, pq_100}; });
+      auto pq_source = MakeFrame(32, 32, [&](int, int) { return Color{pq_100, pq_100, pq_100}; });
       pq_source->color_primaries = AVCOL_PRI_BT2020;
       pq_source->color_trc = AVCOL_TRC_SMPTE2084;
 
@@ -926,7 +893,7 @@ int main() {
       } else {
         EYEQ::FrameRenderer renderer_a(context, fill_config);
         EYEQ::FrameRenderer renderer_b(context, fill_config);
-        auto source = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.4f, 0.5f, 0.6f}; });
+        auto source = MakeFrame(32, 32, [](int, int) { return Color{0.4f, 0.5f, 0.6f}; });
         std::map<int, std::shared_ptr<AVFrame>> frames_a;
         std::map<int, std::shared_ptr<AVFrame>> frames_b;
         frames_a[0] = source;
@@ -977,7 +944,7 @@ int main() {
         TTF_Quit();
       }
 
-      auto source = MakeFrame(owner.stream, 64, 48, [](int, int) { return Color{0.2f, 0.2f, 0.2f}; });
+      auto source = MakeFrame(64, 48, [](int, int) { return Color{0.2f, 0.2f, 0.2f}; });
       auto target = CreateTarget(gpu, 96, 72, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
       auto state = MakeBaseState({0}, 0);
       EYEQ::OsdInfo info;
@@ -1076,9 +1043,9 @@ int main() {
       // One SDR and one HDR source are mapped to the same display target and
       // composed. The SDR half must be identical to its SDR-only mapping (no
       // cross-contamination), and the HDR half must be finite.
-      auto sdr = MakeFrame(owner.stream, 32, 16, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
+      auto sdr = MakeFrame(32, 16, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
       const float pq_100 = PqCodeForNits(100.0f);
-      auto hdr = MakeFrame(owner.stream, 32, 16, [&](int, int) { return Color{pq_100, pq_100, pq_100}; });
+      auto hdr = MakeFrame(32, 16, [&](int, int) { return Color{pq_100, pq_100, pq_100}; });
       hdr->color_primaries = AVCOL_PRI_BT2020;
       hdr->color_trc = AVCOL_TRC_SMPTE2084;
 
@@ -1126,7 +1093,7 @@ int main() {
       // The same scene is rendered with the same mapping target but a different
       // work precision. The 32F reference is the correctness baseline; the 16F
       // candidate must stay within an explicit linear error bound.
-      auto source = MakeFrame(owner.stream, 64, 48, [](int x, int) {
+      auto source = MakeFrame(64, 48, [](int x, int) {
         const float base = static_cast<float>(x) / 63.0f;
         return Color{base * 0.02f, base * 0.5f, 2.0f + (x == 32 ? 1e-4f : 0.0f)};
       });
@@ -1203,7 +1170,7 @@ int main() {
         EYEQ::FrameRenderer::Config config = fill_config;
         config.enable_osd = true;
         EYEQ::FrameRenderer renderer(context, config);
-        auto source = MakeFrame(owner.stream, 64, 48, [](int, int) { return Color{0.3f, 0.4f, 0.5f}; });
+        auto source = MakeFrame(64, 48, [](int, int) { return Color{0.3f, 0.4f, 0.5f}; });
         std::map<int, std::shared_ptr<AVFrame>> frames;
         frames[0] = source;
         renderer.FeedFrames(frames);
@@ -1242,8 +1209,8 @@ int main() {
     {
       const float pq_100 = PqCodeForNits(100.0f);
       const float pq_110 = PqCodeForNits(110.0f);
-      auto dis = MakeFrame(owner.stream, 32, 32, [&](int, int) { return Color{pq_110, pq_110, pq_110}; });
-      auto ref = MakeFrame(owner.stream, 32, 32, [&](int, int) { return Color{pq_100, pq_100, pq_100}; });
+      auto dis = MakeFrame(32, 32, [&](int, int) { return Color{pq_110, pq_110, pq_110}; });
+      auto ref = MakeFrame(32, 32, [&](int, int) { return Color{pq_100, pq_100, pq_100}; });
       dis->color_primaries = AVCOL_PRI_BT2020;
       dis->color_trc = AVCOL_TRC_SMPTE2084;
       ref->color_primaries = AVCOL_PRI_BT2020;

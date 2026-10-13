@@ -84,7 +84,6 @@ std::shared_ptr<AVFrame> DecodeFrame(const std::string &path, int wanted, AVForm
           }
           AVFrame *copy = av_frame_alloc();
           av_frame_ref(copy, frame);
-          copy->opaque = fmt->streams[vs];
           result = std::shared_ptr<AVFrame>(copy, [](AVFrame *f) { av_frame_free(&f); });
           break;
         }

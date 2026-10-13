@@ -80,8 +80,7 @@ void VideoFrame::GeneratePLFrame(AVBufferRef *hw_device_ref) {
   int ret;
 
   // Refresh the private header so the map/transfer helpers below never mutate
-  // the caller's AVFrame. Pixel buffers stay shared through refcounting. The
-  // stream stored in AVFrame::opaque is not kept alive by this clone.
+  // the caller's AVFrame. Pixel buffers stay shared through refcounting.
   av_frame_unref(mapped_frame_);
   ret = av_frame_ref(mapped_frame_, frame_.get());
   if (ret < 0) {
@@ -163,10 +162,6 @@ convert:
   Logger->trace("convert avframe from format {} to pl_frame texture {}",
                 av_get_pix_fmt_name(static_cast<enum AVPixelFormat>(mapped_frame_->format)),
                 tex_[0]->params.format->name);
-  // The stream-level props come from the caller's frame: av_frame_ref does not
-  // own AVFrame::opaque, so the caller has to keep that stream alive.
-  AVStream *stream = (AVStream *)frame_->opaque;
-  pl_frame_copy_stream_props(&pl_frame_, stream);
 }
 
 int VideoFrame::create_hw_frame(AVBufferRef *hw_device_ref, AVFrame *frame) {

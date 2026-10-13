@@ -1076,7 +1076,6 @@ void VideoSource::AllInOneThread() {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         // Frame may be shared across threads; use shared_ptr for management
         frame_buffer_.push_back(std::shared_ptr<AVFrame>(filt_frame, AVFrameDeleter()));
-        filt_frame->opaque = stream_;
         SPDLOG_LOGGER_TRACE(Logger, "pushed frame {} pts {}", fmt::ptr(filt_frame), filt_frame->pts);
         buffer_cv_.notify_all(); // Notify waiting threads
       }

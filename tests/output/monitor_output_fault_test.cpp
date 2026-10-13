@@ -16,7 +16,6 @@
 #include <vector>
 
 extern "C" {
-#include <libavformat/avformat.h>
 #include <libavutil/frame.h>
 }
 #include <libplacebo/gpu.h>
@@ -68,7 +67,7 @@ bool HookGpuIsFailed(pl_gpu gpu) {
   return pl_gpu_is_failed(gpu);
 }
 
-std::shared_ptr<AVFrame> MakeSolidFrame(AVStream *stream, int width, int height, float value) {
+std::shared_ptr<AVFrame> MakeSolidFrame(int width, int height, float value) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -92,7 +91,6 @@ std::shared_ptr<AVFrame> MakeSolidFrame(AVStream *stream, int width, int height,
       }
     }
   }
-  frame->opaque = stream;
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
@@ -177,12 +175,6 @@ int main() {
     pl_gpu gpu = context.gpu();
     (void)gpu;
 
-    AVFormatContext *format = avformat_alloc_context();
-    if (!format) {
-      throw std::runtime_error("avformat_alloc_context failed");
-    }
-    AVStream *stream = avformat_new_stream(format, nullptr);
-
     const EYEQ::ResolvedOutput resolved = BuildResolved(64, 54);
     EYEQ::test::FakeFrameSink fake(1);
     auto scripted = std::make_unique<eyeq_test::ScriptedFrameSink>(fake);
@@ -194,7 +186,7 @@ int main() {
     auto coordinator = MakeCoordinator(context, resolved);
     MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
 
-    auto frame = MakeSolidFrame(stream, 64, 54, 0.3f);
+    auto frame = MakeSolidFrame(64, 54, 0.3f);
     EYEQ::DisplayState request_state = EYEQ::DisplayState{};
     request_state.ids = {5};
     request_state.scale = 1.0f;
@@ -230,7 +222,7 @@ int main() {
 
     // A new explicit request (not an automatic restart) succeeds once the injection
     // is exhausted, proving the failure did not silently poison the module.
-    auto second = MakeSolidFrame(stream, 64, 54, 0.6f);
+    auto second = MakeSolidFrame(64, 54, 0.6f);
     EYEQ::DisplayState next_state = EYEQ::DisplayState{};
     next_state.ids = {5};
     next_state.scale = 1.0f;
@@ -257,7 +249,7 @@ int main() {
 
       auto coordinator = MakeCoordinator(context, resolved);
       MonitorOutput gpu_monitor(context, *coordinator, std::move(gpu_scripted), resolved);
-      auto gpu_frame = MakeSolidFrame(stream, 64, 54, 0.3f);
+      auto gpu_frame = MakeSolidFrame(64, 54, 0.3f);
       EYEQ::DisplayState gpu_request_state = EYEQ::DisplayState{};
       gpu_request_state.ids = {5};
       gpu_request_state.scale = 1.0f;
@@ -285,7 +277,7 @@ int main() {
       Check(stayed_failed, "failure stays Failed with a stable stage across retries");
       Check(!gpu_monitor.AcceptsRequests(), "module still refuses requests while the slot cannot be reclaimed");
 
-      auto second_frame = MakeSolidFrame(stream, 64, 54, 0.9f);
+      auto second_frame = MakeSolidFrame(64, 54, 0.9f);
       EYEQ::DisplayState gpu_second_state = EYEQ::DisplayState{};
       gpu_second_state.ids = {9};
       gpu_second_state.scale = 1.0f;
@@ -334,7 +326,7 @@ int main() {
             "last_result is updated for an idle device event");
       Check(!event_monitor.AcceptsRequests(), "an idle terminal event stops accepting requests");
 
-      auto event_frame = MakeSolidFrame(stream, 64, 54, 0.3f);
+      auto event_frame = MakeSolidFrame(64, 54, 0.3f);
       EYEQ::DisplayState event_request_state = EYEQ::DisplayState{};
       event_request_state.ids = {5};
       event_request_state.scale = 1.0f;
@@ -354,7 +346,7 @@ int main() {
       eyeq_test::ScriptedFrameSink *post_scripted = post_scripted_holder.get();
       auto coordinator = MakeCoordinator(context, resolved);
       MonitorOutput post_monitor(context, *coordinator, std::move(post_scripted_holder), resolved);
-      auto post_frame = MakeSolidFrame(stream, 64, 54, 0.5f);
+      auto post_frame = MakeSolidFrame(64, 54, 0.5f);
       EYEQ::DisplayState post_request_state = EYEQ::DisplayState{};
       post_request_state.ids = {5};
       post_request_state.scale = 1.0f;
@@ -383,7 +375,6 @@ int main() {
       post_monitor.Close(2000);
     }
 
-    avformat_free_context(format);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FATAL: %s\n", e.what());
     ++g_failures;
