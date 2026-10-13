@@ -69,11 +69,16 @@ public:
   const char *ColorRange() const { return av_color_range_name(dec_ctx_->color_range); }
   const char *ColorPrimaries() const { return av_color_primaries_name(dec_ctx_->color_primaries); }
   const char *ColorTransfer() const { return av_color_transfer_name(dec_ctx_->color_trc); }
-  // HDR is decided by the transfer function only: PQ (SMPTE ST 2084) and HLG
-  // (ARIB STD-B67). Wide-gamut SDR (e.g. P3) is not HDR and is not treated as such.
-  bool IsHdr() const {
-    return dec_ctx_->color_trc == AVCOL_TRC_SMPTE2084 || dec_ctx_->color_trc == AVCOL_TRC_ARIB_STD_B67;
-  }
+  const std::string &FilterGraph() const { return filter_graph_; }
+  // HDR is decided by the transfer function of the filtered output frame only:
+  // PQ (SMPTE ST 2084) and HLG (ARIB STD-B67). Wide-gamut SDR (e.g. P3) is not
+  // HDR. Requires a decoded frame (call after WaitForFrameAvailable()).
+  bool IsHdr();
+  /**
+   * @brief Describe the filtered output frame, e.g. "rgb48be(tv, gbr/bt2020/smpte2084), 3840x2160".
+   * Requires a decoded frame (call after WaitForFrameAvailable()).
+   */
+  std::string OutputFrameString();
   float Bitrate() const { return (float)fmt_ctx_->bit_rate / 1000; }
   float FrameRate() const { return frame_rate_; }
   float TimeBase() const { return time_base_; }
@@ -207,6 +212,11 @@ public:
   bool RequestFormatFallback();
 
 private:
+  // Frame at the current position (or the first buffered frame before playback
+  // starts); nullptr when nothing is buffered. Caller must hold buffer_mutex_.
+  AVFrame *CurrentFrameLocked() const;
+  // Like CurrentFrameLocked(), but throws when no frame is buffered.
+  AVFrame *RequireCurrentFrameLocked(const char *caller) const;
   std::string filename_;
 
   float frame_rate_ = std::numeric_limits<float>::quiet_NaN(); // fps

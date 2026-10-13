@@ -3,6 +3,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <stdexcept>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/fmt.h>
@@ -134,16 +135,28 @@ VideoSource::~VideoSource() {
   av_buffer_unref(&hw_device_ctx_);
 }
 
+AVFrame *VideoSource::CurrentFrameLocked() const {
+  if (current_frame_index_ >= 0 && current_frame_index_ < (int)frame_buffer_.size()) {
+    return frame_buffer_[current_frame_index_].get();
+  }
+  if (current_frame_index_ < 0 && !frame_buffer_.empty()) {
+    return frame_buffer_[0].get();
+  }
+  return nullptr;
+}
+
+AVFrame *VideoSource::RequireCurrentFrameLocked(const char *caller) const {
+  AVFrame *frame = CurrentFrameLocked();
+  if (!frame) {
+    throw std::logic_error(fmt::format("{}: {}() called before any frame is decoded", filename_, caller));
+  }
+  return frame;
+}
+
 int VideoSource::Width() {
   std::unique_lock<std::mutex> lock(buffer_mutex_);
 
-  AVFrame *frame = nullptr;
-
-  if (current_frame_index_ >= 0 && current_frame_index_ < (int)frame_buffer_.size()) {
-    frame = frame_buffer_[current_frame_index_].get();
-  } else if (current_frame_index_ < 0 && frame_buffer_.size() > 0) {
-    frame = frame_buffer_[0].get();
-  }
+  AVFrame *frame = CurrentFrameLocked();
   Logger->trace("Use frame {} to guess width...", fmt::ptr(frame));
 
   if (frame) {
@@ -157,19 +170,36 @@ int VideoSource::Width() {
 int VideoSource::Height() {
   std::unique_lock<std::mutex> lock(buffer_mutex_);
 
-  AVFrame *frame = nullptr;
-
-  if (current_frame_index_ >= 0 && current_frame_index_ < (int)frame_buffer_.size()) {
-    frame = frame_buffer_[current_frame_index_].get();
-  } else if (current_frame_index_ < 0 && frame_buffer_.size() > 0) {
-    frame = frame_buffer_[0].get();
-  }
+  AVFrame *frame = CurrentFrameLocked();
 
   if (frame) {
     return frame->height;
   } else {
     return dec_ctx_->height;
   }
+}
+
+bool VideoSource::IsHdr() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  const AVFrame *frame = RequireCurrentFrameLocked("IsHdr");
+  return frame->color_trc == AVCOL_TRC_SMPTE2084 || frame->color_trc == AVCOL_TRC_ARIB_STD_B67;
+}
+
+std::string VideoSource::OutputFrameString() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  const AVFrame *frame = RequireCurrentFrameLocked("OutputFrameString");
+
+  // av_*_name() returns nullptr for values outside the known tables
+  auto name = [](const char *s) { return s ? s : "invalid"; };
+  std::string format = name(av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
+  if (frame->hw_frames_ctx) {
+    const auto *hw_frames = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data);
+    format += fmt::format("[{}]", name(av_get_pix_fmt_name(hw_frames->sw_format)));
+  }
+  return fmt::format("{}({}, {}/{}/{}), {}x{}", format, name(av_color_range_name(frame->color_range)),
+                     name(av_color_space_name(frame->colorspace)),
+                     name(av_color_primaries_name(frame->color_primaries)),
+                     name(av_color_transfer_name(frame->color_trc)), frame->width, frame->height);
 }
 
 void VideoSource::SetMaxCachedFrames(size_t max_cached_frames) {

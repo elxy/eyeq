@@ -821,6 +821,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // The stream line printed by AddVideoSource() describes the decoder input; the
+  // per-video filter (e.g. setparams) only shows up on the decoded output frames.
+  for (auto &[id, src] : player) {
+    if (src->FilterGraph().empty()) {
+      Logger->info("Video #{} output: {}", id, src->OutputFrameString());
+    } else {
+      Logger->info("Video #{} output: {}, filter: {}", id, src->OutputFrameString(), src->FilterGraph());
+    }
+  }
+
   // Check if hardware decoding took effect for all videos
   if (args.hardware_decoder != HardwareDecoder::None) {
     auto unused_ids = player.CheckUnusedHardwareDecoders();
