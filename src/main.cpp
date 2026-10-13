@@ -828,22 +828,32 @@ int main(int argc, char **argv) {
   }
 
   // The stream line printed by AddVideoSource() describes the decoder input; the
-  // per-video filter (e.g. setparams) only shows up on the decoded output frames.
+  // per-video filter (e.g. setparams) and the renderer's reading of the frame
+  // are only known once frames are decoded.
   for (auto &[id, src] : player) {
+    // The frame the renderer receives, after the filter graph (user filter,
+    // display rotation). Only worth INFO when the filters changed it.
     const std::string filter = src->EffectiveFilter();
-    if (filter.empty()) {
-      Logger->info("Video #{} output: {}", id, src->OutputFrameString());
+    const std::string filtered = src->OutputFrameString();
+    const std::string via = filter.empty() ? "" : fmt::format(", filter: {}", filter);
+    if (const auto decoded = src->FilterChangeString()) {
+      Logger->info("Video #{} after filters: {} (decoded: {}){}", id, filtered, *decoded, via);
     } else {
-      Logger->info("Video #{} output: {}, filter: {}", id, src->OutputFrameString(), filter);
+      Logger->debug("Video #{} after filters: {} (unchanged){}", id, filtered, via);
     }
-    // How the renderer reads that frame: tags it ignores or overrides and the
-    // defaults it fills in are spelled out, since libplacebo applies them silently
-    std::string interpretation = DescribeInterpretation(src->CurrentFrame().get());
+    // How the renderer reads that frame. Tags it ignores or overrides and the
+    // defaults it fills in are applied silently by libplacebo, so they are INFO.
+    Interpretation interpretation = DescribeInterpretation(src->CurrentFrame().get());
     if (const auto tag = src->MatrixGuessedFrom()) {
       const char *name = av_color_space_name(*tag);
-      interpretation += fmt::format(" [matrix guessed from size, tag '{}']", name ? name : "invalid");
+      interpretation.text += fmt::format(" [matrix guessed from size, tag '{}']", name ? name : "invalid");
+      interpretation.notable = true;
     }
-    Logger->info("Video #{} rendered as: {}", id, interpretation);
+    if (interpretation.notable) {
+      Logger->info("Video #{} rendered as: {}", id, interpretation.text);
+    } else {
+      Logger->debug("Video #{} rendered as: {}", id, interpretation.text);
+    }
   }
 
   // Check if hardware decoding took effect for all videos
@@ -884,8 +894,8 @@ int main(int argc, char **argv) {
       Window::GetDisplayResolution(display_w, display_h, display_id, false);
       high_dpi = player.Width() > display_w || player.Height() > display_h;
       if (high_dpi) {
-        Logger->info("Auto-enabling high-dpi mode: video {}x{} exceeds display {}x{} (pixel density: {:.1f})",
-                     player.Width(), player.Height(), display_w, display_h, pixel_density);
+        Logger->debug("Auto-enabling high-dpi mode: video {}x{} exceeds display {}x{} (pixel density: {:.1f})",
+                      player.Width(), player.Height(), display_w, display_h, pixel_density);
       }
     } else {
       high_dpi = false;

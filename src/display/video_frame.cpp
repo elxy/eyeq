@@ -356,11 +356,17 @@ std::string TransferShort(enum pl_color_transfer trc) {
 
 } // namespace
 
-std::string EYEQ::DescribeInterpretation(const AVFrame *frame) {
+Interpretation EYEQ::DescribeInterpretation(const AVFrame *frame) {
   struct pl_frame out;
   pl_frame_from_avframe(&out, frame);
 
-  std::string desc;
+  Interpretation result;
+  std::string &desc = result.text;
+  // Every annotation below marks a value that does not come from the tags
+  auto note = [&](const std::string &text) {
+    desc += text;
+    result.notable = true;
+  };
   AVPixelFormat format = static_cast<AVPixelFormat>(frame->format);
   if (frame->hw_frames_ctx) {
     format = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data)->sw_format;
@@ -376,16 +382,17 @@ std::string EYEQ::DescribeInterpretation(const AVFrame *frame) {
     desc = "RGB";
     break;
   case PL_COLOR_SYSTEM_XYZ:
-    desc = "XYZ (as DCI-P3, st428)";
+    desc = "XYZ";
+    note(" (as DCI-P3, st428)");
     break;
   default: {
     const AVFrameSideData *dovi = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
     desc = fmt::format("YCbCr {}", SystemShort(out.repr.sys));
     if (dovi && !av_dovi_get_header(reinterpret_cast<const AVDOVIMetadata *>(dovi->data))->disable_residual_flag) {
       // pl_map_avframe_ex() only maps RPUs that do not need an enhancement layer
-      desc += " (Dolby Vision RPU needs an enhancement layer, showing the base layer)";
+      note(" (Dolby Vision RPU needs an enhancement layer, showing the base layer)");
     } else if (dovi) {
-      desc += " (Dolby Vision RPU)";
+      note(" (Dolby Vision RPU)");
     }
     break;
   }
@@ -393,25 +400,26 @@ std::string EYEQ::DescribeInterpretation(const AVFrame *frame) {
   const enum pl_color_levels levels = pl_color_levels_guess(&out.repr);
   desc += levels == PL_COLOR_LEVELS_LIMITED ? ", limited" : ", full";
   if (out.repr.sys == PL_COLOR_SYSTEM_RGB && frame->color_range == AVCOL_RANGE_MPEG) {
-    desc += " (tv tag ignored for RGB)";
+    note(" (tv tag ignored for RGB)");
   } else if (out.repr.levels == PL_COLOR_LEVELS_UNKNOWN) {
-    desc += " (default)";
+    note(" (default)");
   }
 
   // Color space: an embedded ICC profile replaces primaries and transfer in
   // the renderer (pass_fix_frames), so the tags are not used at all
   if (out.profile.len) {
-    desc += fmt::format(", embedded ICC profile ({} bytes) overrides primaries/transfer", out.profile.len);
-    return desc;
+    note(fmt::format(", embedded ICC profile ({} bytes) overrides primaries/transfer", out.profile.len));
+    return result;
   }
   if (out.repr.sys == PL_COLOR_SYSTEM_XYZ) {
-    return desc;
+    return result;
   }
   if (out.color.primaries != PL_COLOR_PRIM_UNKNOWN) {
     desc += ", " + PrimariesShort(out.color.primaries);
   } else {
     // Renderer default (fix_frame): guessed from the frame size
-    desc += ", " + PrimariesShort(pl_color_primaries_guess(frame->width, frame->height)) + " (default)";
+    desc += ", " + PrimariesShort(pl_color_primaries_guess(frame->width, frame->height));
+    note(" (default)");
   }
   if (out.color.transfer != PL_COLOR_TRC_UNKNOWN) {
     // SDR camera OETF tags (bt709, bt2020-10, ...) deliberately become the
@@ -419,14 +427,15 @@ std::string EYEQ::DescribeInterpretation(const AVFrame *frame) {
     desc += ", " + TransferShort(out.color.transfer);
     if (out.color.transfer != PL_COLOR_TRC_BT_1886 && frame->color_trc != AVCOL_TRC_UNSPECIFIED &&
         pl_transfer_to_av(out.color.transfer) != frame->color_trc) {
-      desc += fmt::format(" (from {})", av_color_transfer_name(frame->color_trc));
+      note(fmt::format(" (from {})", av_color_transfer_name(frame->color_trc)));
     }
   } else {
     // Renderer default (pl_color_space_infer)
-    desc += ", " + TransferShort(PL_COLOR_TRC_BT_1886) + " (default)";
+    desc += ", " + TransferShort(PL_COLOR_TRC_BT_1886);
+    note(" (default)");
     if (frame->color_trc != AVCOL_TRC_UNSPECIFIED) {
-      desc += fmt::format(", {} not supported", av_color_transfer_name(frame->color_trc));
+      note(fmt::format(", {} not supported", av_color_transfer_name(frame->color_trc)));
     }
   }
-  return desc;
+  return result;
 }

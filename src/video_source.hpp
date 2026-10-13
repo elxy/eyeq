@@ -98,6 +98,12 @@ public:
    * Requires a decoded frame (call after WaitForFrameAvailable()).
    */
   std::string OutputFrameString();
+  /**
+   * @brief The first decoded frame (after the YCbCr matrix is resolved, before the filter graph) in the
+   * OutputFrameString() format, or empty when the filter graph left the frame unchanged (ignoring hardware download).
+   * Requires a decoded frame.
+   */
+  std::optional<std::string> FilterChangeString();
   float Bitrate() const { return (float)fmt_ctx_->bit_rate / 1000; }
   float FrameRate() const { return frame_rate_; }
   float TimeBase() const { return time_base_; }
@@ -258,6 +264,8 @@ private:
   bool autorotate_;
   bool rotation_logged_ = false;                    // decode thread only
   std::string effective_filter_;                    // guarded by buffer_mutex_
+  std::string decoded_frame_string_;                // first decoded frame, guarded by buffer_mutex_
+  std::string decoded_frame_key_;                   // same, without the hardware format, for comparison
   std::optional<AVColorSpace> matrix_guessed_from_; // written by the decode thread under buffer_mutex_
   // Replaces a missing/unsupported YCbCr matrix tag with libplacebo's guess (decode thread only)
   void ResolveMatrix(AVFrame *frame);

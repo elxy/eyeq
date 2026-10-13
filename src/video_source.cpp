@@ -49,6 +49,24 @@ std::string AutorotateFilter(const int32_t *matrix) {
   return matrix[4] < 0 ? "vflip" : "";
 }
 
+// "fmt(range, colorspace/primaries/transfer), WxH". Hardware frames are shown
+// as "hwfmt[swfmt]" when with_hw is set, as their software format otherwise,
+// so that frames differing only in where they live compare equal.
+std::string FrameString(const AVFrame *frame, bool with_hw) {
+  // av_*_name() returns nullptr for values outside the known tables
+  auto name = [](const char *s) { return s ? s : "invalid"; };
+  std::string format = name(av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
+  if (frame->hw_frames_ctx) {
+    const auto *hw_frames = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data);
+    const char *sw = name(av_get_pix_fmt_name(hw_frames->sw_format));
+    format = with_hw ? fmt::format("{}[{}]", format, sw) : sw;
+  }
+  return fmt::format("{}({}, {}/{}/{}), {}x{}", format, name(av_color_range_name(frame->color_range)),
+                     name(av_color_space_name(frame->colorspace)),
+                     name(av_color_primaries_name(frame->color_primaries)),
+                     name(av_color_transfer_name(frame->color_trc)), frame->width, frame->height);
+}
+
 // Matrix libplacebo would guess for a YCbCr frame whose colorspace tag it does
 // not implement, or AVCOL_SPC_UNSPECIFIED when the tag is usable as is (or the
 // frame is not ordinary YCbCr). Mirrors pl_frame_from_avframe(): tags that
@@ -255,11 +273,12 @@ void VideoSource::ResolveMatrix(AVFrame *frame) {
   }
   if (!matrix_guessed_from_.has_value()) {
     const char *tag = av_color_space_name(frame->colorspace);
-    Logger->info("{}: YCbCr matrix tag '{}' is {}; assuming {} from the {}x{} frame size (libplacebo's rule), for both "
-                 "the filters and the rendering",
-                 filename_, tag ? tag : "invalid",
-                 frame->colorspace == AVCOL_SPC_UNSPECIFIED ? "missing" : "not supported by libplacebo",
-                 av_color_space_name(guess), frame->width, frame->height);
+    Logger->debug(
+        "{}: YCbCr matrix tag '{}' is {}; assuming {} from the {}x{} frame size (libplacebo's rule), for both "
+        "the filters and the rendering",
+        filename_, tag ? tag : "invalid",
+        frame->colorspace == AVCOL_SPC_UNSPECIFIED ? "missing" : "not supported by libplacebo",
+        av_color_space_name(guess), frame->width, frame->height);
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     matrix_guessed_from_ = frame->colorspace;
   }
@@ -293,19 +312,16 @@ bool VideoSource::IsHdr() {
 
 std::string VideoSource::OutputFrameString() {
   std::unique_lock<std::mutex> lock(buffer_mutex_);
-  const AVFrame *frame = RequireCurrentFrameLocked("OutputFrameString");
+  return FrameString(RequireCurrentFrameLocked("OutputFrameString"), true);
+}
 
-  // av_*_name() returns nullptr for values outside the known tables
-  auto name = [](const char *s) { return s ? s : "invalid"; };
-  std::string format = name(av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
-  if (frame->hw_frames_ctx) {
-    const auto *hw_frames = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data);
-    format += fmt::format("[{}]", name(av_get_pix_fmt_name(hw_frames->sw_format)));
+std::optional<std::string> VideoSource::FilterChangeString() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  const AVFrame *frame = RequireCurrentFrameLocked("FilterChangeString");
+  if (FrameString(frame, false) == decoded_frame_key_) {
+    return std::nullopt;
   }
-  return fmt::format("{}({}, {}/{}/{}), {}x{}", format, name(av_color_range_name(frame->color_range)),
-                     name(av_color_space_name(frame->colorspace)),
-                     name(av_color_primaries_name(frame->color_primaries)),
-                     name(av_color_transfer_name(frame->color_trc)), frame->width, frame->height);
+  return decoded_frame_string_;
 }
 
 void VideoSource::SetMaxCachedFrames(size_t max_cached_frames) {
@@ -1173,6 +1189,13 @@ void VideoSource::AllInOneThread() {
         ResolveMatrix(frame);
       }
       if (!graph_) {
+        if (AVERROR_EOF != ret) {
+          std::lock_guard<std::mutex> lock(buffer_mutex_);
+          if (decoded_frame_string_.empty()) {
+            decoded_frame_string_ = FrameString(frame, true);
+            decoded_frame_key_ = FrameString(frame, false);
+          }
+        }
         CreateFilterGraph(frame);
       }
       ret = FilterNextFrame(filt_frame, AVERROR_EOF == ret ? nullptr : frame);

@@ -62,6 +62,11 @@ private:
   int transfer_frame(AVFrame *frame, int use_hw_frame);
 };
 
+struct Interpretation {
+  std::string text;
+  bool notable = false; // some value does not come from the frame tags (default, ignored, overridden)
+};
+
 /**
  * @brief Describe how libplacebo interprets the frame, e.g. "YCbCr bt709, limited, bt2020, smpte2084".
  *
@@ -70,6 +75,6 @@ private:
  * limited-range tag that libplacebo ignores, an embedded ICC profile that overrides primaries/transfer, or a
  * primaries/transfer default.
  */
-std::string DescribeInterpretation(const AVFrame *frame);
+Interpretation DescribeInterpretation(const AVFrame *frame);
 
 }; // namespace EYEQ
