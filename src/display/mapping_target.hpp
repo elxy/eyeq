@@ -20,6 +20,31 @@ enum class WorkPrecision { F16, F32 };
 const char *ToString(WorkPrecision precision);
 
 /*
+ * What the mapping target describes (--target-display-nits):
+ *  - None:    no target was given; the comparison core does not map and the
+ *             system maps the output (--tone-mapping system). The mapping target
+ *             peak is resolved once from the sources' mastering peak.
+ *  - HdrNits: a HDR display with an explicit peak; the output is PQ.
+ *  - Sdr:     a SDR display; the output is SDR and the peak is the SDR white.
+ */
+enum class TargetKind { None, HdrNits, Sdr };
+
+/*
+ * How sources above the mapping target are mapped (--tone-mapping). System means
+ * the comparison core does not map at all (TargetKind::None). Sources mapped by
+ * their own dynamic-metadata curve (HDR Vivid) are not affected.
+ *  - Clip:    hue-preserving clip: RGB is scaled down so its largest channel
+ *             does not exceed the target peak; in-range pixels are untouched.
+ *  - ClipRgb: every RGB channel is clipped to the target peak on its own, in
+ *             the output gamut.
+ *  - Spline:  libplacebo's spline tone mapping (highlight roll-off).
+ */
+enum class ToneMapping { System, Clip, ClipRgb, Spline };
+
+const char *ToString(TargetKind kind);
+const char *ToString(ToneMapping mapping);
+
+/*
  * The single display mapping target: the physical display conditions every
  * source is mapped to *before* any comparison. It is deliberately separate from
  * the wire encoding (PQ / SDR BT.1886, v210/r210, video range), which describes

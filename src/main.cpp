@@ -62,7 +62,6 @@ struct EyeQArgs {
   int grid_w, grid_h;
   bool full_screen;
 
-  bool colorspace_hint;
   HighDpiMode high_dpi_mode;
   ScaleMethod scale_method;
   ScaleMethod plane_scale_method;
@@ -83,11 +82,15 @@ struct EyeQArgs {
   // desktop is unaffected. Replaces --sdr-white-on-hdr and --monitor-sdr-white.
   double reference_white;
   bool reference_white_set;
-  bool hdrvivid_render;       // Apply HDR Vivid 1.0 dynamic metadata on the GPU
-  double target_display_nits; // Comparison mapping target peak luminance (nits), all modes
-  bool target_display_set;    // Whether --target-display-nits was explicitly passed
-  double source_max_luma;     // Opt-in source HDR max_luma override (nits)
-  bool source_max_luma_set;   // Whether --source-max-luma was explicitly passed
+  bool hdrvivid_render;            // Apply HDR Vivid 1.0 dynamic metadata on the GPU
+  double target_display_nits;      // Mapping target peak (nits) for TargetKind::HdrNits
+  bool target_display_set;         // Whether --target-display-nits was explicitly passed
+  std::string target_display_spec; // Raw --target-display-nits value: nits or 'sdr'
+  TargetKind target_kind;          // None without --target-display-nits (no default target)
+  ToneMapping tone_mapping;        // --tone-mapping; system without a target, spline with one
+  bool tone_mapping_set;           // Whether --tone-mapping was explicitly passed
+  double default_mastering_nits;   // Mastering peak (nits) for HDR sources that have none
+  bool default_mastering_nits_set; // Whether --default-mastering-nits was explicitly passed
 
 #ifdef EYEQ_ENABLE_DECKLINK
   // External monitoring (SDK-enabled builds only). --monitor-device enables it;
@@ -124,6 +127,20 @@ static std::string generate_title(const struct EyeQArgs &args, const std::vector
   }
 
   return args.videos[ids[0]] + " | " + args.videos[ids[1]];
+}
+
+// An --icc-profile value without an "N:" video prefix is a global profile
+// (including "auto"); it replaces the output color space with the ICC target.
+static bool IsGlobalIccSpec(const std::string &spec) {
+  const size_t colon_pos = spec.find(':');
+  if (colon_pos == std::string::npos || colon_pos == 0 || colon_pos >= spec.size() - 1) {
+    return true;
+  }
+  return !std::all_of(spec.begin(), spec.begin() + static_cast<std::ptrdiff_t>(colon_pos), ::isdigit);
+}
+
+static bool HasGlobalIcc(const EyeQArgs &args) {
+  return std::any_of(args.icc_profiles.begin(), args.icc_profiles.end(), IsGlobalIccSpec);
 }
 
 static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
@@ -194,7 +211,6 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
       app.add_flag("--full-screen", args.full_screen, "Start in fullscreen (desktop resolution, no mode switch)");
   option_full_screen->excludes(option_window_size);
 
-  app.add_flag("!--no-colorspace-hint", args.colorspace_hint, "Disable colorspace hint to allow tone mapping");
   app.add_option("--reference-white", args.reference_white,
                  "SDR reference white in nits (default: 203, ITU-R BT.2408). Used as the SDR white when the main "
                  "video is HDR and as the monitor mapping/wire SDR white when monitoring. A pure SDR desktop is "
@@ -202,14 +218,28 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
       ->check(CLI::PositiveNumber);
   app.add_flag("--hdrvivid-render", args.hdrvivid_render,
                "Apply HDR Vivid 1.0 dynamic metadata to the common display mapping target on the GPU");
-  app.add_option("--target-display-nits", args.target_display_nits,
-                 "Comparison mapping target peak luminance (nits), the single entry for every mode and the "
-                 "Vivid curve's target display luminance. For a pq2020 monitor target it is required (no HDR "
-                 "monitor peak is guessed); otherwise it defaults to 1000");
-  app.add_option("--source-max-luma", args.source_max_luma,
-                 "Override the source HDR mastering/content peak (max_luma) to this value in nits. Opt-in "
-                 "correction for untrusted source metadata (HLG/DPX read-back); it never changes the "
-                 "mapping target and does not rewrite bitstream dynamic metadata")
+  app.add_option("--target-display-nits", args.target_display_spec,
+                 "Mapping target that eyeq maps every source to: a peak in nits (HDR display, PQ output) or "
+                 "'sdr' (SDR display, SDR output). It also is the HDR Vivid curve's target display luminance "
+                 "and the monitor peak when monitoring. There is no default: without it eyeq does not map and "
+                 "the system maps the output to the display (see --tone-mapping)")
+      ->option_text("<nits|sdr>");
+  std::map<std::string, ToneMapping> tone_mapping_map{{"system", ToneMapping::System},
+                                                      {"clip", ToneMapping::Clip},
+                                                      {"clip-rgb", ToneMapping::ClipRgb},
+                                                      {"spline", ToneMapping::Spline}};
+  app.add_option("--tone-mapping", args.tone_mapping,
+                 "How eyeq maps sources brighter than the mapping target: 'system' (eyeq does not map, the "
+                 "system maps the output; the default without --target-display-nits), 'clip' (clip and "
+                 "keep the hue), 'clip-rgb' (clip every RGB channel) or 'spline' (highlight roll-off; the default "
+                 "with --target-display-nits). A source mapped by its own dynamic-metadata curve "
+                 "(--hdrvivid-render) is not affected")
+      ->transform(CLI::CheckedTransformer(tone_mapping_map, CLI::ignore_case))
+      ->option_text("{system,clip,clip-rgb,spline}");
+  app.add_option("--default-mastering-nits", args.default_mastering_nits,
+                 "Mastering display peak in nits for HDR sources that have none (e.g. DPX/JPEG XL whose peak "
+                 "FFmpeg does not read). Sources that carry a mastering peak, MaxCLL and dynamic metadata are "
+                 "left unchanged")
       ->check(CLI::PositiveNumber);
   std::map<std::string, HighDpiMode> hdpi_map{
       {"auto", HighDpiMode::Auto}, {"yes", HighDpiMode::Yes}, {"no", HighDpiMode::No}};
@@ -300,11 +330,31 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
     args.log_level = LoggingLevel::DEBUG;
   }
 
-  // Both overrides are opt-in: the mapping target peak only changes when the user
-  // explicitly passes --target-display-nits, and the source max_luma only when the
-  // user explicitly passes --source-max-luma.
+  // There is no default mapping target: without --target-display-nits eyeq does
+  // not map (system); with it the default mapping is spline.
   args.target_display_set = app.count("--target-display-nits") > 0;
-  args.source_max_luma_set = app.count("--source-max-luma") > 0;
+  args.tone_mapping_set = app.count("--tone-mapping") > 0;
+  if (args.target_display_set) {
+    if (args.target_display_spec == "sdr") {
+      args.target_kind = TargetKind::Sdr;
+    } else {
+      size_t pos = 0;
+      try {
+        args.target_display_nits = std::stod(args.target_display_spec, &pos);
+      } catch (const std::exception &) {
+        pos = 0;
+      }
+      if (pos == 0 || pos != args.target_display_spec.size()) {
+        Logger->critical("--target-display-nits must be a number of nits or 'sdr', got '{}'", args.target_display_spec);
+        exit(1);
+      }
+      args.target_kind = TargetKind::HdrNits;
+    }
+  }
+  if (!args.tone_mapping_set) {
+    args.tone_mapping = args.target_display_set ? ToneMapping::Spline : ToneMapping::System;
+  }
+  args.default_mastering_nits_set = app.count("--default-mastering-nits") > 0;
   args.reference_white_set = app.count("--reference-white") > 0;
 
 #ifdef EYEQ_ENABLE_DECKLINK
@@ -568,8 +618,8 @@ static void PrintMonitorStatus() {
 // real error. The aggregate of every candidate's failure is reported, never a
 // silent fallback.
 static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, DisplayCoordinator &coordinator,
-                                                   const EyeQArgs &args, bool main_is_hdr, int source_width,
-                                                   int source_height, double source_fps) {
+                                                   const EyeQArgs &args, int source_width, int source_height,
+                                                   double source_fps) {
   std::string error;
 
   PixelFormat pixel_format = PixelFormat::V210;
@@ -590,14 +640,19 @@ static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, Displ
     throw std::runtime_error("--monitor-mode: " + error);
   }
 
-  // The color target follows only the main video's transfer (PQ/HLG -> pq2020).
+  // The mapping target decides the wire: a peak in nits is pq2020, sdr is sdr709.
+  // An explicit --monitor-color must agree with it (a monitor peak is never
+  // guessed, and a SDR wire has no HDR peak).
+  const bool target_is_hdr = args.target_kind == TargetKind::HdrNits;
+  // A SDR monitor target peaks at the SDR reference white.
+  const double monitor_peak = target_is_hdr ? args.target_display_nits : args.reference_white;
   MonitorColorTarget color_target;
   std::string color_reason;
-  ResolveMonitorColorTarget(color_requested, main_is_hdr, &color_target, &color_reason);
-  // A PQ monitor peak cannot be guessed; refuse instead of defaulting to 1000.
-  if (color_target == MonitorColorTarget::PqBt2020 && !args.target_display_set) {
-    throw std::runtime_error(
-        "--target-display-nits is required for a pq2020 monitor target (no HDR monitor peak is guessed)");
+  ResolveMonitorColorTarget(color_requested, target_is_hdr, &color_target, &color_reason);
+  if ((color_target == MonitorColorTarget::PqBt2020) != target_is_hdr) {
+    throw std::runtime_error(fmt::format("--monitor-color {} contradicts --target-display-nits {}: pq2020 needs a "
+                                         "peak in nits, sdr709 needs 'sdr'",
+                                         MonitorColorTargetLabel(color_target), args.target_display_spec));
   }
 
   const DeviceCatalog catalog = DeckLinkOutput::Enumerate();
@@ -662,8 +717,8 @@ static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, Displ
       }
 
       OutputRequest request;
-      if (!BuildMonitorOutputRequest(device.id, selected, connection, pixel_format, color_target,
-                                     args.target_display_nits, &request, &device_error)) {
+      if (!BuildMonitorOutputRequest(device.id, selected, connection, pixel_format, color_target, monitor_peak,
+                                     &request, &device_error)) {
         throw std::runtime_error("invalid monitor output request: " + device_error);
       }
 
@@ -677,7 +732,7 @@ static std::unique_ptr<MonitorOutput> SetupMonitor(RenderContext &context, Displ
                    "desktop)",
                    FormatDeviceLabel(device), FormatMonitorMode(resolved.mode), mode_reason,
                    ConnectionName(resolved.connection), connection_reason, PixelFormatName(pixel_format),
-                   MonitorColorTargetLabel(color_target), color_reason, args.target_display_nits, args.reference_white);
+                   MonitorColorTargetLabel(color_target), color_reason, monitor_peak, args.reference_white);
       return std::make_unique<MonitorOutput>(context, coordinator, std::move(backend), resolved);
     } catch (const std::exception &e) {
       if (candidates.size() == 1) {
@@ -707,7 +762,6 @@ int main(int argc, char **argv) {
       .grid_w = 0,
       .grid_h = 0,
       .full_screen = false,
-      .colorspace_hint = true,
       .high_dpi_mode = HighDpiMode::Auto,
       .scale_method = ScaleMethod::Nearest,
       .plane_scale_method = ScaleMethod::Lanczos,
@@ -721,10 +775,14 @@ int main(int argc, char **argv) {
       .reference_white = PL_COLOR_SDR_WHITE,
       .reference_white_set = false,
       .hdrvivid_render = false,
-      .target_display_nits = 1000.0,
+      .target_display_nits = 0.0,
       .target_display_set = false,
-      .source_max_luma = 0.0,
-      .source_max_luma_set = false,
+      .target_display_spec = "",
+      .target_kind = TargetKind::None,
+      .tone_mapping = ToneMapping::System,
+      .tone_mapping_set = false,
+      .default_mastering_nits = 0.0,
+      .default_mastering_nits_set = false,
   };
 
   parse_args(args, argc, argv);
@@ -743,14 +801,47 @@ int main(int argc, char **argv) {
   }
 #endif
 
-  if (args.target_display_set && (args.target_display_nits <= 0.0 || args.target_display_nits > 10000.0)) {
-    Logger->critical("--target-display-nits must be in the range (0, 10000] nits");
+  if (args.target_kind == TargetKind::HdrNits &&
+      (args.target_display_nits <= 0.0 || args.target_display_nits > 10000.0)) {
+    Logger->critical("--target-display-nits must be in the range (0, 10000] nits, or 'sdr'");
     return 1;
   }
 
-  if (args.source_max_luma_set && (args.source_max_luma <= 0.0 || args.source_max_luma > 10000.0)) {
-    Logger->critical("--source-max-luma must be in the range (0, 10000] nits");
+  if (args.default_mastering_nits_set &&
+      (args.default_mastering_nits <= 0.0 || args.default_mastering_nits > 10000.0)) {
+    Logger->critical("--default-mastering-nits must be in the range (0, 10000] nits");
     return 1;
+  }
+
+  // The two questions are independent but not every pair is meaningful: mapping
+  // needs a target, and "system" means eyeq has none. Every path where eyeq itself
+  // must map to a known display is refused without a target instead of silently
+  // mapping to a guessed one. A global ICC only takes part in these checks; it
+  // never changes another option.
+  {
+    const bool system_mapping = args.tone_mapping == ToneMapping::System;
+    std::string conflict;
+    if (!args.target_display_set && !system_mapping) {
+      conflict = fmt::format("--tone-mapping {} needs a mapping target: pass --target-display-nits <nits|sdr>",
+                             ToString(args.tone_mapping));
+    } else if (args.target_display_set && system_mapping) {
+      conflict = "--tone-mapping system means eyeq does not map, so it cannot be combined with "
+                 "--target-display-nits";
+    } else if (args.hdrvivid_render && !args.target_display_set) {
+      conflict = "--hdrvivid-render needs a target display luminance: pass --target-display-nits <nits|sdr>";
+    } else if (HasGlobalIcc(args) && args.target_kind == TargetKind::HdrNits) {
+      conflict = "a global --icc-profile describes a SDR display, so it cannot be combined with a HDR "
+                 "--target-display-nits; pass --target-display-nits sdr";
+    }
+#ifdef EYEQ_ENABLE_DECKLINK
+    if (conflict.empty() && args.monitor_device.has_value() && !args.target_display_set) {
+      conflict = "--monitor-device needs a mapping target: pass --target-display-nits <nits|sdr>";
+    }
+#endif
+    if (!conflict.empty()) {
+      Logger->critical("{}", conflict);
+      return 1;
+    }
   }
 
   signal(SIGINT, sigterm_handler);  // Interrupt (ANSI)
@@ -887,8 +978,7 @@ int main(int argc, char **argv) {
       args.win_h = player.Height();
     }
   }
-  Window window(title, args.win_w, args.win_h, args.log_level, args.colorspace_hint, high_dpi, display_id,
-                args.full_screen);
+  Window window(title, args.win_w, args.win_h, args.log_level, high_dpi, display_id, args.full_screen);
 
   // The fixed comparison canvas is independent of the window: the source video
   // size for Fill/Slide and the grid layout size for Grid.
@@ -901,11 +991,33 @@ int main(int argc, char **argv) {
   bool monitoring = false;
 #ifdef EYEQ_ENABLE_DECKLINK
   monitoring = args.monitor_device.has_value();
-  // The main video's transfer decides the auto monitor color target: PQ/HLG is
-  // HDR, everything else (including wide-gamut SDR) is SDR. Primaries are never
-  // used for this choice.
-  const bool main_is_hdr = player.GetVideoSource(args.main_id)->IsHdr();
 #endif
+
+  // Without a mapping target eyeq does not map, so the output follows the main
+  // video and the system maps it. That only works when the output can carry every
+  // source: a SDR output (SDR main video or a global ICC) cannot carry a HDR
+  // source, and nothing would map it. Refuse instead of clipping silently.
+  if (args.target_kind == TargetKind::None) {
+    bool any_hdr = false;
+    for (int id = 0; id < static_cast<int>(args.videos.size()); ++id) {
+      any_hdr = any_hdr || player.GetVideoSource(id)->IsHdr();
+    }
+    const bool main_is_hdr = player.GetVideoSource(args.main_id)->IsHdr();
+    std::string conflict;
+    if (any_hdr && HasGlobalIcc(args)) {
+      conflict = "a global --icc-profile makes the output SDR but there is a HDR video: pass "
+                 "--target-display-nits sdr to map it to SDR";
+    } else if (any_hdr && !main_is_hdr) {
+      conflict = "the main video is SDR but there is a HDR video: pass --target-display-nits sdr to map it "
+                 "to SDR, or --target-display-nits <nits> for a HDR output";
+    }
+    if (!conflict.empty()) {
+      Logger->critical("{}", conflict);
+      window.Shutdown();
+      SDL_Quit();
+      return 1;
+    }
+  }
 
   DisplayCoordinator::Config coordinator_config;
   coordinator_config.mode = args.display_mode;
@@ -913,19 +1025,23 @@ int main(int argc, char **argv) {
   coordinator_config.plane_scale_method = args.plane_scale_method;
   coordinator_config.pixel_density = window.GetDisplayPixelDensity();
   coordinator_config.enable_osd = true;
-  coordinator_config.colorspace_hint = args.colorspace_hint;
+  coordinator_config.target_kind = args.target_kind;
+  coordinator_config.tone_mapping = args.tone_mapping;
   coordinator_config.icc_mode = monitoring ? IccMode::MonitoringDisabled : IccMode::Enabled;
   coordinator_config.work_precision = WorkPrecision::F16;
   coordinator_config.hdrvivid = args.hdrvivid_render;
   coordinator_config.mapping_target.primaries = PL_COLOR_PRIM_BT_2020;
-  const float mapping_peak = static_cast<float>(args.target_display_nits);
   const float reference_white = static_cast<float>(args.reference_white);
   // The reference white only affects a pipeline where SDR and HDR meet: as the
   // source SDR white when the main video is HDR (SetSdrWhiteOnHdr below) and as
   // the monitor mapping/wire SDR white when monitoring. A pure SDR desktop keeps
   // the libplacebo default and is unaffected.
   const float mapping_sdr_white = monitoring ? reference_white : PL_COLOR_SDR_WHITE;
-  coordinator_config.mapping_target.peak_nits = mapping_peak;
+  // A SDR target maps to the SDR white. Without a target the peak is resolved
+  // from the sources on the first feed; the SDR white is only the initial value
+  // (and the final one when every source is SDR).
+  coordinator_config.mapping_target.peak_nits =
+      args.target_kind == TargetKind::HdrNits ? static_cast<float>(args.target_display_nits) : mapping_sdr_white;
   coordinator_config.mapping_target.black_nits = 0.0f;
   coordinator_config.mapping_target.sdr_white_nits = mapping_sdr_white;
   coordinator_config.canvas_w = canvas_w;
@@ -934,8 +1050,8 @@ int main(int argc, char **argv) {
       window.context(), coordinator_config,
       [&window](const struct pl_color_space *csp) { window.PresenterColorspaceHint(csp); });
   window.SetCoordinator(coordinator.get());
-  if (args.source_max_luma_set) {
-    coordinator->SetSourceMaxLuma(args.source_max_luma);
+  if (args.default_mastering_nits_set) {
+    coordinator->SetDefaultMasteringNits(args.default_mastering_nits);
   }
 
   // Load ICC profiles
@@ -974,8 +1090,7 @@ int main(int argc, char **argv) {
     // The external monitor target is the same --target-display-nits peak used in
     // every other mode (applied through the coordinator's mapping target above).
     try {
-      monitor = SetupMonitor(window.context(), *coordinator, args, main_is_hdr, player.Width(), player.Height(),
-                             player.FrameRate());
+      monitor = SetupMonitor(window.context(), *coordinator, args, player.Width(), player.Height(), player.FrameRate());
     } catch (const std::exception &e) {
       // No output was enabled; release the GPU resources before SDL_Quit so the
       // failure path follows the same ordering rule as the normal exit path.
@@ -1161,7 +1276,14 @@ int main(int argc, char **argv) {
       // frames named by the user's Ctrl+E.
       if (!hold_snapshot_for_save) {
         if (auto snapshot = player.TakeSnapshot()) {
-          auto failed_ids = coordinator->FeedFrames(snapshot->frames);
+          std::vector<int> failed_ids;
+          try {
+            failed_ids = coordinator->FeedFrames(snapshot->frames);
+          } catch (const std::runtime_error &e) {
+            Logger->critical("{}", e.what());
+            exit_code = 1;
+            goto exit;
+          }
           if (!failed_ids.empty()) {
             // The fallback runs through the player's control path (rebuild filter
             // graph + re-seek); a failure is reported as a control outcome.
@@ -1220,7 +1342,14 @@ int main(int argc, char **argv) {
         } else {
           state.mouse_time_s = -1.0f;
         }
-        window.Render(state);
+        try {
+          window.Render(state);
+        } catch (const std::runtime_error &e) {
+          // e.g. a HDR output was requested but the platform offers no HDR surface
+          Logger->critical("{}", e.what());
+          exit_code = 1;
+          goto exit;
+        }
         hold_snapshot_for_save = false; // the pending rendered-frame save was consumed
         window.SetTitle(title_);
         need_refresh = false;

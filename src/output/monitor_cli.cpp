@@ -194,7 +194,7 @@ bool ParseMonitorColorTarget(const std::string &text, MonitorColorTarget *out, s
               "monitor color target '" + text + "' must be 'auto', 'sdr709' (BT.709/BT.1886) or 'pq2020' (BT.2020/PQ)");
 }
 
-bool ResolveMonitorColorTarget(MonitorColorTarget requested, bool main_is_hdr, MonitorColorTarget *out,
+bool ResolveMonitorColorTarget(MonitorColorTarget requested, bool target_is_hdr, MonitorColorTarget *out,
                                std::string *reason) {
   if (requested != MonitorColorTarget::Auto) {
     *out = requested;
@@ -203,11 +203,11 @@ bool ResolveMonitorColorTarget(MonitorColorTarget requested, bool main_is_hdr, M
     }
     return true;
   }
-  // The choice is driven by the transfer function, never by primaries: BT.2020 is
-  // a superset of wide-gamut SDR (P3) and is only paired with a PQ wire.
-  *out = main_is_hdr ? MonitorColorTarget::PqBt2020 : MonitorColorTarget::SdrBt709;
+  // The mapping target decides the output: a peak in nits is a HDR display (PQ
+  // wire), `sdr` is a SDR display (BT.1886 wire).
+  *out = target_is_hdr ? MonitorColorTarget::PqBt2020 : MonitorColorTarget::SdrBt709;
   if (reason != nullptr) {
-    *reason = main_is_hdr ? "auto: main video is HDR (PQ/HLG)" : "auto: main video is SDR";
+    *reason = target_is_hdr ? "auto: the mapping target is a HDR peak" : "auto: the mapping target is sdr";
   }
   return true;
 }

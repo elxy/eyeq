@@ -158,9 +158,7 @@ void GridRender::RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], int
           if (icc)
             dst.icc = icc;
         }
-        if (!pl_render_image(renderer_, &src_frame, &dst, &params)) {
-          throw std::runtime_error("pl_render_image failed.");
-        }
+        MapSource(&src_frame, &dst, &params, id);
       }
     }
   }

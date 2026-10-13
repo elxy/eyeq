@@ -200,11 +200,11 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--grid-size <size>`：指定`grid`显示时的网格大小，如`--grid-size 2x2`，默认自适应选择
 - `--filter <filter>`：指定视频滤镜，作为未单独指定滤镜的视频的默认滤镜，即[FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html)。也可以在视频路径后使用`@`分隔符为单个视频指定滤镜，如`video.mp4@"filter"`
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
-- `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
 - `--reference-white <nits>`：统一的SDR参考白电平（单位nits，默认203，ITU-R BT.2408）。主视频为HDR时用作SDR源的参考白，监看时用作映射/输出线的SDR白；纯SDR桌面不受影响。替代`--sdr-white-on-hdr`与`--monitor-sdr-white`
-- `--target-display-nits <nits>`：映射目标的峰值亮度（nits）：普通播放时是显示映射目标（也是`--hdrvivid-render`下Vivid曲线的目标显示亮度），监看时即监视器峰值。`pq2020`监看目标必填（物理监视器没有可猜的默认值），其余默认1000。
-- `--source-max-luma <nits>`：可选的源HDR mastering/内容峰值（`pl_color_space.hdr.max_luma`）覆盖，单位nits。源峰值不可信时使用（HLG、DPX读回）
-- `--hdrvivid-render`：启用HDR Vivid渲染。
+- `--target-display-nits <nits|sdr>`：映射目标，即EyeQ把所有源映射到哪里。数值（nits）表示峰值为该值的HDR显示，输出PQ；`sdr`表示SDR显示，输出SDR，映射目标峰值为SDR白。它同时是`--hdrvivid-render`下Vivid曲线的目标显示亮度，监看时即监视器峰值。**没有默认值**：不指定时EyeQ不做映射，由系统把输出映射到显示器（见`--tone-mapping`）。以下情况必须指定，否则报错：`--monitor-device`；`--hdrvivid-render`；主视频为SDR而同时有HDR视频；使用全局`--icc-profile`而同时有HDR视频（此时只能是`sdr`）。全局`--icc-profile`不能与数值目标同时使用。
+- `--tone-mapping {system,clip,clip-rgb,spline}`：源比映射目标亮时，EyeQ如何映射。`system`：EyeQ不映射，输出随主视频，交给系统映射，HDR10效果与QuickTime一致；不指定`--target-display-nits`时的默认值，不能与`--target-display-nits`、`--monitor-device`、`--hdrvivid-render`同时使用。`clip`：截断到映射目标并保持色调，超出的像素按最大通道等比缩小。`clip-rgb`：R、G、B各自截断到映射目标。`spline`：压缩高光（libplacebo的spline曲线）；指定了`--target-display-nits`时的默认值。后三者必须配合`--target-display-nits`。源启用了动态元数据自带的映射时（目前只有`--hdrvivid-render`下的HDR Vivid），该源不受本选项影响。
+- `--default-mastering-nits <nits>`：给缺少mastering display峰值的HDR源指定峰值，单位nits（例如FFmpeg不读取峰值的DPX、JPEG XL）。已有峰值的源、MaxCLL和动态元数据都不改动；MaxCLL高于该值时只告警。HDR源缺少峰值又没有指定本选项时，EyeQ告警并按PQ上限10000 nits处理，画面会偏暗。
+- `--hdrvivid-render`：启用HDR Vivid渲染。必须配合`--target-display-nits`。
 - `--high-dpi {auto,yes,no}`：High-DPI模式，默认`auto`自动检测
 - `--scale-method <method>`：视频放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
@@ -218,11 +218,11 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--loglevel <level>`：日志级别，包括`debug`、`info`、`warning`、`error`、`critical`、`off`，默认为`info`
 - `--debug`：等同于`--loglevel debug`
 - `--monitor-status`：打印只读的DeckLink设备/mode目录（设备、能力、输出连接，以及每种连接/像素格式下的原生mode）后退出；不会开启任何输出
-- `--monitor-device <auto|selector>`：在DeckLink设备上开启监看。`auto`选取支持播放的设备，跳过被占用的（若全部失败则报告每个候选的原因）；否则选择器必须显式：`index:<n>`或`id:<persistent-id>`。开启监看会禁用所有应用侧ICC（global、`auto`与`N:path`）；macOS系统自身的色彩管理不受影响
+- `--monitor-device <auto|selector>`：在DeckLink设备上开启监看。`auto`选取支持播放的设备，跳过被占用的（若全部失败则报告每个候选的原因）；否则选择器必须显式：`index:<n>`或`id:<persistent-id>`。开启监看会禁用所有应用侧ICC（global、`auto`与`N:path`）；macOS系统自身的色彩管理不受影响。必须配合`--target-display-nits`（数值即监视器峰值，`sdr`用于SDR监视器）。
 - `--monitor-mode <auto|WxH@N|WxH@N/D>`：监看mode。`auto`（默认）选取与主视频最接近的原生mode（优先精确帧率，其次取不低于源的最低帧率；同一帧率下取覆盖源的最小mode）。显式值为精确整数数据，例如`3840x2160@50`或`3840x2160@30000/1001`；设备原生不支持的mode会被拒绝
 - `--monitor-connection {auto,sdi,hdmi}`：输出连接。`auto`（默认）跟随设备已激活的输出，设备报告SDI时优先SDI；不探测实际接线，若设备同时报告两者请显式指定
 - `--monitor-pixel-format {v210,r210}`：输出像素格式（默认`v210`）
-- `--monitor-color {auto,sdr709,pq2020}`：色彩目标。`auto`（默认）只看主视频的传输函数——PQ/HLG选`pq2020`，其余（含P3等宽色域SDR）选`sdr709`。`sdr709`为BT.709 / BT.1886；`pq2020`为BT.2020 / PQ，且必须配合`--target-display-nits`
+- `--monitor-color {auto,sdr709,pq2020}`：色彩目标。`auto`（默认）随映射目标决定：`--target-display-nits`为数值时选`pq2020`（BT.2020 / PQ），为`sdr`时选`sdr709`（BT.709 / BT.1886）。显式指定的值与映射目标不一致时报错
 
 ### 环境变量
 
@@ -233,7 +233,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 1. 为什么视频在QuickTime和EyeQ中显示效果不同？
 
    主要原因是，QuickTime做了颜色管理，EyeQ没有（除非使用`--icc-profile`）。次要原因是，对于BT.709，macOS的EOTF与EyeQ不同。
-   - 对于HDR10，需要切换显示器设置：系统设置 -> 显示器 -> 预置 -> "HDR Video (P3 ST 2084)"。
+   - 对于HDR10，默认情况下EyeQ不做亮度映射，和QuickTime一样交给macOS映射，两者效果一致（实测相差0.4%以内）。指定`--target-display-nits`后，EyeQ先把所有源映射到该目标，macOS再按显示器当前的亮度余量映射一次；源的母版峰值高于目标时，画面与QuickTime不同。需要按绝对亮度显示PQ时，使用参考预设"HDR Video (P3 ST 2084)"。详见[HDR显示与亮度映射说明](./HDR_DISPLAY_zh.md)。
    - 对于BT.709，QuickTime会按照EOTF ≈ 1.961 gamma将R'G'B'解码为RGB，而EyeQ会按照BT.1886 (≈ 2.4 gamma)解码。所以QuickTime看起来会更亮一点。
       - QuickTime也可以支持BT.1886，需要修改mov文件的nclc标签，设置为1-2-1，详见[Quicktime Color Management: why so many ISSUES?!](https://www.youtube.com/watch?v=1QlnhlO6Gu8)
 
@@ -252,9 +252,9 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 3. 能否同时对比HDR和SDR视频？
 
-   可以，但需要注意通过`--main`指定主视频。
-   - 如果主视频是SDR，则渲染的目标色彩空间是SDR的，HDR视频会进行色调映射
-   - 如果主视频是HDR10，则渲染的目标色彩空间是HDR10的，SDR视频按照参考白(203 nits)进行映射。可通过`--reference-white`调整该亮度
+   可以，但需要用`--target-display-nits`指定映射目标，EyeQ把所有视频映射到同一个目标后再对比：
+   - 主视频为HDR时可以不指定：输出HDR（PQ），SDR视频按203 nits的参考白放入HDR，可用`--reference-white`修改。
+   - 主视频为SDR时必须指定，否则报错：`--target-display-nits sdr`输出SDR，HDR视频映射到SDR；`--target-display-nits <nits>`输出HDR（PQ），SDR视频按参考白放入HDR。
 
 4. 不兼容的像素格式（如提示`pl_map_avframe_ex() failed`）
 
@@ -262,14 +262,14 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
 5. 如何回看`Ctrl + E`保存的DPX渲染帧？
 
-   DPX头部用SMPTE ST 268:2014的枚举值记录transfer/primaries（PQ=14、HLG=15、BT.2020=15），而FFmpeg的DPX解码器不认识这些值（transfer/colorimetric只映射到12/10），reference high quantity（HDR峰值）也不会被读取。因此EyeQ拿到的是未知色彩空间、且没有`max_luma`——需用`setparams`滤镜恢复色彩空间，并用`--source-max-luma`提供色调映射所需的源峰值：
+   DPX头部用SMPTE ST 268:2014的枚举值记录transfer/primaries（PQ=14、HLG=15、BT.2020=15），而FFmpeg的DPX解码器不认识这些值（transfer/colorimetric只映射到12/10），reference high quantity（HDR峰值）也不会被读取。因此EyeQ拿到的是未知色彩空间、且没有mastering峰值——需用`setparams`滤镜恢复色彩空间，并用`--default-mastering-nits`提供mastering峰值：
 
    ```
-   eyeq --no-colorspace-hint --source-max-luma 1000 \
+   eyeq --default-mastering-nits 1000 \
      'render_0001.0.foo.mkv.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084'
    ```
 
-   HLG用`color_trc=arib-std-b67`。在HDR显示器上PQ直通、无需色调映射，`--no-colorspace-hint`与`--source-max-luma`可不加；`--no-colorspace-hint`仅在非HDR显示器上需要，用于开启色调映射。
+   HLG用`color_trc=arib-std-b67`。峰值请填保存该帧时的输出峰值：指定过`--target-display-nits`时是该值，否则是源的母版峰值。不提供峰值时，PQ源会被当作最高10000 nits，画面会偏暗。需要让EyeQ映射到SDR时，加`--target-display-nits sdr`。
 
 ## 许可证
 

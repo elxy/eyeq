@@ -41,7 +41,8 @@ DisplayCoordinator::DisplayCoordinator(RenderContext &context, const Config &con
   renderer_config.plane_scale_method = config.plane_scale_method;
   renderer_config.pixel_density = config.pixel_density;
   renderer_config.enable_osd = config.enable_osd;
-  renderer_config.colorspace_hint = config.colorspace_hint;
+  renderer_config.target_kind = config.target_kind;
+  renderer_config.tone_mapping = config.tone_mapping;
   renderer_config.present_dither = config.present_dither;
 
   // The color space the swapchain hint should declare. In monitoring mode the
@@ -121,10 +122,10 @@ void DisplayCoordinator::SetSdrWhiteOnHdr(float nits) {
   renderer_->SetSdrWhiteOnHdr(nits);
 }
 
-void DisplayCoordinator::SetSourceMaxLuma(double nits) {
+void DisplayCoordinator::SetDefaultMasteringNits(double nits) {
   AssertUiThread();
-  // Source-only correction: the mapping target is not re-applied.
-  renderer_->SetSourceMaxLuma(nits);
+  // Source-only completion: an explicit mapping target is not re-applied.
+  renderer_->SetDefaultMasteringNits(nits);
   InvalidateScene();
 }
 
@@ -194,6 +195,12 @@ CanvasLayout DisplayCoordinator::canvas_layout(int window_w, int window_h) const
 std::vector<int> DisplayCoordinator::FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames) {
   AssertUiThread();
   std::vector<int> failed = renderer_->FeedFrames(frames);
+  // Without a mapping target the renderer resolves it on the first feed; keep this
+  // layer's copy (scene key, result metadata, precision changes) in sync.
+  if (renderer_->mapping_target().peak_nits != mapping_target_.peak_nits) {
+    mapping_target_ = renderer_->mapping_target();
+    InvalidateScene();
+  }
   if (failed.empty()) {
     ++feed_count_;
     ++feed_generation_;
@@ -304,6 +311,16 @@ void DisplayCoordinator::PresentLocked(struct pl_frame &target, const DisplaySta
   const RectF np = NormalizedPreview(layout);
   ++present_count_;
   renderer_->PresentToTarget(target, state, EncodeRect{np.x, np.y, np.w, np.h});
+}
+
+void DisplayCoordinator::CheckOutput(const struct pl_color_space *output) const {
+  AssertUiThread();
+  if (icc_mode_ != IccMode::Enabled || !renderer_->expects_hdr_output() || pl_color_space_is_hdr(output)) {
+    return;
+  }
+  throw std::runtime_error(fmt::format("A HDR output was requested but the window output is SDR ({}): this platform "
+                                       "offers no HDR surface. Pass --target-display-nits sdr to map to SDR",
+                                       pl_color_transfer_name(output->transfer)));
 }
 
 void DisplayCoordinator::RecalibrateICC(const struct pl_color_space *target_color) {

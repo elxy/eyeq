@@ -129,7 +129,6 @@ std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &c
   cfg.mode = EYEQ::DisplayMode::Fill;
   cfg.pixel_density = 1.0f;
   cfg.enable_osd = false;
-  cfg.colorspace_hint = false;
   cfg.mapping_target.primaries = PL_COLOR_PRIM_BT_709;
   cfg.mapping_target.peak_nits = static_cast<float>(resolved.color.target_nits);
   cfg.mapping_target.black_nits = 0.0f;

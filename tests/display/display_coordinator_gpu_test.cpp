@@ -166,7 +166,6 @@ std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &c
   cfg.plane_scale_method = EYEQ::ScaleMethod::Bicubic;
   cfg.pixel_density = 1.0f;
   cfg.enable_osd = false;
-  cfg.colorspace_hint = false;
   cfg.icc_mode = icc_mode;
   cfg.work_precision = EYEQ::WorkPrecision::F16;
   cfg.present_dither = present_dither;
@@ -419,7 +418,6 @@ void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std:
   old_cfg.mode = EYEQ::DisplayMode::Fill;
   old_cfg.enable_osd = false;
   old_cfg.pixel_density = 1.0f;
-  old_cfg.colorspace_hint = false;
   old_cfg.present_dither = false;
   EYEQ::FrameRenderer old_renderer(context, old_cfg);
   old_renderer.SetMappingTarget(mt, EYEQ::WorkPrecision::F16);
@@ -557,7 +555,6 @@ void TestPresentDither(EYEQ::RenderContext &context, AVStream *stream) {
   cfg.mode = EYEQ::DisplayMode::Fill;
   cfg.enable_osd = false;
   cfg.pixel_density = 1.0f;
-  cfg.colorspace_hint = false;
   cfg.present_dither = true;
   EYEQ::FrameRenderer renderer(context, cfg);
   renderer.SetMappingTarget(mt, EYEQ::WorkPrecision::F16);
@@ -710,7 +707,7 @@ void TestPrecisionReconfigure(EYEQ::RenderContext &context, AVStream *stream) {
 }
 
 // ---------------------------------------------------------------------------
-// Target semantics: --source-max-luma is a source-only override and never moves
+// Target semantics: --default-mastering-nits is a source-only completion and never moves
 // the mapping target; --target-display-nits is the single mapping/monitor peak.
 // ---------------------------------------------------------------------------
 void TestTargetSemantics(EYEQ::RenderContext &context, AVStream *stream) {
@@ -722,9 +719,9 @@ void TestTargetSemantics(EYEQ::RenderContext &context, AVStream *stream) {
   EYEQ::DisplayState state = MakeState({5}, 5);
   coordinator->RenderScene(state);
 
-  coordinator->SetSourceMaxLuma(800.0);
+  coordinator->SetDefaultMasteringNits(800.0);
   Check(std::fabs(coordinator->mapping_target().peak_nits - 600.0f) < 0.5f,
-        "--source-max-luma does not change the mapping target peak");
+        "--default-mastering-nits does not change the mapping target peak");
   coordinator->SetSdrWhiteOnHdr(120.0f);
   Check(std::fabs(coordinator->mapping_target().sdr_white_nits - PL_COLOR_SDR_WHITE) < 0.5f,
         "--sdr-white-on-hdr does not change the mapping target SDR white");

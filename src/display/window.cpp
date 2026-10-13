@@ -22,9 +22,9 @@ extern "C" {
 
 using namespace EYEQ;
 
-Window::Window(const std::string &title, int video_width, int video_height, LoggingLevel log_level,
-               bool colorspace_hint, bool high_dpi, SDL_DisplayID display_id, bool full_screen)
-    : colorspace_hint_(colorspace_hint), high_dpi_(high_dpi), full_screen_(full_screen), log_level_(log_level) {
+Window::Window(const std::string &title, int video_width, int video_height, LoggingLevel log_level, bool high_dpi,
+               SDL_DisplayID display_id, bool full_screen)
+    : high_dpi_(high_dpi), full_screen_(full_screen), log_level_(log_level) {
   try {
     display_id = display_id ? display_id : Window::CurrentDisplay();
     InitWindow(title, video_width, video_height, display_id);
@@ -300,8 +300,8 @@ void Window::ColorspaceHint(const struct pl_color_space *colorspace) {
     static bool warned = false;
     if (is_hdr && !support_hdr) {
       if (!warned) {
-        Logger->warn("HDR content on non-HDR display detected. Use HDR display or add --no-colorspace-hint to "
-                     "enable tone mapping");
+        Logger->warn("HDR output on a non-HDR display: the system maps it to SDR. Pass --target-display-nits sdr "
+                     "to let eyeq map to SDR instead");
         warned = true;
       }
     } else {

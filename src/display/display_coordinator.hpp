@@ -59,7 +59,10 @@ public:
     ScaleMethod plane_scale_method = ScaleMethod::Bicubic;
     float pixel_density = 1.0f;
     bool enable_osd = true;
-    bool colorspace_hint = false;
+    // --target-display-nits / --tone-mapping (see mapping_target.hpp). With
+    // TargetKind::None the peak of mapping_target is only the initial value.
+    TargetKind target_kind = TargetKind::HdrNits;
+    ToneMapping tone_mapping = ToneMapping::Spline;
     // Dither the final desktop presentation hop (not the common result/encode).
     bool present_dither = true;
     IccMode icc_mode = IccMode::Enabled;
@@ -107,9 +110,9 @@ public:
 
   void SetMainSource(int id);
   void SetSdrWhiteOnHdr(float nits);
-  // Opt-in source HDR max_luma correction (--source-max-luma). Source-only: it
-  // never moves the mapping target.
-  void SetSourceMaxLuma(double nits);
+  // --default-mastering-nits: mastering peak for HDR sources that have none.
+  // Source-only: it never moves an explicit mapping target.
+  void SetDefaultMasteringNits(double nits);
 
   /*
    * Enable or disable HDR Vivid dynamic tone mapping on the single renderer.
@@ -159,6 +162,13 @@ public:
   // Recalibrate the open ICC objects for the final presentation color space.
   // No-op in monitoring mode (no application ICC is loaded).
   void RecalibrateICC(const struct pl_color_space *target_color);
+
+  // Fail fast when a HDR output was requested but the swapchain ended up SDR
+  // (the platform offers no HDR surface format): presenting would silently clip
+  // everything above the SDR white. Called before PresentTo with the final
+  // swapchain color space; throws std::runtime_error. Monitoring is exempt, the
+  // desktop is only a preview there.
+  void CheckOutput(const struct pl_color_space *output) const;
 
   // ---- diagnostics ---------------------------------------------------------
   const RenderedFrame &result() const { return result_; }

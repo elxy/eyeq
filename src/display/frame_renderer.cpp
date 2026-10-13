@@ -50,8 +50,8 @@ static const struct pl_filter_config *get_filter_config(ScaleMethod method) {
 }
 
 FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, ColorspaceHintFunc colorspace_hint)
-    : context_(&context), mode_(config.mode), colorspace_hint_enabled_(config.colorspace_hint),
-      pixel_density_(config.pixel_density), colorspace_hint_(std::move(colorspace_hint)) {
+    : context_(&context), mode_(config.mode), pixel_density_(config.pixel_density), target_kind_(config.target_kind),
+      tone_mapping_(config.tone_mapping), colorspace_hint_(std::move(colorspace_hint)) {
   if (!context_->HasDevice()) {
     throw std::logic_error("FrameRenderer requires a RenderContext with a created device");
   }
@@ -62,6 +62,13 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   render_params_.background_color[0] = 0.2f;
   render_params_.background_color[1] = 0.2f;
   render_params_.background_color[2] = 0.2f;
+
+  // --tone-mapping. Without a target nothing exceeds the resolved peak, so the
+  // function is irrelevant there; both clip modes bypass the tone mapping per
+  // source (see FillRender::SetClip).
+  color_map_params_ = pl_color_map_default_params;
+  color_map_params_.tone_mapping_function = &pl_tone_map_spline;
+  render_params_.color_map_params = &color_map_params_;
 
   render_params_.upscaler = get_filter_config(config.scale_method);
   render_params_.plane_upscaler = get_filter_config(config.plane_scale_method);
@@ -91,6 +98,18 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
     throw std::runtime_error("Unsupported display mode for FrameRenderer");
   }
 
+  // With a SDR target clip-rgb needs no hook: the presentation hop already clips
+  // every channel in the real output gamut.
+  if (tone_mapping_ == ToneMapping::Clip) {
+    clip_hook_ = std::make_unique<ClipHook>(ClipHook::Mode::MaxRgb);
+    display_render_->SetClip(true, clip_hook_->hook());
+  } else if (tone_mapping_ == ToneMapping::ClipRgb) {
+    if (target_kind_ != TargetKind::Sdr) {
+      clip_hook_ = std::make_unique<ClipHook>(ClipHook::Mode::PerChannel);
+    }
+    display_render_->SetClip(true, clip_hook_ ? clip_hook_->hook() : nullptr);
+  }
+
   // The OSD is optional. Leaving it disabled keeps offscreen instances free of
   // SDL_ttf/font/SDL surface dependencies.
   if (config.enable_osd) {
@@ -107,6 +126,9 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   mapping_target_.black_nits = 0.0f;
   mapping_target_.sdr_white_nits = PL_COLOR_SDR_WHITE;
   work_precision_ = WorkPrecision::F16;
+  if (clip_hook_) {
+    clip_hook_->SetPeak(mapping_target_.NitsToNorm(mapping_target_.peak_nits));
+  }
   display_render_->SetMappingTarget(mapping_target_, work_precision_);
 
   display_render_->SetPresentDitherEnabled(config.present_dither);
@@ -135,11 +157,73 @@ FrameRenderer::~FrameRenderer() {
   display_render_.reset();
 }
 
-void FrameRenderer::SetSourceMaxLuma(double nits) {
-  // Source metadata correction only; the mapping target is untouched.
-  source_max_luma_enabled_ = true;
-  source_max_luma_nits_ = nits;
-  source_max_luma_logged_ = false;
+void FrameRenderer::SetDefaultMasteringNits(double nits) {
+  // Source metadata completion only; the mapping target is untouched.
+  default_mastering_nits_ = nits;
+  default_mastering_logged_.clear();
+}
+
+void FrameRenderer::ResolveDeclaredPeak() {
+  // Resolved once from the first fed frames (after --default-mastering-nits) and
+  // fixed afterwards, so neither the declared peak nor a source-derived target
+  // follows per-frame metadata or the main video selection.
+  declared_peak_resolved_ = true;
+  float source_peak = 0.0f;
+  int peak_id = -1;
+  for (const auto &[id, frame] : pl_frames_) {
+    const struct pl_color_space &csp = frame->color;
+    if (!pl_color_space_is_hdr(&csp)) {
+      continue;
+    }
+    // Only the mastering peak (for Dolby Vision libplacebo fills it from the RPU
+    // source_max_pq); MaxCLL is not a substitute, it does not drive tone mapping.
+    float nits = csp.hdr.max_luma;
+    if (nits <= 0.0f) {
+      // libplacebo maps such a source from the transfer's nominal peak.
+      struct pl_nominal_luma_params luma_params{};
+      luma_params.color = &csp;
+      luma_params.metadata = PL_HDR_METADATA_NONE;
+      luma_params.scaling = PL_HDR_NITS;
+      luma_params.out_max = &nits;
+      pl_color_space_nominal_luma_ex(&luma_params);
+      if (missing_peak_warned_.insert(id).second) {
+        Logger->warn("Video #{}: HDR source has no mastering peak, assuming {:.0f} nits; the picture may be too dark. "
+                     "Pass --default-mastering-nits to set it",
+                     id, nits);
+      }
+    }
+    if (nits > source_peak) {
+      source_peak = nits;
+      peak_id = id;
+    }
+  }
+  source_peak = std::min(source_peak, 10000.0f);
+
+  const bool main_is_hdr = pl_color_space_is_hdr(&pl_frames_.at(main_id_)->color);
+  switch (target_kind_) {
+  case TargetKind::Sdr:
+    expects_hdr_output_ = false;
+    declared_peak_nits_ = 0.0f;
+    break;
+  case TargetKind::HdrNits:
+    expects_hdr_output_ = true;
+    declared_peak_nits_ = peak_id >= 0 ? std::min(mapping_target_.peak_nits, source_peak) : mapping_target_.peak_nits;
+    break;
+  case TargetKind::None:
+    expects_hdr_output_ = main_is_hdr;
+    if (peak_id >= 0) {
+      mapping_target_.peak_nits = source_peak;
+      ValidateMappingTarget(mapping_target_);
+      display_render_->SetMappingTarget(mapping_target_, work_precision_);
+      Logger->info("No mapping target: sources are not tone-mapped (peak {:.0f} nits from video #{})", source_peak,
+                   peak_id);
+    }
+    declared_peak_nits_ = main_is_hdr ? mapping_target_.peak_nits : 0.0f;
+    break;
+  }
+  if (expects_hdr_output_) {
+    Logger->info("HDR output: mastering peak declared to the system is {:.0f} nits", declared_peak_nits_);
+  }
 }
 
 void FrameRenderer::SetHdrVividEnabled(bool enabled) {
@@ -229,6 +313,9 @@ void FrameRenderer::SetMappingTarget(const MappingTarget &target, WorkPrecision 
   ValidateMappingTarget(target);
   mapping_target_ = target;
   work_precision_ = precision;
+  if (clip_hook_) {
+    clip_hook_->SetPeak(mapping_target_.NitsToNorm(mapping_target_.peak_nits));
+  }
   if (display_render_) {
     display_render_->SetMappingTarget(mapping_target_, work_precision_);
   }
@@ -409,19 +496,23 @@ std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<A
                      i, black, max, span, max);
       }
 
-      // Correct the source HDR mastering/content peak when the user asked for it
-      // (--source-max-luma). This is the untrusted-metadata path (HLG / DPX
-      // read-back); the mapping target itself is never moved.
+      // Complete a missing mastering display peak when the user asked for it
+      // (--default-mastering-nits), e.g. DPX/JPEG XL whose peak FFmpeg does not
+      // read. A source that has a peak is left alone, and so is MaxCLL: a MaxCLL
+      // above the mastering peak (an unclipped 1010 on a 1000 master) is normal
+      // and only reported.
       struct pl_color_space *csp = &pl_frames_[i]->color;
-      if (source_max_luma_enabled_ && pl_color_space_is_hdr(csp)) {
-        if (csp->hdr.max_luma > 0.0f &&
-            std::abs(csp->hdr.max_luma - static_cast<float>(source_max_luma_nits_)) > 0.5f &&
-            !source_max_luma_logged_) {
-          Logger->info("Video #{}: overriding source HDR max_luma {:.0f} → {:.0f} nits", i, csp->hdr.max_luma,
-                       source_max_luma_nits_);
-          source_max_luma_logged_ = true;
+      if (default_mastering_nits_ > 0.0 && pl_color_space_is_hdr(csp) && csp->hdr.max_luma <= 0.0f) {
+        csp->hdr.max_luma = static_cast<float>(default_mastering_nits_);
+        if (default_mastering_logged_.insert(i).second) {
+          Logger->info("Video #{}: no mastering peak, using --default-mastering-nits {:.0f}", i,
+                       default_mastering_nits_);
         }
-        csp->hdr.max_luma = static_cast<float>(source_max_luma_nits_);
+        if (csp->hdr.max_cll > csp->hdr.max_luma && maxcll_warned_.insert(i).second) {
+          Logger->warn("Video #{}: MaxCLL {:.0f} nits exceeds the mastering peak {:.0f} nits "
+                       "(--default-mastering-nits)",
+                       i, csp->hdr.max_cll, csp->hdr.max_luma);
+        }
       }
     } catch (const texture_format_error &e) {
       Logger->warn("Video #{}: {}", i, e.what());
@@ -433,14 +524,40 @@ std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<A
   }
 
   struct pl_frame *main = pl_frames_.at(main_id_);
+  if (!declared_peak_resolved_) {
+    ResolveDeclaredPeak();
+  }
   // The colorspace hint touches the swapchain, which lives in Window; it is
-  // invoked here while the caller still serializes Feed/Render.
+  // invoked here while the caller still serializes Feed/Render. The mapping
+  // target decides the output; the main video only decides it without a target.
+  // With a HDR output the declared mastering peak describes this renderer's
+  // output; MaxCLL/MaxFALL are passed on from the main video unchanged.
   if (colorspace_hint_) {
-    colorspace_hint_(colorspace_hint_enabled_ ? &main->color : nullptr);
+    const bool main_is_hdr = pl_color_space_is_hdr(&main->color);
+    struct pl_color_space hint = main->color;
+    switch (target_kind_) {
+    case TargetKind::Sdr:
+      if (main_is_hdr) {
+        hint = pl_color_space_srgb;
+      }
+      break;
+    case TargetKind::HdrNits:
+      if (!main_is_hdr) {
+        hint = pl_color_space_hdr10;
+      }
+      hint.hdr.max_luma = declared_peak_nits_;
+      break;
+    case TargetKind::None:
+      if (main_is_hdr) {
+        hint.hdr.max_luma = declared_peak_nits_;
+      }
+      break;
+    }
+    colorspace_hint_(&hint);
   }
 
-  // Override SDR white level when the main video is HDR
-  if (sdr_white_on_hdr_ > 0 && pl_color_space_is_hdr(&main->color)) {
+  // Override the SDR white level of SDR sources shown in a HDR output
+  if (sdr_white_on_hdr_ > 0 && expects_hdr_output_) {
     static bool sdr_white_logged = false;
     for (auto &[id, frame] : pl_frames_) {
       if (!pl_color_space_is_hdr(&frame->color)) {

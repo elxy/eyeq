@@ -178,7 +178,6 @@ std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &c
   cfg.plane_scale_method = EYEQ::ScaleMethod::Bicubic;
   cfg.pixel_density = 1.0f;
   cfg.enable_osd = false;
-  cfg.colorspace_hint = false;
   cfg.work_precision = EYEQ::WorkPrecision::F16;
   cfg.mapping_target.primaries = (resolved.color.encoding.primaries == EYEQ::ColorPrimaries::BT2020)
                                      ? PL_COLOR_PRIM_BT_2020

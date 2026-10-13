@@ -839,11 +839,11 @@ int main() {
 
     // -------------------------------------------------- target-local HDR nits
     {
-      // A carries the override, B does not. Feeding the same PQ frame to both
+      // A carries the default mastering peak, B does not. Feeding the same PQ frame to both
       // must not change B's mapped metadata: the override is target-local.
       EYEQ::FrameRenderer renderer_a(context, fill_config);
       EYEQ::FrameRenderer renderer_b(context, fill_config);
-      renderer_a.SetSourceMaxLuma(800.0);
+      renderer_a.SetDefaultMasteringNits(800.0);
       renderer_a.SetMainSource(0);
       renderer_b.SetMainSource(0);
 
@@ -860,9 +860,9 @@ int main() {
       const struct pl_frame *mapped_a = renderer_a.GetSourceFrame(0);
       const struct pl_frame *mapped_b = renderer_b.GetSourceFrame(0);
       Check(mapped_a != nullptr && std::fabs(mapped_a->color.hdr.max_luma - 800.0f) < 0.5f,
-            "target-local max_luma override is applied on renderer A");
+            "the default mastering peak fills a missing max_luma on renderer A");
       Check(mapped_b != nullptr && std::fabs(mapped_b->color.hdr.max_luma - 800.0f) > 0.5f,
-            "renderer B without an override keeps its own max_luma");
+            "renderer B without a default keeps its own max_luma");
 
       auto sdr = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.5f, 0.5f, 0.5f}; });
       std::map<int, std::shared_ptr<AVFrame>> sdr_frames;
@@ -870,7 +870,7 @@ int main() {
       renderer_a.FeedFrames(sdr_frames);
       const struct pl_frame *mapped_sdr = renderer_a.GetSourceFrame(0);
       Check(mapped_sdr != nullptr && std::fabs(mapped_sdr->color.hdr.max_luma - 800.0f) > 0.5f,
-            "max_luma override is not applied to SDR content");
+            "the default mastering peak is not applied to SDR content");
     }
 
     // ------------------------------------------- PQ known luminance anchor

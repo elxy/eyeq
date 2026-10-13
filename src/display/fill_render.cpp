@@ -195,6 +195,11 @@ void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], in
     }
   }
 
+  MapSource(src, &dst, params ? params : render_params_, video_id);
+}
+
+void FillRender::MapSource(const struct pl_frame *src, const struct pl_frame *dst,
+                           const struct pl_render_params *params, int video_id) {
   // pl_render_image() performs the source interpretation and the HDR/gamut
   // mapping to the display-linear target. This is the "mapping completed"
   // point of the pipeline.
@@ -209,7 +214,7 @@ void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], in
   const struct pl_hook *hooks[1] = {nullptr};
   struct pl_frame local_src;
   const struct pl_frame *effective_src = src;
-  const struct pl_render_params *effective_params = params ? params : render_params_;
+  const struct pl_render_params *effective_params = params;
   const struct pl_hook *vivid_hook = hdrvivid_query_ ? hdrvivid_query_(video_id) : nullptr;
   if (vivid_hook != nullptr) {
     // The CUVA curve has already mapped this source to the common target peak,
@@ -219,15 +224,24 @@ void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], in
     local_src = *src;
     local_src.color.hdr = mapping_target_.DisplayLinearColorSpace().hdr;
     hooks[0] = vivid_hook;
+    effective_src = &local_src;
+    ++hdrvivid_apply_count_;
+  } else if (clip_ && pl_color_space_is_hdr(&src->color)) {
+    // --tone-mapping clip / clip-rgb: declare the target range on a copy of the
+    // source so the generic mapper does no tone mapping at all, then clip.
+    local_src = *src;
+    local_src.color.hdr = mapping_target_.DisplayLinearColorSpace().hdr;
+    effective_src = &local_src;
+    hooks[0] = clip_hook_;
+  }
+  if (hooks[0] != nullptr) {
     local_params = *effective_params;
     local_params.hooks = hooks;
     local_params.num_hooks = 1;
     effective_params = &local_params;
-    effective_src = &local_src;
-    ++hdrvivid_apply_count_;
   }
 
-  if (!pl_render_image(renderer_, effective_src, &dst, effective_params)) {
+  if (!pl_render_image(renderer_, effective_src, dst, effective_params)) {
     throw std::runtime_error("pl_render_image failed.");
   }
 }

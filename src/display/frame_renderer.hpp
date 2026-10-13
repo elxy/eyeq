@@ -16,6 +16,7 @@ extern "C" {
 #include <libplacebo/shaders/icc.h>
 
 #include "canvas_geometry.hpp"
+#include "clip_hook.hpp"
 #include "fill_render.hpp"
 #include "hdrvivid_shader.hpp"
 #include "mapping_target.hpp"
@@ -51,8 +52,8 @@ namespace EYEQ {
 class FrameRenderer {
 public:
   /*
-   * Called from FeedFrames() with the main video's color space (or nullptr
-   * when the hint is disabled), while the caller's serialization is held. Used
+   * Called from FeedFrames() with the color space the output should declare
+   * (see FeedFrames), while the caller's serialization is held. Used
    * by Window to drive pl_swapchain_colorspace_hint without exposing the frame
    * map. May be null for offscreen instances.
    */
@@ -67,7 +68,10 @@ public:
     // draws no OSD overlay. The OSD manager is created (or not) at construction
     // time based on this flag; it is not created lazily on first use.
     bool enable_osd = true;
-    bool colorspace_hint = false;
+    // --target-display-nits / --tone-mapping. The default is the explicit-target,
+    // highlight-compressing configuration; SetMappingTarget() provides the peak.
+    TargetKind target_kind = TargetKind::HdrNits;
+    ToneMapping tone_mapping = ToneMapping::Spline;
     // Dither the final desktop presentation hop to a low-depth swapchain. The
     // common display-linear result and the wire encode are never dithered.
     bool present_dither = true;
@@ -84,13 +88,18 @@ public:
   void SetMainSource(int id) { main_id_ = id; }
   void SetSdrWhiteOnHdr(float nits) { sdr_white_on_hdr_ = nits; }
   /*
-   * Opt-in override of the source HDR mastering/content peak
-   * (pl_color_space.hdr.max_luma) applied when a source is fed. It is a source
-   * metadata correction only: it never moves the mapping target, and the bitstream
-   * carries no dynamic metadata. Sources handled by the HDR Vivid curve keep the
-   * curve's own target handling, so their tml/rml anchors are not rewritten.
+   * --default-mastering-nits: mastering display peak (pl_color_space.hdr.max_luma)
+   * for HDR sources that have none after libplacebo mapped the frame (Dolby Vision
+   * gets it from the RPU and is therefore not "missing"). Sources with a peak are
+   * left alone; MaxCLL and dynamic metadata are never touched.
    */
-  void SetSourceMaxLuma(double nits);
+  void SetDefaultMasteringNits(double nits);
+  // The mastering peak declared to the system with a HDR output (0 before the
+  // first feed, or when no HDR output is declared). See ResolveDeclaredPeak().
+  float declared_peak_nits() const { return declared_peak_nits_; }
+  // True when the fed sources and the configured target ask for a HDR output.
+  bool expects_hdr_output() const { return expects_hdr_output_; }
+  const MappingTarget &mapping_target() const { return mapping_target_; }
 
   /*
    * Enable GPU HDR Vivid dynamic tone mapping. When enabled, each fed source
@@ -226,7 +235,6 @@ private:
 
   RenderContext *context_;
   DisplayMode mode_;
-  bool colorspace_hint_enabled_;
   float pixel_density_;
 
   struct pl_render_params render_params_;
@@ -255,11 +263,30 @@ private:
   int scene_width_ = 0;
   int scene_height_ = 0;
 
-  // Opt-in source max_luma override (--source-max-luma); disabled when not set.
-  bool source_max_luma_enabled_ = false;
-  double source_max_luma_nits_ = 0.0;
-  bool source_max_luma_logged_ = false; // one-time log for the max_luma override
-  std::set<int> rgb_limited_warned_;    // video ids already warned about an ignored RGB limited-range tag
+  // --default-mastering-nits; 0 when not set.
+  double default_mastering_nits_ = 0.0;
+  std::set<int> default_mastering_logged_; // video ids already reported as filled
+  std::set<int> maxcll_warned_;            // video ids already warned about MaxCLL above the filled peak
+  std::set<int> missing_peak_warned_;      // video ids already warned about a missing mastering peak
+
+  // --target-display-nits / --tone-mapping.
+  TargetKind target_kind_;
+  ToneMapping tone_mapping_;
+  struct pl_color_map_params color_map_params_;
+  std::unique_ptr<ClipHook> clip_hook_;
+  /*
+   * The mastering peak handed to the system with a HDR output, describing what
+   * this renderer actually outputs rather than the main video's source metadata:
+   * min(target peak, brightest HDR source's mastering peak), or just the
+   * brightest source peak without a target. Resolved once on the first feed.
+   * Without a target that value also becomes the mapping target peak, so sources
+   * are not compressed.
+   */
+  void ResolveDeclaredPeak();
+  bool declared_peak_resolved_ = false;
+  float declared_peak_nits_ = 0.0f;
+  bool expects_hdr_output_ = false;
+  std::set<int> rgb_limited_warned_; // video ids already warned about an ignored RGB limited-range tag
 
   // Dynamic HDR (HDR Vivid). The shader instance is shared and its parameters
   // are set immediately before the source mapping of one video; the mapping is

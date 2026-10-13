@@ -17,6 +17,32 @@ const char *ToString(WorkPrecision precision) {
   return "unknown";
 }
 
+const char *ToString(TargetKind kind) {
+  switch (kind) {
+  case TargetKind::None:
+    return "none";
+  case TargetKind::HdrNits:
+    return "nits";
+  case TargetKind::Sdr:
+    return "sdr";
+  }
+  return "unknown";
+}
+
+const char *ToString(ToneMapping mapping) {
+  switch (mapping) {
+  case ToneMapping::System:
+    return "system";
+  case ToneMapping::Clip:
+    return "clip";
+  case ToneMapping::ClipRgb:
+    return "clip-rgb";
+  case ToneMapping::Spline:
+    return "spline";
+  }
+  return "unknown";
+}
+
 enum pl_color_transfer PLTransferFor(ColorTransfer transfer) {
   switch (transfer) {
   case ColorTransfer::SDR_BT1886:

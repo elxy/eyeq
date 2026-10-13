@@ -66,9 +66,11 @@ bool ResolveMonitorConnection(MonitorConnectionChoice requested, const MonitorCo
 bool ParseMonitorPixelFormat(const std::string &text, PixelFormat *out, std::string *error);
 bool ParseMonitorColorTarget(const std::string &text, MonitorColorTarget *out, std::string *error);
 
-// Resolves `Auto` from whether the main video is HDR (PQ or HLG). An explicit
-// target is passed through unchanged; `Auto` never overrides an explicit value.
-bool ResolveMonitorColorTarget(MonitorColorTarget requested, bool main_is_hdr, MonitorColorTarget *out,
+// Resolves `Auto` from the mapping target (--target-display-nits): a HDR target
+// in nits picks pq2020, `sdr` picks sdr709. An explicit target is passed through
+// unchanged; the caller rejects an explicit value that contradicts the mapping
+// target.
+bool ResolveMonitorColorTarget(MonitorColorTarget requested, bool target_is_hdr, MonitorColorTarget *out,
                                std::string *reason);
 
 // Parses "WxH@N" or "WxH@N/D" into exact integer mode data (frame_duration=N,

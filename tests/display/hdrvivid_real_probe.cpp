@@ -181,7 +181,6 @@ int main(int argc, char **argv) {
   EYEQ::FrameRenderer::Config cfg;
   cfg.mode = EYEQ::DisplayMode::Fill;
   cfg.enable_osd = false;
-  cfg.colorspace_hint = false;
   cfg.present_dither = false;
   EYEQ::FrameRenderer renderer(context, cfg, nullptr);
   EYEQ::MappingTarget target;

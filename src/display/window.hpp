@@ -41,8 +41,8 @@ class Window {
    * auto-discovery from the system display and the Ctrl+E screenshot path.
    */
 public:
-  Window(const std::string &title, int video_width, int video_height, LoggingLevel log_level,
-         bool colorspace_hint_ = true, bool high_dpi = false, SDL_DisplayID display_id = 0, bool full_screen = false);
+  Window(const std::string &title, int video_width, int video_height, LoggingLevel log_level, bool high_dpi = false,
+         SDL_DisplayID display_id = 0, bool full_screen = false);
   ~Window();
 
   static SDL_DisplayID CurrentDisplay();
@@ -136,7 +136,6 @@ public:
                                            int display_height);
 
 protected:
-  bool colorspace_hint_;
   bool high_dpi_;
   bool full_screen_;
   LoggingLevel log_level_;

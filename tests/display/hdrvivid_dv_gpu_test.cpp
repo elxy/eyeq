@@ -423,7 +423,6 @@ std::unique_ptr<EYEQ::FrameRenderer> MakeRenderer(EYEQ::RenderContext &context, 
   cfg.plane_scale_method = EYEQ::ScaleMethod::Bicubic;
   cfg.pixel_density = 1.0f;
   cfg.enable_osd = false;
-  cfg.colorspace_hint = false;
   cfg.present_dither = false;
   auto renderer = std::make_unique<EYEQ::FrameRenderer>(context, cfg, nullptr);
   renderer->SetMappingTarget(target, EYEQ::WorkPrecision::F32);

@@ -42,6 +42,15 @@ public:
   virtual ~FillRender();
 
   void SetMappingTarget(const MappingTarget &target, WorkPrecision precision);
+  // --tone-mapping clip / clip-rgb: the source mapping runs without tone mapping
+  // (values above the target peak pass through) and @p hook, when set, clips the
+  // result at the end of the pass. Without a hook the presentation hop clips every
+  // channel in the output gamut (clip-rgb with a SDR target). Sources mapped by
+  // their own HDR Vivid curve are not affected. The hook is owned by the caller.
+  void SetClip(bool enabled, const struct pl_hook *hook) {
+    clip_ = enabled;
+    clip_hook_ = hook;
+  }
 
   void UpdateMainFrame(const struct pl_frame *main);
   void SetOsdOverlay(pl_tex osd_overlay) { osd_overlay_ = osd_overlay; }
@@ -120,6 +129,12 @@ protected:
   float pixel_density_;
   ICCQueryFunc icc_query_;
   HdrVividQueryFunc hdrvivid_query_;
+  bool clip_ = false;
+  const struct pl_hook *clip_hook_ = nullptr;
+  // The single source mapping call: selects the per-source hook (HDR Vivid curve
+  // or clip) and runs pl_render_image() into the display-linear @p dst.
+  void MapSource(const struct pl_frame *src, const struct pl_frame *dst, const struct pl_render_params *params,
+                 int video_id);
   // Mapping-pass accounting (see MappingPassCount); test/diagnostic only.
   std::map<int, uint64_t> mapping_pass_count_;
   uint64_t hdrvivid_apply_count_ = 0;

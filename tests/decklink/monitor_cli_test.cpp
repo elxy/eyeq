@@ -61,15 +61,16 @@ void TestLabels() {
   EYEQ::PixelFormat format;
   EYEQ::MonitorColorTarget target;
   std::string error;
-  Check(EYEQ::ParseMonitorConnectionChoice("auto", &connection, &error) && connection == EYEQ::MonitorConnectionChoice::Auto,
+  Check(EYEQ::ParseMonitorConnectionChoice("auto", &connection, &error) &&
+            connection == EYEQ::MonitorConnectionChoice::Auto,
         "auto connection is accepted");
-  Check(EYEQ::ParseMonitorConnectionChoice("sdi", &connection, &error) && connection == EYEQ::MonitorConnectionChoice::Sdi,
+  Check(EYEQ::ParseMonitorConnectionChoice("sdi", &connection, &error) &&
+            connection == EYEQ::MonitorConnectionChoice::Sdi,
         "sdi is accepted");
   Check(EYEQ::ParseMonitorConnectionChoice("hdmi", &connection, &error) &&
             connection == EYEQ::MonitorConnectionChoice::Hdmi,
         "hdmi is accepted");
-  Check(!EYEQ::ParseMonitorConnectionChoice("displayport", &connection, &error),
-        "an unknown connection is rejected");
+  Check(!EYEQ::ParseMonitorConnectionChoice("displayport", &connection, &error), "an unknown connection is rejected");
   Check(EYEQ::ParseMonitorPixelFormat("v210", &format, &error) && format == EYEQ::PixelFormat::V210,
         "v210 is accepted");
   Check(EYEQ::ParseMonitorPixelFormat("r210", &format, &error) && format == EYEQ::PixelFormat::R210,
@@ -126,10 +127,10 @@ void TestColorAuto() {
   std::string reason;
   Check(EYEQ::ResolveMonitorColorTarget(EYEQ::MonitorColorTarget::Auto, true, &out, &reason) &&
             out == EYEQ::MonitorColorTarget::PqBt2020,
-        "auto picks pq2020 for an HDR main video");
+        "auto picks pq2020 for a HDR mapping target");
   Check(EYEQ::ResolveMonitorColorTarget(EYEQ::MonitorColorTarget::Auto, false, &out, &reason) &&
             out == EYEQ::MonitorColorTarget::SdrBt709,
-        "auto picks sdr709 for an SDR main video");
+        "auto picks sdr709 for a sdr mapping target");
   Check(EYEQ::ResolveMonitorColorTarget(EYEQ::MonitorColorTarget::SdrBt709, true, &out, &reason) &&
             out == EYEQ::MonitorColorTarget::SdrBt709,
         "an explicit target is not overridden by auto");
@@ -144,8 +145,7 @@ void TestModeAuto() {
   EYEQ::MonitorMode explicit_mode{1, 1, 1, 1, true};
   bool is_auto = false;
   std::string error;
-  Check(EYEQ::ParseMonitorModeChoice("auto", &is_auto, &explicit_mode, &error) && is_auto,
-        "auto mode is recognized");
+  Check(EYEQ::ParseMonitorModeChoice("auto", &is_auto, &explicit_mode, &error) && is_auto, "auto mode is recognized");
   Check(!EYEQ::ParseMonitorModeChoice("3840x2160", &is_auto, &explicit_mode, &error),
         "a malformed explicit mode still fails through auto parsing");
   Check(EYEQ::ParseMonitorModeChoice("3840x2160@25", &is_auto, &explicit_mode, &error) && !is_auto &&
