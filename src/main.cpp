@@ -54,6 +54,7 @@ struct EyeQArgs {
   std::optional<int> ref_id;
   std::string default_filter; // Global default filter
   std::string filter_sep;     // Per-video filter separator
+  bool autorotate;            // Apply the display matrix before the per-video filter
 
   DisplayMode display_mode;
   float flicker_interval;
@@ -172,6 +173,8 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
 
   app.add_option("--filter", args.default_filter, "Default filter applied to videos without per-video filter");
   app.add_option("--filter-sep", args.filter_sep, "Separator for per-video filter in video path (default: @)");
+  app.add_flag("!--no-autorotate", args.autorotate,
+               "Do not apply the display rotation (display matrix) of the videos; show the decoded orientation");
 
   std::optional<DisplayMode> display_mode;
   std::map<std::string, DisplayMode> dm_map{
@@ -701,6 +704,7 @@ int main(int argc, char **argv) {
 
   struct EyeQArgs args{
       .filter_sep = "@",
+      .autorotate = true,
       .flicker_interval = 0,
       .win_w = 0,
       .win_h = 0,
@@ -773,8 +777,9 @@ int main(int argc, char **argv) {
   std::vector<int> ids;
   for (int i = 0; i < num_videos; i++) {
     try {
-      player.AddVideoSource(
-          std::make_unique<VideoSource>(args.videos[i], args.filters[i], decode_threads, args.hardware_decoder), i);
+      player.AddVideoSource(std::make_unique<VideoSource>(args.videos[i], args.filters[i], decode_threads,
+                                                          args.hardware_decoder, args.autorotate),
+                            i);
     } catch (const std::exception &e) {
       Logger->critical(e.what());
       return 1;
@@ -824,10 +829,11 @@ int main(int argc, char **argv) {
   // The stream line printed by AddVideoSource() describes the decoder input; the
   // per-video filter (e.g. setparams) only shows up on the decoded output frames.
   for (auto &[id, src] : player) {
-    if (src->FilterGraph().empty()) {
+    const std::string filter = src->EffectiveFilter();
+    if (filter.empty()) {
       Logger->info("Video #{} output: {}", id, src->OutputFrameString());
     } else {
-      Logger->info("Video #{} output: {}, filter: {}", id, src->OutputFrameString(), src->FilterGraph());
+      Logger->info("Video #{} output: {}, filter: {}", id, src->OutputFrameString(), filter);
     }
   }
 

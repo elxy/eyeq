@@ -200,6 +200,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--grid-size <size>`：指定`grid`显示时的网格大小，如`--grid-size 2x2`，默认自适应选择
 - `--filter <filter>`：指定视频滤镜，作为未单独指定滤镜的视频的默认滤镜，即[FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html)。也可以在视频路径后使用`@`分隔符为单个视频指定滤镜，如`video.mp4@"filter"`
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
+- `--no-autorotate`：不应用视频的显示旋转（display matrix，如手机拍摄的视频）。默认与`ffmpeg`命令行一致：在per-video filter之前插入`transpose`/`hflip`/`vflip`滤镜，因此滤镜看到的是转正后的画面，窗口也按旋转后的尺寸创建。此时硬件解码的帧会先下载到内存
 - `--no-colorspace-hint`：不使用视频色彩空间渲染，而是使用默认的色彩空间，当显示设备不支持HDR时启用该选项以进行色调映射
 - `--reference-white <nits>`：统一的SDR参考白电平（单位nits，默认203，ITU-R BT.2408）。主视频为HDR时用作SDR源的参考白，监看时用作映射/输出线的SDR白；纯SDR桌面不受影响。替代`--sdr-white-on-hdr`与`--monitor-sdr-white`
 - `--target-display-nits <nits>`：映射目标的峰值亮度（nits）：普通播放时是显示映射目标（也是`--hdrvivid-render`下Vivid曲线的目标显示亮度），监看时即监视器峰值。`pq2020`监看目标必填（物理监视器没有可猜的默认值），其余默认1000。

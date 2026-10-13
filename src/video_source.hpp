@@ -40,8 +40,12 @@ struct AVFrameDeleter {
 
 class VideoSource {
 public:
+  /**
+   * @param autorotate apply the display matrix (rotation/flip) in the filter graph before the user filter, like the
+   *                   ffmpeg CLI; when false the display matrix is ignored. The matrix is never passed to the renderer.
+   */
   explicit VideoSource(std::string filename, std::string filter_graph, int decode_threads = 0,
-                       HardwareDecoder hw_decoder = HardwareDecoder::None);
+                       HardwareDecoder hw_decoder = HardwareDecoder::None, bool autorotate = true);
   ~VideoSource();
 
   const std::string &Filename() const { return filename_; }
@@ -70,6 +74,11 @@ public:
   const char *ColorPrimaries() const { return av_color_primaries_name(dec_ctx_->color_primaries); }
   const char *ColorTransfer() const { return av_color_transfer_name(dec_ctx_->color_trc); }
   const std::string &FilterGraph() const { return filter_graph_; }
+  /**
+   * @brief Filter graph actually built: hwdownload, autorotate, user filter and format fallback, in that order.
+   * Empty until the first frame is decoded.
+   */
+  std::string EffectiveFilter();
   // HDR is decided by the transfer function of the filtered output frame only:
   // PQ (SMPTE ST 2084) and HLG (ARIB STD-B67). Wide-gamut SDR (e.g. P3) is not
   // HDR. Requires a decoded frame (call after WaitForFrameAvailable()).
@@ -236,6 +245,9 @@ private:
   bool hw_decode_enabled_ = false; // Whether hardware decoding is actually used (determined on first frame)
 
   std::string filter_graph_;
+  bool autorotate_;
+  bool rotation_logged_ = false; // decode thread only
+  std::string effective_filter_; // guarded by buffer_mutex_
   AVFilterGraph *graph_;
   AVFilterContext *filt_in_, *filt_out_;
   std::atomic<bool> need_format_fallback_{false};    // Signal decode thread to append format filter

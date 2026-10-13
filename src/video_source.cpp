@@ -11,6 +11,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
+#include <libavutil/display.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
 }
@@ -21,6 +22,32 @@ extern "C" {
 using namespace EYEQ;
 
 namespace {
+
+// Filter that turns a frame with the given display matrix upright, or "" when
+// none is needed. This mirrors the ffmpeg CLI autorotate (get_rotation() in
+// fftools/cmdutils.c and the insertion in fftools/ffmpeg_filter.c), so eyeq
+// shows a tagged file in the same orientation as `ffmpeg` transcodes it.
+std::string AutorotateFilter(const int32_t *matrix) {
+  double theta = -std::round(av_display_rotation_get(matrix));
+  theta -= 360 * std::floor(theta / 360 + 0.9 / 360);
+  if (std::fabs(theta - 90) < 1.0) {
+    return matrix[3] > 0 ? "transpose=cclock_flip" : "transpose=clock";
+  }
+  if (std::fabs(theta - 180) < 1.0) {
+    std::string filter = matrix[0] < 0 ? "hflip" : "";
+    if (matrix[4] < 0) {
+      filter += filter.empty() ? "vflip" : ",vflip";
+    }
+    return filter;
+  }
+  if (std::fabs(theta - 270) < 1.0) {
+    return matrix[3] < 0 ? "transpose=clock_flip" : "transpose=cclock";
+  }
+  if (std::fabs(theta) > 1.0) {
+    return fmt::format("rotate={:f}*PI/180", theta);
+  }
+  return matrix[4] < 0 ? "vflip" : "";
+}
 
 // Glob metacharacters recognized by FFmpeg's image2 demuxer (see is_glob() in img2dec.c)
 constexpr std::string_view kGlobMetaChars = "*?[]{}";
@@ -102,9 +129,10 @@ std::string add_glob_escapes(const std::string &path) {
 
 } // namespace
 
-VideoSource::VideoSource(std::string filename, std::string filter_graph, int decode_threads, HardwareDecoder hw_decoder)
+VideoSource::VideoSource(std::string filename, std::string filter_graph, int decode_threads, HardwareDecoder hw_decoder,
+                         bool autorotate)
     : filename_(std::move(filename)), hw_decoder_(hw_decoder), filter_graph_(std::move(filter_graph)),
-      max_cached_frames_(kMaxCachedFrames), decode_threads_(decode_threads) {
+      autorotate_(autorotate), max_cached_frames_(kMaxCachedFrames), decode_threads_(decode_threads) {
   fmt_ctx_ = nullptr;
   dec_ctx_ = nullptr;
   stream_index_ = -1;
@@ -177,6 +205,11 @@ int VideoSource::Height() {
   } else {
     return dec_ctx_->height;
   }
+}
+
+std::string VideoSource::EffectiveFilter() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  return effective_filter_;
 }
 
 bool VideoSource::IsHdr() {
@@ -1073,6 +1106,15 @@ void VideoSource::AllInOneThread() {
       } else if (ret < 0) {
         throw std::runtime_error(fmt::format("Error in filtering, {}: {}", ret, ffmpeg_error_string(ret)));
       } else if (0 <= ret) {
+        // Drop the display matrix before the frame reaches libplacebo, which
+        // would otherwise rotate it in pl_frame_from_avframe(). With autorotate
+        // the filter graph has already turned the pixels upright, and libavfilter
+        // does not update the tag (transpose keeps it), so libplacebo would
+        // rotate a second time. With --no-autorotate the tag is ignored on
+        // purpose. In both cases eyeq sizes the window and canvas from the
+        // filtered frame, which only matches what is drawn if nothing rotates
+        // after the filter graph.
+        av_frame_remove_side_data(filt_frame, AV_FRAME_DATA_DISPLAYMATRIX);
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         // Frame may be shared across threads; use shared_ptr for management
         frame_buffer_.push_back(std::shared_ptr<AVFrame>(filt_frame, AVFrameDeleter()));
@@ -1227,12 +1269,42 @@ void VideoSource::CreateFilterGraph(const AVFrame *frame) {
     throw std::runtime_error("Could not init sink filter");
   }
 
-  // Auto-insert hwdownload before user filter when frame is a hardware frame
-  std::string effective_filter = filter_graph_;
-  if (frame->hw_frames_ctx && !filter_graph_.empty()) {
+  // Display rotation (the container/codec display matrix, attached to every
+  // frame by the decoder) is applied here, before the user filter, the same way
+  // the ffmpeg CLI does it. The user filter then sees upright frames, and the
+  // filtered frame size is the size eyeq builds its window and canvas from.
+  std::string rotate_filter;
+  if (const AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX)) {
+    const auto *matrix = reinterpret_cast<const int32_t *>(sd->data);
+    const std::string filter = AutorotateFilter(matrix);
+    if (!filter.empty()) {
+      if (autorotate_) {
+        rotate_filter = filter;
+      }
+      if (!rotation_logged_) {
+        // Same angle convention as ffprobe ("rotation of N degrees", counterclockwise)
+        const double degrees = av_display_rotation_get(matrix);
+        if (autorotate_) {
+          Logger->info("{}: display matrix rotation {:.0f} degrees, applied with {}; use --no-autorotate to show the "
+                       "decoded orientation",
+                       filename_, degrees, filter);
+        } else {
+          Logger->info("{}: display matrix rotation {:.0f} degrees ignored (--no-autorotate)", filename_, degrees);
+        }
+        rotation_logged_ = true;
+      }
+    }
+  }
+
+  std::string effective_filter = rotate_filter;
+  if (!filter_graph_.empty()) {
+    effective_filter += (effective_filter.empty() ? "" : ",") + filter_graph_;
+  }
+  // Software filters need system-memory frames: download hardware frames first
+  if (frame->hw_frames_ctx && !effective_filter.empty()) {
     AVHWFramesContext *hw_frames = (AVHWFramesContext *)frame->hw_frames_ctx->data;
     const char *sw_fmt_name = av_get_pix_fmt_name(hw_frames->sw_format);
-    effective_filter = fmt::format("hwdownload,format={},{}", sw_fmt_name, filter_graph_);
+    effective_filter = fmt::format("hwdownload,format={},{}", sw_fmt_name, effective_filter);
     Logger->debug("Auto-inserted hwdownload for hardware frames, effective filter: {}", effective_filter);
   }
 
@@ -1288,6 +1360,10 @@ void VideoSource::CreateFilterGraph(const AVFrame *frame) {
   graph_ = graph;
   filt_in_ = filt_src;
   filt_out_ = filt_out;
+  {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    effective_filter_ = effective_filter;
+  }
 
   avfilter_inout_free(&outputs);
   avfilter_inout_free(&inputs);
