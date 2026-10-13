@@ -274,6 +274,20 @@ After launching, the following keyboard and mouse controls are available:
 
    Use `color_trc=arib-std-b67` for HLG. On an HDR display the PQ output passes through without tone mapping, so `--no-colorspace-hint` and `--source-max-luma` are unnecessary; `--no-colorspace-hint` is required only on non-HDR displays to enable tone mapping.
 
+6. **Why does `setparams=range=limited` have no effect on an RGB video (e.g. DPX)?**
+
+   FFmpeg defines `color_range` for YCbCr (and luma) only; in its model RGB is always full range. swscale ignores the range of RGB input and output, and since FFmpeg 7.0 libavfilter resets the range of RGB links to full. libplacebo follows this convention: `pl_frame_from_avframe()` forces full range for every RGB pixel format, and the tag on the frame is dropped. The renderer itself can decode limited-range RGB, but the FFmpeg bridge never asks for it.
+
+   Narrow-range RGB does exist in broadcast (ITU-R BT.2100 defines it, and SDI RGB 4:4:4 often uses it), and a DPX header cannot always tell it apart from full range. EyeQ keeps the FFmpeg/libplacebo convention and warns (`RGB frame is tagged as limited range`) when an RGB frame carries the `tv` tag. To display such content correctly, expand it to full range in the filter. For 16-bit RGB (black 4096, white 60160):
+
+   ```
+   eyeq 'foo.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084,lutrgb=r=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535):g=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535):b=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535)'
+   ```
+
+   For N-bit content the constants are black = 16·2^(N-8), span = 219·2^(N-8) and max = 2^N-1; the warning prints the expression for the frame's bit depth. Do not add `range=limited`: after `lutrgb` the data is full range.
+
+   The `Video #N rendered as:` line at startup shows how the renderer actually reads each video, including tags that are ignored or overridden and defaults that are filled in.
+
 ## License
 
 This software is licensed under the GNU Lesser General Public License (LGPL) version 2.1 or later. See [LICENSE.md](./LICENSE.md) for details.

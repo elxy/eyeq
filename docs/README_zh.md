@@ -272,6 +272,20 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
    HLG用`color_trc=arib-std-b67`。在HDR显示器上PQ直通、无需色调映射，`--no-colorspace-hint`与`--source-max-luma`可不加；`--no-colorspace-hint`仅在非HDR显示器上需要，用于开启色调映射。
 
+6. 为什么对RGB视频（如DPX）设置`setparams=range=limited`不生效？
+
+   FFmpeg只为YCbCr（及亮度）定义`color_range`，在它的模型里RGB始终是full range：swscale忽略RGB输入输出的range，FFmpeg 7.0起libavfilter也会把RGB链路的range重置为full。libplacebo遵循这一约定：`pl_frame_from_avframe()`对所有RGB像素格式强制full range，帧上的标签被丢弃。libplacebo的渲染器本身能解码limited range RGB，只是FFmpeg桥接层从不这样请求。
+
+   广播领域确实存在narrow range RGB（ITU-R BT.2100有定义，SDI的RGB 4:4:4也常用），而DPX文件头不一定能区分它与full range。EyeQ保持FFmpeg/libplacebo的约定，当RGB帧带有`tv`标签时给出警告（`RGB frame is tagged as limited range`）。要正确显示这类内容，请在滤镜中把它展开为full range。16-bit RGB（黑4096、白60160）示例：
+
+   ```
+   eyeq 'foo.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084,lutrgb=r=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535):g=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535):b=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535)'
+   ```
+
+   N-bit内容的常量为：黑=16·2^(N-8)，跨度=219·2^(N-8)，最大值=2^N-1；警告中会按帧的实际位深给出表达式。不要再加`range=limited`：经过`lutrgb`后数据已是full range。
+
+   启动时的`Video #N rendered as:`日志显示渲染器对每个视频的实际解读，包括被忽略或被覆盖的标签，以及补上的默认值。
+
 ## 许可证
 
 本软件基于GNU宽通用公共许可证 (LGPL) 2.1或更高版本发布。详见 [LICENSE.md](../LICENSE.md)。
