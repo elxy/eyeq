@@ -112,11 +112,36 @@ static int create_codec_context(const AVFrame *frame, const char *filename, cons
   return 0;
 }
 
+// YCbCr matrices the legacy swscale API implements (ff_yuv2rgb_coeffs); the
+// table index is the AVColorSpace value. Others (YCgCo, BT.2020-CL, ICtCp, ...)
+// would silently fall back to BT.601.
+static bool swscale_has_matrix(AVColorSpace colorspace) {
+  switch (colorspace) {
+  case AVCOL_SPC_BT709:
+  case AVCOL_SPC_FCC:
+  case AVCOL_SPC_BT470BG:
+  case AVCOL_SPC_SMPTE170M:
+  case AVCOL_SPC_SMPTE240M:
+  case AVCOL_SPC_BT2020_NCL:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool is_ycbcr(enum AVPixelFormat format) {
+  const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(format);
+  return desc && desc->nb_components >= 3 &&
+         !(desc->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_XYZ | AV_PIX_FMT_FLAG_FLOAT |
+                          AV_PIX_FMT_FLAG_BAYER));
+}
+
 static AVFrame *convert_frame(AVCodecContext *codec_ctx, const AVFrame *frame) {
   AVFrame *oframe;
   struct SwsContext *sws_ctx;
   uint8_t *buffer;
   int buffer_size;
+  const enum AVPixelFormat src_format = (enum AVPixelFormat)frame->format;
 
   oframe = av_frame_alloc();
   oframe->format = codec_ctx->pix_fmt;
@@ -127,19 +152,53 @@ static AVFrame *convert_frame(AVCodecContext *codec_ctx, const AVFrame *frame) {
   av_image_fill_arrays(oframe->data, oframe->linesize, buffer, (enum AVPixelFormat)oframe->format, oframe->width,
                        oframe->height, 1);
 
-  sws_ctx = sws_getContext(frame->width, frame->height, (enum AVPixelFormat)frame->format, oframe->width,
-                           oframe->height, (enum AVPixelFormat)oframe->format,
+  sws_ctx = sws_getContext(frame->width, frame->height, src_format, oframe->width, oframe->height,
+                           (enum AVPixelFormat)oframe->format,
                            SWS_SPLINE | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND, 0, 0, 0);
   if (NULL == sws_ctx) {
     av_log(NULL, AV_LOG_ERROR, "Cannot get sws_ctx.\n");
     av_frame_free(&oframe);
     return NULL;
   }
+
+  // sws_getContext() knows nothing about the frame: it assumes a BT.601,
+  // limited-range YCbCr source. Pass the frame's matrix and range so the saved
+  // image decodes like the display does. VideoSource has already replaced a
+  // missing matrix tag with libplacebo's guess, and an unspecified range is
+  // limited for YCbCr in both libplacebo and swscale.
+  const bool src_ycbcr = is_ycbcr(src_format);
+  const bool dst_ycbcr = is_ycbcr((enum AVPixelFormat)oframe->format);
+  const AVColorSpace matrix = frame->colorspace;
+  if (src_ycbcr) {
+    if (!swscale_has_matrix(matrix)) {
+      const char *name = av_color_space_name(matrix);
+      av_log(NULL, AV_LOG_WARNING,
+             "swscale has no YCbCr matrix '%s'; the saved frame is converted with BT.601 and its colors differ from "
+             "the display\n",
+             name ? name : "invalid");
+    }
+    const int src_range = frame->color_range == AVCOL_RANGE_JPEG;
+    // A YCbCr output keeps the source matrix and range; RGB output is full range
+    const int dst_range = dst_ycbcr ? src_range : 1;
+    const int *coefficients = sws_getCoefficients(swscale_has_matrix(matrix) ? matrix : SWS_CS_DEFAULT);
+    if (sws_setColorspaceDetails(sws_ctx, coefficients, src_range, coefficients, dst_range, 0, 1 << 16, 1 << 16) < 0) {
+      av_log(NULL, AV_LOG_ERROR, "Cannot set the swscale colorspace details.\n");
+      sws_freeContext(sws_ctx);
+      av_frame_free(&oframe);
+      return NULL;
+    }
+  }
   sws_scale(sws_ctx, (const uint8_t *const *)frame->data, frame->linesize, 0, frame->height, oframe->data,
             oframe->linesize);
 
   sws_freeContext(sws_ctx);
   av_frame_copy_props(oframe, frame);
+  if (!dst_ycbcr) {
+    // The source matrix and range describe the YCbCr input, not the RGB output.
+    // Left as is, the PNG encoder writes a tv-range cICP tag for RGB data.
+    oframe->colorspace = AVCOL_SPC_RGB;
+    oframe->color_range = AVCOL_RANGE_JPEG;
+  }
   return oframe;
 }
 
