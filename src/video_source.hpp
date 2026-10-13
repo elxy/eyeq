@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -79,6 +80,15 @@ public:
    * Empty until the first frame is decoded.
    */
   std::string EffectiveFilter();
+  /**
+   * @brief Original colorspace tag when the YCbCr matrix had to be guessed (missing or not implemented by
+   * libplacebo); the guess is written to every decoded frame before filtering. Empty when the tag was used as is.
+   */
+  std::optional<AVColorSpace> MatrixGuessedFrom();
+  /**
+   * @brief Filtered frame at the current position. Requires a decoded frame (call after WaitForFrameAvailable()).
+   */
+  std::shared_ptr<AVFrame> CurrentFrame();
   // HDR is decided by the transfer function of the filtered output frame only:
   // PQ (SMPTE ST 2084) and HLG (ARIB STD-B67). Wide-gamut SDR (e.g. P3) is not
   // HDR. Requires a decoded frame (call after WaitForFrameAvailable()).
@@ -246,8 +256,11 @@ private:
 
   std::string filter_graph_;
   bool autorotate_;
-  bool rotation_logged_ = false; // decode thread only
-  std::string effective_filter_; // guarded by buffer_mutex_
+  bool rotation_logged_ = false;                    // decode thread only
+  std::string effective_filter_;                    // guarded by buffer_mutex_
+  std::optional<AVColorSpace> matrix_guessed_from_; // written by the decode thread under buffer_mutex_
+  // Replaces a missing/unsupported YCbCr matrix tag with libplacebo's guess (decode thread only)
+  void ResolveMatrix(AVFrame *frame);
   AVFilterGraph *graph_;
   AVFilterContext *filt_in_, *filt_out_;
   std::atomic<bool> need_format_fallback_{false};    // Signal decode thread to append format filter

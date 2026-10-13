@@ -49,6 +49,42 @@ std::string AutorotateFilter(const int32_t *matrix) {
   return matrix[4] < 0 ? "vflip" : "";
 }
 
+// Matrix libplacebo would guess for a YCbCr frame whose colorspace tag it does
+// not implement, or AVCOL_SPC_UNSPECIFIED when the tag is usable as is (or the
+// frame is not ordinary YCbCr). Mirrors pl_frame_from_avframe(): tags that
+// pl_system_from_av() maps to UNKNOWN (or RGB on a YCbCr format) fall back to
+// pl_color_system_guess_ycbcr(), i.e. BT.709 for HD and BT.601 for SD.
+AVColorSpace GuessedMatrix(const AVFrame *frame) {
+  AVPixelFormat format = static_cast<AVPixelFormat>(frame->format);
+  if (frame->hw_frames_ctx) {
+    format = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data)->sw_format;
+  }
+  const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(format);
+  // Same notion of "regular YUV" as libavfilter's ff_fmt_is_regular_yuv(); gray
+  // has no chroma, so the matrix does not matter for it
+  if (!desc || desc->nb_components < 3 ||
+      (desc->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_XYZ | AV_PIX_FMT_FLAG_FLOAT |
+                      AV_PIX_FMT_FLAG_BAYER))) {
+    return AVCOL_SPC_UNSPECIFIED;
+  }
+  switch (frame->colorspace) {
+  case AVCOL_SPC_BT709:
+  case AVCOL_SPC_BT470BG:
+  case AVCOL_SPC_SMPTE170M:
+  case AVCOL_SPC_SMPTE240M:
+  case AVCOL_SPC_YCGCO:
+  case AVCOL_SPC_YCGCO_RE:
+  case AVCOL_SPC_YCGCO_RO:
+  case AVCOL_SPC_BT2020_NCL:
+  case AVCOL_SPC_BT2020_CL:
+  case AVCOL_SPC_ICTCP:
+    return AVCOL_SPC_UNSPECIFIED; // implemented by libplacebo
+  default:
+    break;
+  }
+  return (frame->width >= 1280 || frame->height > 576) ? AVCOL_SPC_BT709 : AVCOL_SPC_SMPTE170M;
+}
+
 // Glob metacharacters recognized by FFmpeg's image2 demuxer (see is_glob() in img2dec.c)
 constexpr std::string_view kGlobMetaChars = "*?[]{}";
 
@@ -205,6 +241,43 @@ int VideoSource::Height() {
   } else {
     return dec_ctx_->height;
   }
+}
+
+void VideoSource::ResolveMatrix(AVFrame *frame) {
+  // The YCbCr matrix is decided once, here, before the filter graph: swscale
+  // (any format conversion in the filter graph, including the rgb48le
+  // fallback) assumes BT.601 for an unspecified matrix whatever the size,
+  // while libplacebo guesses by size. Writing libplacebo's guess to the frame
+  // makes both paths decode with the same matrix.
+  const AVColorSpace guess = GuessedMatrix(frame);
+  if (guess == AVCOL_SPC_UNSPECIFIED) {
+    return;
+  }
+  if (!matrix_guessed_from_.has_value()) {
+    const char *tag = av_color_space_name(frame->colorspace);
+    Logger->info("{}: YCbCr matrix tag '{}' is {}; assuming {} from the {}x{} frame size (libplacebo's rule), for both "
+                 "the filters and the rendering",
+                 filename_, tag ? tag : "invalid",
+                 frame->colorspace == AVCOL_SPC_UNSPECIFIED ? "missing" : "not supported by libplacebo",
+                 av_color_space_name(guess), frame->width, frame->height);
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    matrix_guessed_from_ = frame->colorspace;
+  }
+  frame->colorspace = guess;
+}
+
+std::optional<AVColorSpace> VideoSource::MatrixGuessedFrom() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  return matrix_guessed_from_;
+}
+
+std::shared_ptr<AVFrame> VideoSource::CurrentFrame() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  RequireCurrentFrameLocked("CurrentFrame");
+  if (current_frame_index_ >= 0) {
+    return frame_buffer_[current_frame_index_];
+  }
+  return frame_buffer_[0];
 }
 
 std::string VideoSource::EffectiveFilter() {
@@ -1096,6 +1169,9 @@ void VideoSource::AllInOneThread() {
         }
       }
 
+      if (AVERROR_EOF != ret) {
+        ResolveMatrix(frame);
+      }
       if (!graph_) {
         CreateFilterGraph(frame);
       }

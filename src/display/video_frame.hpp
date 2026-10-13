@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -60,5 +61,15 @@ private:
   int check_hw_transfer(AVFrame *frame);
   int transfer_frame(AVFrame *frame, int use_hw_frame);
 };
+
+/**
+ * @brief Describe how libplacebo interprets the frame, e.g. "YCbCr bt709, limited, bt2020, smpte2084".
+ *
+ * Built from pl_frame_from_avframe() plus the renderer defaults for missing tags, so it reports what is rendered
+ * rather than what the frame is tagged with. Values that do not come from the tags are marked, e.g. an RGB
+ * limited-range tag that libplacebo ignores, an embedded ICC profile that overrides primaries/transfer, or a
+ * primaries/transfer default.
+ */
+std::string DescribeInterpretation(const AVFrame *frame);
 
 }; // namespace EYEQ

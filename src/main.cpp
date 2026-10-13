@@ -34,6 +34,7 @@ extern "C" {
 #include "display/canvas_geometry.hpp"
 #include "display/display_coordinator.hpp"
 #include "display/render.hpp"
+#include "display/video_frame.hpp"
 #include "display/platform_activate.h"
 
 #ifdef EYEQ_ENABLE_DECKLINK
@@ -835,6 +836,14 @@ int main(int argc, char **argv) {
     } else {
       Logger->info("Video #{} output: {}, filter: {}", id, src->OutputFrameString(), filter);
     }
+    // How the renderer reads that frame: tags it ignores or overrides and the
+    // defaults it fills in are spelled out, since libplacebo applies them silently
+    std::string interpretation = DescribeInterpretation(src->CurrentFrame().get());
+    if (const auto tag = src->MatrixGuessedFrom()) {
+      const char *name = av_color_space_name(*tag);
+      interpretation += fmt::format(" [matrix guessed from size, tag '{}']", name ? name : "invalid");
+    }
+    Logger->info("Video #{} rendered as: {}", id, interpretation);
   }
 
   // Check if hardware decoding took effect for all videos
