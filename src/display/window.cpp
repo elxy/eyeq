@@ -17,6 +17,7 @@ extern "C" {
 #include <libplacebo/utils/libav.h>
 #include <libplacebo/swapchain.h>
 
+#include "platform_display.h"
 #include "platform_icc.h"
 
 using namespace EYEQ;
@@ -289,7 +290,7 @@ void Window::ColorspaceHint(const struct pl_color_space *colorspace) {
   // The coordinator has already resolved the ICC policy: in monitoring mode it
   // never hands over an ICC target, and in the plain desktop it hands over the
   // ICC target when a global profile is active. This function only applies the
-  // hint and the HDR-on-SDR warning.
+  // hint, the HDR-on-SDR warning and the EDR reference-mode report.
   if (colorspace) {
     SDL_DisplayID display_id = SDL_GetDisplayForWindow(window_);
     SDL_PropertiesID prop_id = SDL_GetDisplayProperties(display_id);
@@ -306,6 +307,10 @@ void Window::ColorspaceHint(const struct pl_color_space *colorspace) {
     } else {
       warned = false;
     }
+    if (is_hdr && support_hdr && display_id != edr_checked_display_) {
+      CheckDisplayEDR();
+      edr_checked_display_ = display_id;
+    }
   }
 
   static bool hint_logged = false;
@@ -319,6 +324,32 @@ void Window::ColorspaceHint(const struct pl_color_space *colorspace) {
     hint_logged = true;
   }
   pl_swapchain_colorspace_hint(swapchain_, colorspace);
+}
+
+void Window::CheckDisplayEDR() {
+  DisplayEDRInfo info = QueryDisplayEDR(window_);
+  if (!info.valid) {
+    Logger->debug("display EDR query unavailable: {}", info.error);
+    return;
+  }
+  Logger->debug("display {} EDR headroom: potential {:.1f}, reference {:.1f} (0 = not a reference mode)",
+                info.display_name, info.potential_headroom, info.reference_headroom);
+  if (info.preset_valid) {
+    Logger->debug("display {} preset: {}, HDR peak {:.0f} nits, SDR white {:.0f} nits (private MonitorPanel)",
+                  info.display_name, info.preset_name, info.preset_peak_nits, info.preset_sdr_white_nits);
+  } else {
+    Logger->debug("display {} preset unavailable: {}", info.display_name, info.preset_error);
+  }
+
+  // Outside a reference mode macOS scales HDR output to the current SDR brightness
+  // and tone-maps whatever exceeds the current headroom, so PQ code values are not
+  // shown at their absolute luminance.
+  if (info.reference_headroom <= 0.0f) {
+    Logger->warn("Display {} is not in a reference mode: macOS shows HDR relative to the SDR brightness and may "
+                 "tone-map highlights, so PQ is not at absolute luminance. Select a reference preset such as "
+                 "'HDR Video (P3-ST 2084)' for absolute PQ",
+                 info.display_name);
+  }
 }
 
 void Window::LoadICCProfile(const std::string &path, std::optional<int> video_id) {

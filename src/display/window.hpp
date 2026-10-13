@@ -145,6 +145,7 @@ protected:
   int ori_width_ = 0;
   int ori_height_ = 0;
   SDL_DisplayID ori_display_id_ = 0;
+  SDL_DisplayID edr_checked_display_ = 0; // display whose EDR state was last reported for HDR output
 
   VkSurfaceKHR vk_surface_ = VK_NULL_HANDLE;
   pl_swapchain swapchain_ = nullptr;
@@ -175,6 +176,14 @@ protected:
    * @param frame Frame
    */
   void ColorspaceHint(const struct pl_color_space *colorspace);
+
+  /**
+   * @brief Report the EDR state of the window's display for HDR output
+   *
+   * Logs headroom and the active preset at debug level, and warns when the
+   * display is not in a reference mode (PQ is then not at absolute luminance).
+   */
+  void CheckDisplayEDR();
 };
 
 }; // namespace EYEQ

@@ -128,9 +128,11 @@ if(APPLE)
   # macOS: use .mm implementations, exclude stubs
   list(REMOVE_ITEM CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_icc_stub.cpp")
   list(REMOVE_ITEM CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_activate_stub.cpp")
+  list(REMOVE_ITEM CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_display_stub.cpp")
   set(PLATFORM_SOURCES
     "${CMAKE_SOURCE_DIR}/src/display/platform_icc_mac.mm"
-    "${CMAKE_SOURCE_DIR}/src/display/platform_activate_mac.mm")
+    "${CMAKE_SOURCE_DIR}/src/display/platform_activate_mac.mm"
+    "${CMAKE_SOURCE_DIR}/src/display/platform_display_mac.mm")
 else()
   # Other platforms: stubs already collected by GLOB_RECURSE
   set(PLATFORM_SOURCES "")
