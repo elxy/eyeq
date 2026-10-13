@@ -106,8 +106,16 @@ void RenderContext::CreateHWDevice() {
   device_ctx->user_opaque = this;
 
   AVVulkanDeviceContext *vk_dev_ctx = (AVVulkanDeviceContext *)device_ctx->hwctx;
+  // FFmpeg and libplacebo submit to the same queues, so FFmpeg must share
+  // libplacebo's queue lock. On libavutil < 62 these deprecated callbacks are
+  // the only way to do that; the replacement,
+  // VK_KHR_internally_synchronized_queues, is not exposed by libplacebo 7.x or
+  // MoltenVK. Revisit when libplacebo supports it.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   vk_dev_ctx->lock_queue = RenderContext::HWCallbackLockQueue;
   vk_dev_ctx->unlock_queue = RenderContext::HWCallbackUnlockQueue;
+#pragma GCC diagnostic pop
 
   vk_dev_ctx->get_proc_addr = pl_inst_->get_proc_addr;
   vk_dev_ctx->inst = pl_inst_->instance;
@@ -121,6 +129,36 @@ void RenderContext::CreateHWDevice() {
 
   vk_dev_ctx->enabled_dev_extensions = vulkan_->extensions;
   vk_dev_ctx->nb_enabled_dev_extensions = vulkan_->num_extensions;
+
+  // FFmpeg only uses the queue families listed here; with none listed, its
+  // frames init dereferences a missing transfer queue and crashes. Expose the
+  // queues libplacebo created (same layout as fftools/ffplay_renderer.c).
+  int nb_qf = 0;
+  auto add_qf = [&](uint32_t idx, uint32_t num, VkQueueFlagBits flags) {
+    vk_dev_ctx->qf[nb_qf++] = AVVulkanDeviceQueueFamily{static_cast<int>(idx), static_cast<int>(num), flags};
+  };
+  add_qf(vulkan_->queue_graphics.index, vulkan_->queue_graphics.count, VK_QUEUE_GRAPHICS_BIT);
+  add_qf(vulkan_->queue_transfer.index, vulkan_->queue_transfer.count, VK_QUEUE_TRANSFER_BIT);
+  add_qf(vulkan_->queue_compute.index, vulkan_->queue_compute.count, VK_QUEUE_COMPUTE_BIT);
+  // libplacebo created the decode queue via extra_queues when the device has
+  // one (MoltenVK has none). FFmpeg indexes per-family arrays with idx, so only
+  // list it when it exists.
+  auto get_qf_props = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+      pl_inst_->get_proc_addr(pl_inst_->instance, "vkGetPhysicalDeviceQueueFamilyProperties"));
+  if (!get_qf_props) {
+    throw std::runtime_error("vkGetPhysicalDeviceQueueFamilyProperties not available");
+  }
+  uint32_t num_props = 0;
+  get_qf_props(vulkan_->phys_device, &num_props, nullptr);
+  std::vector<VkQueueFamilyProperties> props(num_props);
+  get_qf_props(vulkan_->phys_device, &num_props, props.data());
+  for (uint32_t i = 0; i < num_props; i++) {
+    if (props[i].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
+      add_qf(i, props[i].queueCount, VK_QUEUE_VIDEO_DECODE_BIT_KHR);
+      break;
+    }
+  }
+  vk_dev_ctx->nb_qf = nb_qf;
 
   if (av_hwdevice_ctx_init(hw_device_ref_) < 0) {
     av_buffer_unref(&hw_device_ref_);
