@@ -90,6 +90,7 @@ struct EyeQArgs {
   bool target_display_set;    // Whether --target-display-nits was explicitly passed
   double source_max_luma;     // Opt-in source HDR max_luma override (nits)
   bool source_max_luma_set;   // Whether --source-max-luma was explicitly passed
+  bool hardware_decoder_set;  // Whether --hardware-decoder was explicitly passed
 
 #ifdef EYEQ_ENABLE_DECKLINK
   // External monitoring (SDK-enabled builds only). --monitor-device enables it;
@@ -310,6 +311,7 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   args.target_display_set = app.count("--target-display-nits") > 0;
   args.source_max_luma_set = app.count("--source-max-luma") > 0;
   args.reference_white_set = app.count("--reference-white") > 0;
+  args.hardware_decoder_set = app.count("--hardware-decoder") > 0;
 
 #ifdef EYEQ_ENABLE_DECKLINK
   if (!args.monitor_device.has_value() && args.monitor_mode.has_value()) {
@@ -730,6 +732,7 @@ int main(int argc, char **argv) {
       .target_display_set = false,
       .source_max_luma = 0.0,
       .source_max_luma_set = false,
+      .hardware_decoder_set = false,
   };
 
   parse_args(args, argc, argv);
@@ -832,15 +835,12 @@ int main(int argc, char **argv) {
   // are only known once frames are decoded.
   for (auto &[id, src] : player) {
     // The frame the renderer receives, after the filter graph (user filter,
-    // display rotation). Only worth INFO when the filters changed it.
+    // display rotation). What matters to the user is reported by "rendered as".
     const std::string filter = src->EffectiveFilter();
-    const std::string filtered = src->OutputFrameString();
     const std::string via = filter.empty() ? "" : fmt::format(", filter: {}", filter);
-    if (const auto decoded = src->FilterChangeString()) {
-      Logger->info("Video #{} after filters: {} (decoded: {}){}", id, filtered, *decoded, via);
-    } else {
-      Logger->debug("Video #{} after filters: {} (unchanged){}", id, filtered, via);
-    }
+    const auto decoded = src->FilterChangeString();
+    Logger->debug("Video #{} after filters: {} ({}){}", id, src->OutputFrameString(),
+                  decoded ? "decoded: " + *decoded : std::string("unchanged"), via);
     // How the renderer reads that frame. Tags it ignores or overrides and the
     // defaults it fills in are applied silently by libplacebo, so they are INFO.
     Interpretation interpretation = DescribeInterpretation(src->CurrentFrame().get());
@@ -874,9 +874,12 @@ int main(int argc, char **argv) {
       };
       auto it = hw_names.find(args.hardware_decoder);
       const char *hardware_decoder = (it != hw_names.end()) ? it->second : "unknown";
-      Logger->warn("Hardware decoder {} is requested but NOT USED for: {}. "
-                   "These video streams may use unsupported codecs.",
-                   hardware_decoder, codec_list);
+      // Only a decoder the user asked for is worth a warning; the default
+      // `auto` silently falling back to software decoding is expected (DPX, PNG, ...)
+      Logger->log(args.hardware_decoder_set ? spdlog::level::warn : spdlog::level::debug,
+                  "Hardware decoder {} is requested but NOT USED for: {}. "
+                  "These video streams may use unsupported codecs.",
+                  hardware_decoder, codec_list);
     }
   }
 
