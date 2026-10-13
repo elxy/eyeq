@@ -286,6 +286,18 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 
    启动时的`Video #N rendered as:`日志显示渲染器对每个视频的实际解读，包括被忽略或被覆盖的标签，以及补上的默认值。
 
+7. `Ctrl + S`保存的视频帧与EyeQ的显示一致吗？
+
+   `Ctrl + S`保存的是经过滤镜（含自动旋转）之后、渲染之前的视频帧，由FFmpeg（swscale）把YCbCr转换为png所需的RGB；屏幕显示则由libplacebo在GPU上完成。EyeQ让两者在以下两点上保持一致，均以libplacebo的规则为准：
+   - YCbCr矩阵：使用帧上的矩阵标签。标签缺失或libplacebo不支持时，EyeQ在解码后就按libplacebo的规则（宽≥1280或高>576为BT.709，否则为BT.601）补全，保存与显示都使用该矩阵，而不是swscale默认的BT.601。启动日志`Video #N rendered as:`会注明`matrix guessed from size`。
+   - range：YCbCr按帧上的标签，未标注时按limited；RGB始终按full（见上一条）。
+
+   以下情况两者仍有差异：
+   - swscale未实现的矩阵（YCgCo、BT.2020-CL、ICtCp等）：显示正确，保存时会给出警告并按BT.601转换。
+   - 杜比视界：保存的是未经RPU重塑的基本层。
+   - 色度上采样算法不同（保存用spline，显示默认lanczos），色度边缘会有细微差别。
+   - 保存不做色调映射、色域转换和ICC校正，primaries/transfer只作为标签写入png（见第2条）。需要与屏幕一致的画面，请使用`Ctrl + E`保存渲染后的帧。
+
 ## 许可证
 
 本软件基于GNU宽通用公共许可证 (LGPL) 2.1或更高版本发布。详见 [LICENSE.md](../LICENSE.md)。

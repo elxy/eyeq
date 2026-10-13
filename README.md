@@ -288,6 +288,18 @@ After launching, the following keyboard and mouse controls are available:
 
    The `Video #N rendered as:` line at startup shows how the renderer actually reads each video, including tags that are ignored or overridden and defaults that are filled in.
 
+7. **Does a frame saved with `Ctrl + S` match what EyeQ displays?**
+
+   `Ctrl + S` saves the frame after the filters (including autorotate) and before rendering; FFmpeg (swscale) converts YCbCr to the RGB that PNG needs, while the display is rendered by libplacebo on the GPU. EyeQ keeps the two consistent on these points, following libplacebo's rules:
+   - YCbCr matrix: the frame's matrix tag is used. When it is missing or not implemented by libplacebo, EyeQ fills it in right after decoding with libplacebo's rule (BT.709 when width ≥ 1280 or height > 576, BT.601 otherwise), and both saving and display use it instead of swscale's default BT.601. The startup line `Video #N rendered as:` then says `matrix guessed from size`.
+   - Range: YCbCr follows the frame's tag and is limited when untagged; RGB is always full (see the previous question).
+
+   Differences that remain:
+   - Matrices swscale does not implement (YCgCo, BT.2020-CL, ICtCp, ...): displayed correctly, saved with BT.601 and a warning.
+   - Dolby Vision: the base layer is saved without the RPU reshaping.
+   - Chroma upsampling differs (spline when saving, lanczos by default for display), so chroma edges differ slightly.
+   - Saving applies no tone mapping, gamut mapping or ICC correction; primaries/transfer are only written to the PNG as tags (see question 2). Use `Ctrl + E` to save the rendered frame that matches the screen.
+
 ## License
 
 This software is licensed under the GNU Lesser General Public License (LGPL) version 2.1 or later. See [LICENSE.md](./LICENSE.md) for details.
