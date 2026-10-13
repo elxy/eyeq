@@ -62,17 +62,20 @@ void Window::Render(const DisplayState &state) {
   bool saving = pending_render_save_.has_value();
   if (saving) {
     // When saving, render into a host-readable RGBA32F texture instead of the
-    // swapchain, then blit the result to the swapchain and download it.
+    // swapchain, then blit the result to the swapchain and download it. It must
+    // be blittable like the swapchain image: the SDR presentation hop clears the
+    // letterbox with pl_tex_clear, which requires blit_dst.
     pl_gpu gpu = context_->gpu();
-    pl_fmt save_fmt = pl_find_fmt(
-        gpu, PL_FMT_FLOAT, 4, 32, 32,
-        static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+    pl_fmt save_fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+                                  static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE |
+                                                                PL_FMT_CAP_HOST_READABLE | PL_FMT_CAP_BLITTABLE));
     struct pl_tex_params save_params = {
         .w = target.planes[0].texture->params.w,
         .h = target.planes[0].texture->params.h,
         .format = save_fmt,
         .sampleable = true,
         .renderable = true,
+        .blit_dst = true,
         .host_readable = true,
     };
     if (!save_fmt || !pl_tex_recreate(gpu, &render_save_tex_, &save_params)) {

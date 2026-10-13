@@ -320,13 +320,16 @@ pl_tex FillRender::PrepareOsdStaging(pl_tex target) {
   }
   // Same size and format as the presentation target, but sampleable so the OSD
   // blend can read the encoded result. The target is usually the swapchain
-  // image, which libplacebo wraps without VK_IMAGE_USAGE_SAMPLED_BIT.
+  // image, which libplacebo wraps without VK_IMAGE_USAGE_SAMPLED_BIT. It stays
+  // blittable like the swapchain image because PresentTo clears the letterbox
+  // with pl_tex_clear (SDR presentation hop).
   struct pl_tex_params staging_params = {
       .w = target->params.w,
       .h = target->params.h,
       .format = target->params.format,
       .sampleable = true,
       .renderable = true,
+      .blit_dst = target->params.blit_dst,
   };
   if (!pl_tex_recreate(gpu_, &osd_staging_, &staging_params)) {
     throw std::runtime_error("Failed to create the OSD staging texture");
