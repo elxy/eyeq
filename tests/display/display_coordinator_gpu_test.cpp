@@ -773,8 +773,8 @@ void TestNanInfPolicy(EYEQ::RenderContext &context) {
       .format = format,
       .sampleable = true,
       .renderable = true,
-      .host_readable = true,
       .host_writable = true,
+      .host_readable = true,
   };
   pl_tex bad = pl_tex_create(gpu, &tex_params);
   Check(bad != nullptr, "non-finite probe texture created");

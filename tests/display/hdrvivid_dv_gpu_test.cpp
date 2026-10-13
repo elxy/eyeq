@@ -74,11 +74,6 @@ void CheckNear(double actual, double expected, double tolerance, const std::stri
   Check(std::fabs(actual - expected) <= tolerance, what);
 }
 
-void Skip(const std::string &what) {
-  ++g_skipped;
-  std::fprintf(stderr, "  SKIP %s\n", what.c_str());
-}
-
 struct SourceOwner {
   AVFormatContext *format = nullptr;
   AVStream *stream = nullptr;

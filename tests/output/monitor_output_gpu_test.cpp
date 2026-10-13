@@ -123,25 +123,6 @@ std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, cons
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
-// A frame the GPU mapper cannot consume: a valid AVFrame with a pixel format that
-// libplacebo does not map, which is what FeedFrames reports per-video. (Using
-// AV_PIX_FMT_NONE is not safe: pl_frame_from_avframe dereferences a null descriptor.)
-std::shared_ptr<AVFrame> MakeBrokenFrame(AVStream *stream, int width, int height) {
-  AVFrame *frame = av_frame_alloc();
-  if (!frame) {
-    throw std::runtime_error("av_frame_alloc failed");
-  }
-  frame->format = AV_PIX_FMT_PAL8;
-  frame->width = width;
-  frame->height = height;
-  frame->opaque = stream;
-  if (av_frame_get_buffer(frame, 32) < 0) {
-    av_frame_free(&frame);
-    throw std::runtime_error("av_frame_get_buffer failed");
-  }
-  return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
-}
-
 Color QuadrantPixel(int x, int y, int width, int height) {
   const bool right = x >= width / 2;
   const bool bottom = y >= height / 2;

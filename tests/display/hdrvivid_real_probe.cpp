@@ -112,7 +112,7 @@ void PrintVividSummary(const AVFrame *frame) {
     return;
   }
   const auto *v = reinterpret_cast<const AVDynamicHDRVivid *>(sd->data);
-  std::printf("  vivid side data: %d bytes, system_start_code=%u num_windows=%u\n", sd->size, v->system_start_code,
+  std::printf("  vivid side data: %zu bytes, system_start_code=%u num_windows=%u\n", sd->size, v->system_start_code,
               v->num_windows);
   if (v->num_windows >= 1) {
     const AVHDRVividColorTransformParams &p = v->params[0];
@@ -132,7 +132,7 @@ void PrintDoviSummary(const AVFrame *frame) {
   const auto *md = reinterpret_cast<const AVDOVIMetadata *>(sd->data);
   const AVDOVIRpuDataHeader *header = av_dovi_get_header(md);
   const AVDOVIDmData *l1 = av_dovi_find_level(md, 1);
-  std::printf("  dovi side data: %d bytes, rpu_profile=%u bl_bit_depth=%u disable_residual=%u\n", sd->size,
+  std::printf("  dovi side data: %zu bytes, rpu_profile=%u bl_bit_depth=%u disable_residual=%u\n", sd->size,
               header->vdr_rpu_profile, header->bl_bit_depth, header->disable_residual_flag);
   if (l1) {
     std::printf("    L1 min_pq=%u max_pq=%u avg_pq=%u\n", l1->l1.min_pq, l1->l1.max_pq, l1->l1.avg_pq);
