@@ -63,8 +63,6 @@ public:
     // TargetKind::None the peak of mapping_target is only the initial value.
     TargetKind target_kind = TargetKind::HdrNits;
     ToneMapping tone_mapping = ToneMapping::Spline;
-    // Dither the final desktop presentation hop (not the common result/encode).
-    bool present_dither = true;
     IccMode icc_mode = IccMode::Enabled;
     // F16 is the plain-display candidate; the difference path upgrades to F32
     // per render. This is a functional choice, never load-adaptive.

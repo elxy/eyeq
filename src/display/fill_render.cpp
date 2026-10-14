@@ -29,9 +29,9 @@ FillRender::FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_p
   present_color_map_.gamut_mapping = &pl_gamut_map_clip;
   present_params_ = *render_params_;
   present_params_.color_map_params = &present_color_map_;
-  // The final desktop hop dithers to the swapchain depth (closure b); the
-  // compose and explicit-encode stages stay dither-free.
-  present_params_.dither_params = pl_render_default_params.dither_params;
+  // No stage dithers: eyeq shows the source, so the presentation hop only
+  // quantizes to the output depth.
+  present_params_.dither_params = nullptr;
   present_params_.peak_detect_params = nullptr;
   // PresentTo clears the letterbox to black itself; libplacebo's border clear
   // would paint it with the comparison background color instead.
@@ -404,13 +404,6 @@ void FillRender::PlotOsdText(pl_tex target, pl_tex encoded, enum pl_color_transf
   if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
     throw std::runtime_error("pl_dispatch_finish failed (OSD text blend).");
   }
-}
-
-void FillRender::SetPresentDitherEnabled(bool enabled) {
-  // pl_render_default_params.dither_params is libplacebo's default dither; the
-  // hop only dithers to the output depth, it never re-maps the display-linear
-  // values.
-  present_params_.dither_params = enabled ? pl_render_default_params.dither_params : nullptr;
 }
 
 void FillRender::PresentTo(struct pl_frame &target, const struct pl_frame *src, const EncodeRect *preview) {

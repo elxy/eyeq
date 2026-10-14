@@ -72,9 +72,6 @@ public:
     // highlight-compressing configuration; SetMappingTarget() provides the peak.
     TargetKind target_kind = TargetKind::HdrNits;
     ToneMapping tone_mapping = ToneMapping::Spline;
-    // Dither the final desktop presentation hop to a low-depth swapchain. The
-    // common display-linear result and the wire encode are never dithered.
-    bool present_dither = true;
   };
 
   FrameRenderer(RenderContext &context, const Config &config, ColorspaceHintFunc colorspace_hint = nullptr);
@@ -183,8 +180,6 @@ public:
   // because a full-frame readback per frame regresses the plain desktop path;
   // the difference/high-precision path and the tests enable it.
   void SetValidateLinearResult(bool enabled) { validate_linear_result_ = enabled; }
-  // Toggles dithering on the final desktop presentation hop (closure b).
-  void SetPresentDitherEnabled(bool enabled) { display_render_->SetPresentDitherEnabled(enabled); }
   bool validate_linear_result() const { return validate_linear_result_; }
   // Explicitly inspect the last linear result; throws std::runtime_error on a
   // non-finite sample. Public so the coordinator/callers can enforce it.

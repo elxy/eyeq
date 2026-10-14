@@ -43,7 +43,6 @@ DisplayCoordinator::DisplayCoordinator(RenderContext &context, const Config &con
   renderer_config.enable_osd = config.enable_osd;
   renderer_config.target_kind = config.target_kind;
   renderer_config.tone_mapping = config.tone_mapping;
-  renderer_config.present_dither = config.present_dither;
 
   // The color space the swapchain hint should declare. In monitoring mode the
   // application ICC is disabled, so the source color space is used directly;

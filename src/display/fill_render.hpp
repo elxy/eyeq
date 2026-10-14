@@ -85,11 +85,6 @@ public:
    */
   void PresentTo(struct pl_frame &target, const struct pl_frame *src, const EncodeRect *preview = nullptr);
 
-  // Final-hop dithering (V2.2 closure b). The compose and explicit-encode stages
-  // never dither; only the color-managed desktop presentation hop to a low-depth
-  // swapchain does, so an 8-bit sRGB target does not band on smooth gradients.
-  void SetPresentDitherEnabled(bool enabled);
-
   // Diagnostics: how many times the source mapping ran for @p video_id since the
   // last ResetMappingCounts(), and how many of those attached an HDR Vivid hook.
   // Used to prove that each compared source is mapped exactly once per compose

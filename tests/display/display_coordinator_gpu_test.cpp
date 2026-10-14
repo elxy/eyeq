@@ -159,7 +159,7 @@ EYEQ::MappingTarget MakeMappingTarget(enum pl_color_primaries primaries, float p
 std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &context, EYEQ::DisplayMode mode,
                                                           int canvas_w, int canvas_h, const EYEQ::MappingTarget &target,
                                                           EYEQ::IccMode icc_mode = EYEQ::IccMode::Enabled,
-                                                          bool validate_difference = true, bool present_dither = true) {
+                                                          bool validate_difference = true) {
   EYEQ::DisplayCoordinator::Config cfg;
   cfg.mode = mode;
   cfg.scale_method = EYEQ::ScaleMethod::Bicubic;
@@ -168,7 +168,6 @@ std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &c
   cfg.enable_osd = false;
   cfg.icc_mode = icc_mode;
   cfg.work_precision = EYEQ::WorkPrecision::F16;
-  cfg.present_dither = present_dither;
   cfg.mapping_target = target;
   cfg.canvas_w = canvas_w;
   cfg.canvas_h = canvas_h;
@@ -404,8 +403,8 @@ void TestFixedMappingTargetAndResize(EYEQ::RenderContext &context, AVStream *str
 // V2-1 handoff debt #1: the plain-desktop pixel behavior of the new chain
 // (coordinator compose + presenter hop) against the migrated baseline chain
 // (FrameRenderer::Render, the fused V2-1 path) on the same scene and target.
-// Differences are reported, not assumed equal. Dither is disabled on both sides
-// so only the structural path is compared; the ICC case is compared too.
+// Differences are reported, not assumed equal. Neither side dithers, so only the
+// structural path is compared; the ICC case is compared too.
 // ---------------------------------------------------------------------------
 void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std::vector<uint8_t> *icc,
                       const std::string &icc_source, const char *label) {
@@ -421,7 +420,6 @@ void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std:
   old_cfg.mode = EYEQ::DisplayMode::Fill;
   old_cfg.enable_osd = false;
   old_cfg.pixel_density = 1.0f;
-  old_cfg.present_dither = false;
   EYEQ::FrameRenderer old_renderer(context, old_cfg);
   old_renderer.SetMappingTarget(mt, EYEQ::WorkPrecision::F16);
   old_renderer.SetMainSource(5);
@@ -430,7 +428,7 @@ void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std:
     old_renderer.SetICCProfile(*icc, icc_source);
   }
 
-  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, w, h, mt, EYEQ::IccMode::Enabled, false, false);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, w, h, mt, EYEQ::IccMode::Enabled, false);
   coordinator->SetMainSource(5);
   coordinator->FeedFrames({{5, source}});
   if (icc != nullptr) {
@@ -548,52 +546,33 @@ void TestPerformanceRecording(EYEQ::RenderContext &context) {
 }
 
 // ---------------------------------------------------------------------------
-// sRGB desktop final hop and dither (closure b)
+// The sRGB desktop final hop does not dither
 // ---------------------------------------------------------------------------
-void TestPresentDither(EYEQ::RenderContext &context, AVStream *stream) {
-  std::fprintf(stdout, "[sRGB desktop final hop and dither]\n");
+void TestPresentNoDither(EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[sRGB desktop final hop does not dither]\n");
   pl_gpu gpu = context.gpu();
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 203.0f);
   EYEQ::FrameRenderer::Config cfg;
   cfg.mode = EYEQ::DisplayMode::Fill;
   cfg.enable_osd = false;
   cfg.pixel_density = 1.0f;
-  cfg.present_dither = true;
   EYEQ::FrameRenderer renderer(context, cfg);
   renderer.SetMappingTarget(mt, EYEQ::WorkPrecision::F16);
-  // A near-flat horizontal gradient: a smooth 8-bit ramp is exactly where
-  // quantization banding shows up.
-  auto source = MakeFrame(stream, 256, 32, [](int x, int) {
-    const float v = static_cast<float>(x + 1) / 257.0f;
-    return Color{v, v, v};
-  });
+  // A flat value between two 8-bit codes: a dithered hop would spread it over
+  // both codes, an undithered one keeps every pixel identical.
+  auto source = MakeFrame(stream, 64, 32, [](int, int) { return Color{0.5013f, 0.5013f, 0.5013f}; });
   renderer.SetMainSource(0);
   renderer.FeedFrames({{0, source}});
   EYEQ::DisplayState state = MakeState({0}, 0);
 
-  auto target = CreateTarget8(gpu, 256, 32, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_SRGB);
-  auto max_run = [&]() {
-    renderer.Render(target.frame, state);
-    const std::vector<uint8_t> px = DownloadTexture8(gpu, target.tex);
-    int best = 1;
-    int run = 1;
-    for (int x = 1; x < 256; ++x) {
-      const std::size_t i = (static_cast<std::size_t>(16) * 256 + x) * 4;
-      if (px[i] == px[i - 4]) {
-        ++run;
-        best = std::max(best, run);
-      } else {
-        run = 1;
-      }
-    }
-    return best;
-  };
-  renderer.SetPresentDitherEnabled(false);
-  const int run_off = max_run();
-  renderer.SetPresentDitherEnabled(true);
-  const int run_on = max_run();
-  Check(run_off >= 2, "the undithered 8-bit hop shows flat bands (control)");
-  Check(run_on < run_off, "dithering breaks up the 8-bit banding of a smooth gradient");
+  auto target = CreateTarget8(gpu, 64, 32, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_SRGB);
+  renderer.Render(target.frame, state);
+  const std::vector<uint8_t> px = DownloadTexture8(gpu, target.tex);
+  bool flat = true;
+  for (std::size_t i = 4; i < px.size(); i += 4) {
+    flat = flat && px[i] == px[0] && px[i + 1] == px[1] && px[i + 2] == px[2];
+  }
+  Check(flat, "a flat source stays flat through the 8-bit sRGB hop (no dither)");
   pl_tex_destroy(gpu, &target.tex);
 }
 
@@ -849,7 +828,7 @@ int main() {
 
     TestSceneCacheAndIdentity(context, owner.stream);
     TestFixedMappingTargetAndResize(context, owner.stream);
-    TestPresentDither(context, owner.stream);
+    TestPresentNoDither(context, owner.stream);
     TestIccModeIsolation(context, owner.stream);
     TestMigratedBaselineCompatibility(context, owner.stream);
     TestPrecisionReconfigure(context, owner.stream);

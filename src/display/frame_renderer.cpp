@@ -131,7 +131,6 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   }
   display_render_->SetMappingTarget(mapping_target_, work_precision_);
 
-  display_render_->SetPresentDitherEnabled(config.present_dither);
   encoder_ = std::make_unique<OutputEncoder>(context.log(), gpu);
 }
 

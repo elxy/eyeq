@@ -447,7 +447,6 @@ int main() {
     EYEQ::FrameRenderer::Config base;
     base.pixel_density = 1.0f;
     base.enable_osd = false;
-    base.present_dither = false;
 
     std::vector<PresentCase> cases;
 
@@ -473,7 +472,6 @@ int main() {
       c.ids = {0};
       c.primaries = PL_COLOR_PRIM_BT_2020;
       c.transfer = PL_COLOR_TRC_PQ;
-      c.config.present_dither = true;
       cases.push_back(c);
     }
     // Fill, sRGB target: the color-managed FillRender::PresentTo path.
