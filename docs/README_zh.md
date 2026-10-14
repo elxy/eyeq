@@ -5,10 +5,9 @@
 相比于[video-compare](https://github.com/pixop/video-compare)，主要增加了：
 
 1. 支持高位深、HDR10、Dolby Vision (Profile 5/8) 与HDR Vivid
-2. 支持ICC色彩管理，macOS下自动检测系统显示器ICC配置
-3. 支持1-10个视频同时对比，随时切换参考视频，便于评估保真度
-4. 三种显示模式：Fill(切换)、Slide(左右滑动)、Grid(网格)
-5. 支持通过Blackmagic Design的DeckLink设备接入监视器
+2. 支持1-10个视频同时对比，随时切换参考视频，便于评估保真度
+3. 三种显示模式：Fill(切换)、Slide(左右滑动)、Grid(网格)
+4. 支持通过Blackmagic Design的DeckLink设备接入监视器
 
 ## 安装
 
@@ -157,21 +156,6 @@ eyeq --hdrvivid-render --target-display-nits 1000 <test_0> <test_1>
 
 需要映射而没有指定映射目标时，EyeQ直接报错，并提示应该加什么。映射规则、macOS参考模式与非参考模式、动态元数据和多视频对比的说明，见[HDR显示与亮度映射说明](./HDR_DISPLAY_zh.md)。
 
-### ICC色彩管理
-
-通过`--icc-profile`选项启用ICC色彩管理：
-
-```sh
-# macOS自动检测系统显示器ICC配置
-eyeq --icc-profile auto <test_0> <test_1>
-
-# 使用自定义ICC文件
-eyeq --icc-profile /path/to/display.icc <test_0> <test_1>
-
-# 为特定视频指定ICC
-eyeq --icc-profile 0:display.icc <test_0> <test_1>
-```
-
 ### 操作方法
 
 启动后，按键操作如下：
@@ -233,7 +217,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--default-mastering-nits <nits>`：给缺少母版峰值的HDR源补上峰值，单位nits。已有峰值的源不受影响
 - `--hdrvivid-render`：HDR Vivid源按Vivid曲线映射，需要`--target-display-nits`
 - `--high-dpi {auto,yes,no}`：High-DPI模式，默认`auto`自动检测
-- `--scale-method <method>`：画面放大方法，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`
+- `--scale-method <method>`：画面缩放方法，放大和缩小都使用，包括`nearest`、`bilinear`、`bicubic`、`lanczos`、`ewa_lanczos`、`ewa_lanczossharp`、`mitchell`、`catmull_rom`、`spline36`、`spline64`，默认为`nearest`。缩放在视频自身的编码域里进行（不在线性光下）；`nearest`缩小时也取最近的源像素
 - `--plane-scale-method <method>`：色度插值方法，默认为`lanczos`
 - `--seek-to <secs>`：播放起始时间，单位为秒
 - `--seek-to-frame <N>`：从第N帧开始播放（从0开始计数）
@@ -241,11 +225,10 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
 - `--save-format <format>`：帧保存格式，默认为`png`
 - `--save-render-format <format>`：渲染帧保存格式，默认为`dpx`
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`：硬件解码器，默认`auto`
-- `--icc-profile <profile>`：ICC色彩管理。`auto`使用系统配置(仅macOS)，也可指定ICC文件路径，或`N:path`为特定视频指定
 - `--loglevel <level>`：日志级别，包括`debug`、`info`、`warning`、`error`、`critical`、`off`，默认为`info`
 - `--debug`：等同于`--loglevel debug`
 - `--monitor-status`：打印只读的DeckLink设备/mode目录（设备、能力、输出连接，以及每种连接/像素格式下的原生mode）后退出；不会开启任何输出
-- `--monitor-device <auto|selector>`：在DeckLink设备上开启监看。`auto`选取支持播放的设备，跳过被占用的（若全部失败则报告每个候选的原因）；否则选择器必须显式：`index:<n>`或`id:<persistent-id>`。开启监看会禁用所有应用侧ICC（global、`auto`与`N:path`）；macOS系统自身的色彩管理不受影响。需要`--target-display-nits`：数值为监视器峰值，`sdr`用于SDR监视器
+- `--monitor-device <auto|selector>`：在DeckLink设备上开启监看。`auto`选取支持播放的设备，跳过被占用的（若全部失败则报告每个候选的原因）；否则选择器必须显式：`index:<n>`或`id:<persistent-id>`。需要`--target-display-nits`：数值为监视器峰值，`sdr`用于SDR监视器
 - `--monitor-mode <auto|WxH@N|WxH@N/D>`：监看mode。`auto`（默认）选取与主视频最接近的原生mode（优先精确帧率，其次取不低于源的最低帧率；同一帧率下取覆盖源的最小mode）。显式值为精确整数数据，例如`3840x2160@50`或`3840x2160@30000/1001`；设备原生不支持的mode会被拒绝
 - `--monitor-connection {auto,sdi,hdmi}`：输出连接。`auto`（默认）跟随设备已激活的输出，设备报告SDI时优先SDI；不探测实际接线，若设备同时报告两者请显式指定
 - `--monitor-pixel-format {v210,r210}`：输出像素格式（默认`v210`）
@@ -264,7 +247,7 @@ eyeq --icc-profile 0:display.icc <test_0> <test_1>
    - 对于BT.709，两者同样由macOS把颜色转换到显示器，颜色一致；差别在传输函数：QuickTime按照EOTF ≈ 1.961 gamma将R'G'B'解码为RGB，而EyeQ按照BT.1886 (≈ 2.4 gamma)解码（实测分别约为1.95和2.38），所以QuickTime的暗部和中间调更亮。
       - QuickTime也可以支持BT.1886，需要修改mov文件的nclc标签，设置为1-2-1，详见[Quicktime Color Management: why so many ISSUES?!](https://www.youtube.com/watch?v=1QlnhlO6Gu8)
 
-   其他可能的原因包括：画面缩放算法（视频分辨率与窗口像素不一致时）、去块效应、去振铃、位深抖动，部分播放器甚至会做色彩增强。EyeQ相较于[libplacebo的默认渲染设置](https://code.videolan.org/videolan/libplacebo/-/blob/v7.351/src/renderer.c?ref_type=heads#L201)，去掉了位深抖动，同时允许通过`--scale-method`和`--plane-scale-method`分别调整画面缩放和色度上采样算法。
+   其他可能的原因包括：画面缩放算法（视频分辨率与窗口像素不一致时）、去块效应、去振铃、位深抖动，部分播放器甚至会做色彩增强。EyeQ相较于[libplacebo的默认渲染设置](https://code.videolan.org/videolan/libplacebo/-/blob/v7.351/src/renderer.c?ref_type=heads#L201)，任何阶段都不做位深抖动，同时允许通过`--scale-method`和`--plane-scale-method`分别调整画面缩放和色度上采样算法。
 
 2. 为什么保存的png视频帧，在Preview和EyeQ中颜色不一致？
 

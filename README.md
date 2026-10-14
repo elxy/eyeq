@@ -7,10 +7,9 @@ A multi-video subjective quality comparison tool, focused on visual quality asse
 Compared to [video-compare](https://github.com/pixop/video-compare), EyeQ adds:
 
 1. High bit-depth, HDR10, Dolby Vision (Profile 5/8) and HDR Vivid support
-2. ICC color management with automatic system display ICC profile detection on macOS
-3. Simultaneous comparison of 1–10 videos with on-the-fly reference switching for fidelity evaluation
-4. Three display modes: Fill (switch), Slide (side-by-side swipe), and Grid
-5. Monitoring via a Blackmagic Design DeckLink device
+2. Simultaneous comparison of 1–10 videos with on-the-fly reference switching for fidelity evaluation
+3. Three display modes: Fill (switch), Slide (side-by-side swipe), and Grid
+4. Monitoring via a Blackmagic Design DeckLink device
 
 ## Installation
 
@@ -157,22 +156,7 @@ eyeq --filter setparams=color_primaries=bt2020:color_trc=smpte2084 --default-mas
 eyeq --hdrvivid-render --target-display-nits 1000 <test_0> <test_1>
 ```
 
-When a mapping is needed but no mapping target is given, EyeQ fails and tells you what to add. For the mapping rules, the macOS reference and non-reference modes, dynamic metadata and multi-video comparison, see [HDR display and luminance mapping](docs/HDR_DISPLAY_zh.md) (Chinese for now).
-
-### ICC Color Management
-
-Enable ICC color management with the `--icc-profile` option:
-
-```sh
-# macOS: automatically detect system display ICC profile
-eyeq --icc-profile auto <test_0> <test_1>
-
-# Use a custom ICC file
-eyeq --icc-profile /path/to/display.icc <test_0> <test_1>
-
-# Specify ICC for a specific video
-eyeq --icc-profile 0:display.icc <test_0> <test_1>
-```
+When a mapping is needed but no mapping target is given, EyeQ fails and tells you what to add. For the mapping rules, the macOS reference and non-reference modes, dynamic metadata and multi-video comparison, see [HDR display and luminance mapping](docs/HDR_DISPLAY.md).
 
 ### Controls
 
@@ -235,7 +219,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--default-mastering-nits <nits>`: Mastering peak in nits for HDR sources that have none. Sources that carry a peak are not affected
 - `--hdrvivid-render`: Map HDR Vivid sources with the Vivid curve. Requires `--target-display-nits`
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
-- `--scale-method <method>`: Picture upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
+- `--scale-method <method>`: Picture scaling method, for both up- and downscaling — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`). Scaling happens in the video's own encoding (not in linear light); `nearest` takes the nearest source pixel also when downscaling
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
 - `--seek-to <secs>`: Start playback at the specified time (in seconds)
 - `--seek-to-frame <N>`: Start playback from the Nth frame (0-based)
@@ -243,11 +227,10 @@ After launching, the following keyboard and mouse controls are available:
 - `--save-format <format>`: Frame save format (default `png`)
 - `--save-render-format <format>`: Rendered-frame save format (default `dpx`)
 - `--hardware-decoder {none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}`: Hardware decoder (default `auto`)
-- `--icc-profile <profile>`: ICC color management — `auto` uses the system profile (macOS only); a file path specifies a custom ICC profile; `N:path` specifies a profile for a specific video
 - `--loglevel <level>`: Log level — `debug`, `info`, `warning`, `error`, `critical`, `off` (default `info`)
 - `--debug`: Equivalent to `--loglevel debug`
 - `--monitor-status`: Print the read-only DeckLink device/mode catalog (devices, capabilities, output connections, and the native modes per connection/pixel format) and exit. It enables nothing
-- `--monitor-device <auto|selector>`: Enable monitoring on a DeckLink device. `auto` picks a playback-capable device, skipping any that is busy (if every candidate fails, the reason for each is reported); otherwise the selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`); the macOS system color management itself is untouched. Requires `--target-display-nits`: a value in nits is the monitor peak, `sdr` is for a SDR monitor
+- `--monitor-device <auto|selector>`: Enable monitoring on a DeckLink device. `auto` picks a playback-capable device, skipping any that is busy (if every candidate fails, the reason for each is reported); otherwise the selector is explicit: `index:<n>` or `id:<persistent-id>`. Requires `--target-display-nits`: a value in nits is the monitor peak, `sdr` is for a SDR monitor
 - `--monitor-mode <auto|WxH@N|WxH@N/D>`: Monitor mode. `auto` (default) picks the native mode closest to the main video (exact rate first, then the lowest rate not below the source; within that rate the smallest mode covering the source). An explicit value is exact integer data, e.g. `3840x2160@50` or `3840x2160@30000/1001`, and a mode the device does not natively support is rejected
 - `--monitor-connection {auto,sdi,hdmi}`: Output connection. `auto` (default) follows the device's already active output, preferring SDI when the device reports it; the actual wiring is not probed, so use an explicit value if the device reports both
 - `--monitor-pixel-format {v210,r210}`: Output pixel format (default `v210`)
@@ -262,11 +245,11 @@ After launching, the following keyboard and mouse controls are available:
 1. **Why does a video look different in QuickTime and EyeQ?**
 
    The reason depends on the video type:
-   - For HDR10, by default EyeQ, like QuickTime, leaves both the luminance mapping and the color conversion to the display to macOS; as measured, the pixels the two send to the screen differ by less than 1%. The remaining small difference presumably comes from different decoding implementations, e.g. chroma upsampling (EyeQ uses `lanczos` by default, adjustable with `--plane-scale-method`); this is not confirmed. With `--target-display-nits`, EyeQ maps first, and a video mastered above the target looks different from QuickTime. See [HDR display and luminance mapping](docs/HDR_DISPLAY_zh.md) (Chinese for now).
+   - For HDR10, by default EyeQ, like QuickTime, leaves both the luminance mapping and the color conversion to the display to macOS; as measured, the pixels the two send to the screen differ by less than 1%. The remaining small difference presumably comes from different decoding implementations, e.g. chroma upsampling (EyeQ uses `lanczos` by default, adjustable with `--plane-scale-method`); this is not confirmed. With `--target-display-nits`, EyeQ maps first, and a video mastered above the target looks different from QuickTime. See [HDR display and luminance mapping](docs/HDR_DISPLAY.md).
    - For BT.709, macOS also converts the colors to the display for both, so the colors match; the difference is the transfer function: QuickTime decodes R'G'B' to RGB using EOTF ≈ 1.961 gamma, while EyeQ uses BT.1886 (≈ 2.4 gamma) (measured about 1.95 and 2.38), so QuickTime's shadows and midtones are brighter.
      - QuickTime can also use BT.1886 if the MOV file's nclc tag is set to 1-2-1. See [Quicktime Color Management: why so many ISSUES?!](https://www.youtube.com/watch?v=1QlnhlO6Gu8)
 
-   Other possible causes include: the picture scaling algorithm (when the video resolution differs from the window's pixels), deblocking, deringing, bit-depth dithering, and some players even apply color enhancement. Compared to [libplacebo's default rendering settings](https://code.videolan.org/videolan/libplacebo/-/blob/v7.351/src/renderer.c?ref_type=heads#L201), EyeQ disables bit-depth dithering, and lets you adjust the picture scaling and the chroma upsampling algorithms separately with `--scale-method` and `--plane-scale-method`.
+   Other possible causes include: the picture scaling algorithm (when the video resolution differs from the window's pixels), deblocking, deringing, bit-depth dithering, and some players even apply color enhancement. Compared to [libplacebo's default rendering settings](https://code.videolan.org/videolan/libplacebo/-/blob/v7.351/src/renderer.c?ref_type=heads#L201), EyeQ does not dither at any stage, and lets you adjust the picture scaling and the chroma upsampling algorithms separately with `--scale-method` and `--plane-scale-method`.
 
 2. **Why does a saved PNG frame look different in Preview and EyeQ?**
 
@@ -296,7 +279,7 @@ After launching, the following keyboard and mouse controls are available:
      'render_0001.0.foo.mkv.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084'
    ```
 
-   Use the output peak the frame was saved with: the `--target-display-nits` value if one was given, otherwise the source's mastering peak. Use `color_trc=arib-std-b67` for HLG. For the reason, see section 6 of [HDR display and luminance mapping](docs/HDR_DISPLAY_zh.md).
+   Use the output peak the frame was saved with: the `--target-display-nits` value if one was given, otherwise the source's mastering peak. Use `color_trc=arib-std-b67` for HLG. For the reason, see section 6 of [HDR display and luminance mapping](docs/HDR_DISPLAY.md).
 
 ## License
 
