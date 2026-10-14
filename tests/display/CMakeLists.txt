@@ -17,6 +17,7 @@ set(_display_test_sources
   ${CMAKE_SOURCE_DIR}/src/display/render_util.cpp
   ${CMAKE_SOURCE_DIR}/src/display/mapping_target.cpp
   ${CMAKE_SOURCE_DIR}/src/display/output_encode.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/output_present.cpp
   ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_curve.cpp
   ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_meta.cpp
   ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_shader.cpp
@@ -63,13 +64,15 @@ target_link_libraries(present_target_gpu_test PRIVATE
 add_test(NAME present_target_gpu COMMAND present_target_gpu_test)
 set_tests_properties(present_target_gpu PROPERTIES TIMEOUT 600)
 
-# Display-linear contract and wire-encode tests. CPU oracles first, then the real
-# OutputEncoder on a headless Vulkan device. Only the context, the mapping target
-# and the encoder are compiled in: no window, no OSD, no DeckLink SDK.
+# Display-linear contract, output encode and output scaling tests. CPU oracles
+# first, then the real OutputEncoder/OutputPresenter on a headless Vulkan device.
+# Only the context, the mapping target and the output stage are compiled in: no
+# window, no OSD, no DeckLink SDK.
 set(_linear_test_sources
   ${CMAKE_SOURCE_DIR}/src/display/render_context.cpp
   ${CMAKE_SOURCE_DIR}/src/display/mapping_target.cpp
   ${CMAKE_SOURCE_DIR}/src/display/output_encode.cpp
+  ${CMAKE_SOURCE_DIR}/src/display/output_present.cpp
   ${CMAKE_SOURCE_DIR}/src/display/vulkan_exts.cpp
   ${CMAKE_SOURCE_DIR}/src/log.cpp
   ${CMAKE_SOURCE_DIR}/src/libav_impl.c)

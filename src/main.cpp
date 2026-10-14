@@ -1001,10 +1001,11 @@ int main(int argc, char **argv) {
   coordinator_config.monitoring = monitoring;
   coordinator_config.work_precision = WorkPrecision::F16;
   coordinator_config.hdrvivid = args.hdrvivid_render;
-  // The monitor encode is transfer-only, so a sdr709 monitor needs a BT.709
-  // mapping target; every other output maps into BT.2020.
+  // Initial value only: the renderer adopts the output primaries on the first
+  // feed (BT.709 for a SDR target, BT.2020 for a target in nits, the main
+  // video's without a target).
   coordinator_config.mapping_target.primaries =
-      monitoring && args.target_kind == TargetKind::Sdr ? PL_COLOR_PRIM_BT_709 : PL_COLOR_PRIM_BT_2020;
+      args.target_kind == TargetKind::Sdr ? PL_COLOR_PRIM_BT_709 : PL_COLOR_PRIM_BT_2020;
   const float reference_white = static_cast<float>(args.reference_white);
   // The reference white only affects a pipeline where SDR and HDR meet: as the
   // source SDR white when the main video is HDR (SetSdrWhiteOnHdr below) and as

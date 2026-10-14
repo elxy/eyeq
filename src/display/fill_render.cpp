@@ -24,19 +24,6 @@ FillRender::FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_p
   amp_dp_ = pl_dispatch_create(log, gpu_);
   osd_dp_ = pl_dispatch_create(log, gpu_);
 
-  present_color_map_ = pl_color_map_default_params;
-  present_color_map_.tone_mapping_function = &pl_tone_map_clip;
-  present_color_map_.gamut_mapping = &pl_gamut_map_clip;
-  present_params_ = *render_params_;
-  present_params_.color_map_params = &present_color_map_;
-  // No stage dithers: eyeq shows the source, so the presentation hop only
-  // quantizes to the output depth.
-  present_params_.dither_params = nullptr;
-  present_params_.peak_detect_params = nullptr;
-  // PresentTo clears the letterbox to black itself; libplacebo's border clear
-  // would paint it with the comparison background color instead.
-  present_params_.border = PL_CLEAR_SKIP;
-
   for (int i = 0; i < PL_MAX_PLANES; i++) {
     render_tex_[i] = nullptr;
     ref_tex_[i] = nullptr;
@@ -326,8 +313,8 @@ pl_tex FillRender::PrepareOsdStaging(pl_tex target) {
   // Same size and format as the presentation target, but sampleable so the OSD
   // blend can read the encoded result. The target is usually the swapchain
   // image, which libplacebo wraps without VK_IMAGE_USAGE_SAMPLED_BIT. It stays
-  // blittable like the swapchain image because PresentTo clears the letterbox
-  // with pl_tex_clear (SDR presentation hop).
+  // blittable like the swapchain image because the output stage clears the
+  // letterbox with pl_tex_clear.
   struct pl_tex_params staging_params = {
       .w = target->params.w,
       .h = target->params.h,
@@ -391,30 +378,5 @@ void FillRender::PlotOsdText(pl_tex target, pl_tex encoded, enum pl_color_transf
   struct pl_dispatch_params dp_params = {.shader = &shader, .target = target};
   if (!pl_dispatch_finish(osd_dp_, &dp_params)) {
     throw std::runtime_error("pl_dispatch_finish failed (OSD text blend).");
-  }
-}
-
-void FillRender::PresentTo(struct pl_frame &target, const struct pl_frame *src, const EncodeRect *preview) {
-  struct pl_frame dst = target;
-  struct pl_frame s = *src;
-  s.crop = {}; // always present the full canvas
-  if (preview != nullptr) {
-    // Letterboxed desktop preview: clear the target first because the area
-    // outside the destination crop is left untouched by pl_render_image.
-    float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    pl_tex_clear(gpu_, target.planes[0].texture, black);
-    const float tw = static_cast<float>(target.planes[0].texture->params.w);
-    const float th = static_cast<float>(target.planes[0].texture->params.h);
-    struct pl_rect2df crop{};
-    crop.x0 = preview->x * tw;
-    crop.y0 = preview->y * th;
-    crop.x1 = (preview->x + preview->w) * tw;
-    crop.y1 = (preview->y + preview->h) * th;
-    dst.crop = crop;
-  } else {
-    dst.crop = {};
-  }
-  if (!pl_render_image(renderer_, &s, &dst, &present_params_)) {
-    throw std::runtime_error("pl_render_image failed (present).");
   }
 }

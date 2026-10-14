@@ -101,6 +101,8 @@ public:
   void SetMappingTarget(const MappingTarget &target);
 
   WorkPrecision work_precision() const { return work_precision_; }
+  // --scale-method; every output scales the canvas with it.
+  ScaleMethod scale_method() const { return scale_method_; }
   /*
    * Functional precision reconfiguration. It applies immediately (the precision
    * never changes with load); the cached scene is invalidated so the next
@@ -138,6 +140,11 @@ public:
   // swapchain color space; throws std::runtime_error. Monitoring is exempt, the
   // desktop is only a preview there.
   void CheckOutput(const struct pl_color_space *output) const;
+  // The swapchain may not offer the requested primaries (e.g. no P3/BT.1886
+  // format) and picks the closest; the output stage is transfer-only, so the
+  // canvas adopts the actual window primaries. When monitoring, the canvas
+  // belongs to the monitor and a different window gamut throws.
+  void AdoptOutputPrimaries(const struct pl_color_space *output);
 
   // ---- diagnostics ---------------------------------------------------------
   const RenderedFrame &result() const { return result_; }
@@ -163,6 +170,7 @@ private:
   MappingTarget mapping_target_;
   WorkPrecision work_precision_ = WorkPrecision::F16;
   bool monitoring_ = false;
+  ScaleMethod scale_method_ = ScaleMethod::Bicubic;
 
   int canvas_w_ = 0;
   int canvas_h_ = 0;

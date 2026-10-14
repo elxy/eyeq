@@ -1,5 +1,6 @@
 #include "frame_renderer.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -17,36 +18,10 @@ extern "C" {
 #include "slide_render.hpp"
 #include "grid_render.hpp"
 #include "hdrvivid_meta.hpp"
+#include "output_present.hpp"
 #include "utils.hpp"
 
 using namespace EYEQ;
-
-static const struct pl_filter_config *get_filter_config(ScaleMethod method) {
-  switch (method) {
-  case ScaleMethod::Nearest:
-    return &pl_filter_nearest;
-  case ScaleMethod::Bilinear:
-    return &pl_filter_bilinear;
-  case ScaleMethod::Bicubic:
-    return &pl_filter_bicubic;
-  case ScaleMethod::Lanczos:
-    return &pl_filter_lanczos;
-  case ScaleMethod::EWALanczos:
-    return &pl_filter_ewa_lanczos;
-  case ScaleMethod::EWALanczosSharp:
-    return &pl_filter_ewa_lanczossharp;
-  case ScaleMethod::Mitchell:
-    return &pl_filter_mitchell;
-  case ScaleMethod::CatmullRom:
-    return &pl_filter_catmull_rom;
-  case ScaleMethod::Spline36:
-    return &pl_filter_spline36;
-  case ScaleMethod::Spline64:
-    return &pl_filter_spline64;
-  default:
-    return nullptr;
-  }
-}
 
 FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, ColorspaceHintFunc colorspace_hint)
     : context_(&context), mode_(config.mode), pixel_density_(config.pixel_density), target_kind_(config.target_kind),
@@ -72,8 +47,7 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   color_map_params_.gamut_mapping = &pl_gamut_map_clip;
   render_params_.color_map_params = &color_map_params_;
 
-  render_params_.upscaler = get_filter_config(config.scale_method);
-  render_params_.plane_upscaler = get_filter_config(config.plane_scale_method);
+  ConfigureScaling(render_params_, config.scale_method, config.plane_scale_method);
 
   // The HDR Vivid hook is selected per source inside the compositor, so Grid can
   // attach a different curve to each cell from one shared renderer.
@@ -132,7 +106,7 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   }
   display_render_->SetMappingTarget(mapping_target_, work_precision_);
 
-  encoder_ = std::make_unique<OutputEncoder>(context.log(), gpu);
+  presenter_ = std::make_unique<OutputPresenter>(context.log(), gpu, config.scale_method);
 }
 
 FrameRenderer::~FrameRenderer() {
@@ -212,6 +186,56 @@ void FrameRenderer::ResolveDeclaredPeak() {
   if (expects_hdr_output_) {
     Logger->info("HDR output: mastering peak declared to the system is {:.0f} nits", declared_peak_nits_);
   }
+
+  ResolveOutputColor();
+}
+
+void FrameRenderer::ResolveOutputColor() {
+  // The output (window and monitor) color space. Every source is mapped into the
+  // output primaries once and the output stage only applies the transfer, so the
+  // mapping target primaries are the output primaries: configured with a target
+  // (BT.709 for sdr, BT.2020 for nits), the main video's without one.
+  const struct pl_frame *main = pl_frames_.at(main_id_);
+  const bool main_is_hdr = pl_color_space_is_hdr(&main->color);
+  struct pl_color_space out = main->color;
+  switch (target_kind_) {
+  case TargetKind::Sdr:
+    out = {};
+    out.primaries = mapping_target_.primaries;
+    out.transfer = main->color.transfer == PL_COLOR_TRC_SRGB ? PL_COLOR_TRC_SRGB : PL_COLOR_TRC_BT_1886;
+    break;
+  case TargetKind::HdrNits:
+    if (!main_is_hdr) {
+      out = pl_color_space_hdr10;
+    }
+    out.primaries = mapping_target_.primaries;
+    out.transfer = PL_COLOR_TRC_PQ;
+    out.hdr.max_luma = declared_peak_nits_;
+    break;
+  case TargetKind::None:
+    // Follows the main video; an untagged one is BT.709 / BT.1886 (libplacebo's
+    // inference).
+    if (out.primaries == PL_COLOR_PRIM_UNKNOWN) {
+      out.primaries = PL_COLOR_PRIM_BT_709;
+    }
+    if (out.transfer == PL_COLOR_TRC_UNKNOWN) {
+      out.transfer = PL_COLOR_TRC_BT_1886;
+    }
+    if (main_is_hdr) {
+      out.hdr.max_luma = declared_peak_nits_;
+    }
+    break;
+  }
+  // Throws for a transfer the output stage cannot produce.
+  OutputTransferFor(out.transfer);
+  output_color_ = out;
+  if (mapping_target_.primaries != out.primaries) {
+    mapping_target_.primaries = out.primaries;
+    ValidateMappingTarget(mapping_target_);
+    display_render_->SetMappingTarget(mapping_target_, work_precision_);
+  }
+  Logger->debug("output color space: primaries={}, transfer={}", pl_color_primaries_name(out.primaries),
+                pl_color_transfer_name(out.transfer));
 }
 
 void FrameRenderer::SetHdrVividEnabled(bool enabled) {
@@ -389,32 +413,12 @@ std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<A
     ResolveDeclaredPeak();
   }
   // The colorspace hint touches the swapchain, which lives in Window; it is
-  // invoked here while the caller still serializes Feed/Render. The mapping
-  // target decides the output; the main video only decides it without a target.
-  // With a HDR output the declared mastering peak describes this renderer's
-  // output; MaxCLL/MaxFALL are passed on from the main video unchanged.
+  // invoked here while the caller still serializes Feed/Render. It declares the
+  // resolved output color space; with a HDR output the declared mastering peak
+  // describes this renderer's output, and MaxCLL/MaxFALL of a HDR main video are
+  // passed on unchanged.
   if (colorspace_hint_) {
-    const bool main_is_hdr = pl_color_space_is_hdr(&main->color);
-    struct pl_color_space hint = main->color;
-    switch (target_kind_) {
-    case TargetKind::Sdr:
-      if (main_is_hdr) {
-        hint = pl_color_space_srgb;
-      }
-      break;
-    case TargetKind::HdrNits:
-      if (!main_is_hdr) {
-        hint = pl_color_space_hdr10;
-      }
-      hint.hdr.max_luma = declared_peak_nits_;
-      break;
-    case TargetKind::None:
-      if (main_is_hdr) {
-        hint.hdr.max_luma = declared_peak_nits_;
-      }
-      break;
-    }
-    colorspace_hint_(&hint);
+    colorspace_hint_(&output_color_);
   }
 
   // Override the SDR white level of SDR sources shown in a HDR output
@@ -601,15 +605,11 @@ void FrameRenderer::PresentToTarget(struct pl_frame &target, const DisplayState 
     // before the text overlay can be blended onto the real target.
     struct pl_frame staged = target;
     staged.planes[0].texture = display_render_->PrepareOsdStaging(target.planes[0].texture);
-    if (!EncodeToTarget(staged, linear, preview)) {
-      display_render_->PresentTo(staged, &linear, &preview);
-    }
+    EncodeToTarget(staged, linear, preview);
     display_render_->PlotOsdText(target.planes[0].texture, staged.planes[0].texture, target.color.transfer);
     return;
   }
-  if (!EncodeToTarget(target, linear, preview)) {
-    display_render_->PresentTo(target, &linear, &preview);
-  }
+  EncodeToTarget(target, linear, preview);
 }
 
 void FrameRenderer::ValidateLinearResultFinite() {
@@ -626,29 +626,26 @@ void FrameRenderer::ValidateLinearResultFinite() {
   ValidateLinearTextureFinite(context_->gpu(), tex);
 }
 
-bool FrameRenderer::EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear, const EncodeRect &preview) {
-  if (!encoder_ || !target.planes[0].texture || !linear.planes[0].texture) {
-    return false;
+void FrameRenderer::EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear, const EncodeRect &preview) {
+  if (!target.planes[0].texture || !linear.planes[0].texture) {
+    throw std::invalid_argument("FrameRenderer::EncodeToTarget: null texture");
   }
-  // The encoder is transfer-only: it may only run when the target already uses
-  // the mapping target's primaries (BT.2020/PQ). A BT.709 SDR target needs a gamut
-  // conversion, which the color-managed presentation hop performs.
-  if (target.color.primaries != mapping_target_.primaries) {
-    return false;
+  // The output stage only applies the transfer: the canvas must already be in
+  // the target primaries (the coordinator adopts the actual output primaries).
+  if (target.color.primaries != linear.color.primaries) {
+    throw std::logic_error(fmt::format("output primaries '{}' differ from the canvas primaries '{}'",
+                                       pl_color_primaries_name(target.color.primaries),
+                                       pl_color_primaries_name(linear.color.primaries)));
   }
   EncodeParams params;
-  switch (target.color.transfer) {
-  case PL_COLOR_TRC_PQ:
-    params.transfer = OutputTransfer::PQ;
-    break;
-  case PL_COLOR_TRC_BT_1886:
-    params.transfer = OutputTransfer::SDR_BT1886;
-    break;
-  default:
-    return false;
-  }
+  params.transfer = OutputTransferFor(target.color.transfer);
   params.sdr_white_nits = mapping_target_.sdr_white_nits;
   params.black_nits = mapping_target_.black_nits;
-  encoder_->Encode(target.planes[0].texture, linear.planes[0].texture, params, preview);
-  return true;
+  params.primaries = target.color.primaries;
+  if (params.transfer == OutputTransfer::HLG) {
+    // HLG is display-referred: encode for the declared peak with a known black.
+    params.peak_nits = declared_peak_nits_ > 0.0f ? declared_peak_nits_ : mapping_target_.peak_nits;
+    params.black_nits = std::max(params.black_nits, PL_COLOR_HDR_BLACK);
+  }
+  presenter_->Present(target, linear.planes[0].texture, params, preview);
 }

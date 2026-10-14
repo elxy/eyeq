@@ -7,10 +7,11 @@
 namespace EYEQ {
 
 /*
- * Transfer function of the wire encoding. This is a property of the connection,
- * not of the mapping target: PQ for an HDR link, BT.1886 for an SDR link.
+ * Transfer function of the output encoding (window or monitor). PQ and BT.1886
+ * are the monitor wires; HLG and sRGB are window outputs that follow the main
+ * video when there is no mapping target.
  */
-enum class OutputTransfer { PQ, SDR_BT1886 };
+enum class OutputTransfer { PQ, SDR_BT1886, SRGB, HLG };
 
 const char *ToString(OutputTransfer transfer);
 
@@ -20,13 +21,18 @@ const char *ToString(OutputTransfer transfer);
  * The display-linear input is in PL_HDR_NORM units (1.0 == 203 cd/m^2). PQ is
  * encoded absolutely (nits = norm * 203, then the ST2084 OETF); the SDR BT.1886
  * inverse uses the defined black and the independent SDR white level, so it is
- * *not* a bare pow(x, 1/2.4).
+ * *not* a bare pow(x, 1/2.4). sRGB is relative to the SDR white with a true
+ * black. HLG is libplacebo's display-referred HLG: the inverse OOTF for the
+ * display peak `peak_nits` and black `black_nits`, then the HLG OETF; its luma
+ * weights follow `primaries`.
  */
 struct EncodeParams {
   OutputTransfer transfer = OutputTransfer::SDR_BT1886;
   float sdr_white_nits = 203.0f;
   float black_nits = 0.0f;
-  float gamma = 2.4f; // BT.1886 display gamma
+  float gamma = 2.4f;                                        // BT.1886 display gamma
+  float peak_nits = 1000.0f;                                 // HLG display peak
+  enum pl_color_primaries primaries = PL_COLOR_PRIM_BT_2020; // HLG luma weights
 };
 
 // ---------------------------------------------------------------------------
@@ -46,7 +52,17 @@ float Bt1886EncodeNits(float nits, float black_nits, float white_nits, float gam
 // Inverse of Bt1886EncodeNits.
 float Bt1886DecodeNits(float code, float black_nits, float white_nits, float gamma);
 
-// Applies the wire transfer to a display-linear PL_HDR_NORM value and clamps to
+// IEC 61966-2-1 sRGB OETF of a value relative to white (1.0 == white).
+float SrgbEncode(float relative);
+// Inverse of SrgbEncode.
+float SrgbDecode(float code);
+
+// HLG encode of a display-linear RGB triple in nits (in place): inverse OOTF for
+// a display with the given peak/black, then the HLG OETF, as libplacebo's
+// pl_color_delinearize. `luma` are the Y weights of the output primaries.
+void HlgEncodeNits(float rgb[3], float peak_nits, float black_nits, const float luma[3]);
+
+// Applies the output transfer to a neutral display-linear PL_HDR_NORM value and clamps to
 // the full-range [0, 1] code interval (the single range compression of the
 // pipeline; it is never applied anywhere else). Throws std::invalid_argument on
 // a non-finite input: NaN/Inf is a hard error, never clamped away (V2.1 3.2).
@@ -79,12 +95,12 @@ struct EncodeRect {
 /*
  * Explicit, independently testable display-linear -> wire-transfer encoder.
  *
- * It converts a full-range RGB PL_COLOR_TRC_LINEAR texture into the non-linear
- * full-range RGB texture the FramePacker consumes. It never tone maps, never
- * gamut maps and never touches source metadata: only the per-channel transfer
- * function and the final [0,1] clamp run, and the result is checked against the
- * CPU oracles above. The destination may differ in size from the source: the
- * linear image is sampled (bilinear) into @p rect.
+ * It converts a full-range RGB PL_COLOR_TRC_LINEAR texture into non-linear
+ * full-range RGB codes (window or FramePacker input). It never tone maps, never
+ * gamut maps and never touches source metadata: only the transfer function and
+ * the final [0,1] clamp run, and the result is checked against the CPU oracles
+ * above. Scaling is not its job (see OutputPresenter): callers encode 1:1; the
+ * rectangle form only remains for the tests.
  */
 class OutputEncoder {
 public:

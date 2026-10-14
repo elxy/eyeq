@@ -8,6 +8,7 @@
 
 #include <spdlog/fmt/fmt.h>
 
+#include "display/canvas_geometry.hpp"
 #include "log.hpp"
 
 using namespace EYEQ;
@@ -89,10 +90,10 @@ MonitorOutput::MonitorOutput(RenderContext &context, DisplayCoordinator &coordin
   // by sink_ because construction failed.
   try {
     pl_fmt format = pl_find_named_fmt(gpu, "rgba32f");
-    const auto needed =
-        static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+    const auto needed = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE |
+                                                      PL_FMT_CAP_HOST_READABLE | PL_FMT_CAP_BLITTABLE);
     if (format == nullptr || (format->caps & needed) != needed) {
-      throw std::runtime_error("MonitorOutput requires a sampleable/renderable/host-readable rgba32f format");
+      throw std::runtime_error("MonitorOutput requires a sampleable/renderable/host-readable/blittable rgba32f format");
     }
     struct pl_tex_params tex_params = {
         .w = output.layout.width,
@@ -100,6 +101,8 @@ MonitorOutput::MonitorOutput(RenderContext &context, DisplayCoordinator &coordin
         .format = format,
         .sampleable = true,
         .renderable = true,
+        // The output stage clears the letterbox when the canvas is scaled.
+        .blit_dst = true,
         .host_readable = true,
     };
     target_.tex = pl_tex_create(gpu, &tex_params);
@@ -142,11 +145,11 @@ MonitorOutput::MonitorOutput(RenderContext &context, DisplayCoordinator &coordin
     // override the source mastering peak.
     target_.frame.color.hdr.max_luma = target_peak;
 
-    encoder_ = std::make_unique<OutputEncoder>(context.log(), gpu);
+    presenter_ = std::make_unique<OutputPresenter>(context.log(), gpu, coordinator.scale_method());
     packer_ = std::make_unique<FramePacker>(gpu, ToPackConfig(output_));
   } catch (...) {
     // The destructor will not run for a throwing constructor; release the raw GPU
-    // resource acquired so far. encoder_/packer_ are cleaned up by their unique_ptr.
+    // resource acquired so far. presenter_/packer_ are cleaned up by their unique_ptr.
     if (target_.tex != nullptr) {
       pl_tex_destroy(gpu, &target_.tex);
     }
@@ -168,7 +171,7 @@ MonitorOutput::~MonitorOutput() {
   if (target_.tex != nullptr && context_ != nullptr) {
     pl_tex_destroy(context_->gpu(), &target_.tex);
   }
-  encoder_.reset();
+  presenter_.reset();
 }
 
 void MonitorOutput::SetResult(Outcome outcome, const char *stage, std::string reason) {
@@ -183,11 +186,6 @@ bool MonitorOutput::ValidateFrame(const Request &request, std::string *error) co
   const RenderedFrame &frame = request.frame;
   if (!frame.IsValid()) {
     *error = "the submitted common result is not valid (null texture or zero size)";
-    return false;
-  }
-  if (frame.width != output_.layout.width || frame.height != output_.layout.height) {
-    *error = fmt::format("common result size {}x{} does not match the resolved layout {}x{}", frame.width, frame.height,
-                         output_.layout.width, output_.layout.height);
     return false;
   }
   // The encode step is transfer-only, so the common result's primaries must
@@ -357,15 +355,22 @@ bool MonitorOutput::EncodeAndPack(const RenderedFrame &frame, const SubmissionIn
   *slot = nullptr;
 
   try {
-    // Encode the common display-linear result into the wire transfer. Transfer
-    // only: the primaries already match (validated by the caller), no tone/gamut
-    // mapping runs here.
+    // Encode the common display-linear result into the wire transfer and scale
+    // it into the mode, letterboxed like the desktop window. Transfer only: the
+    // primaries already match (validated by the caller), no tone/gamut mapping
+    // runs here.
     EncodeParams params;
     params.transfer =
         output_.color.encoding.transfer == ColorTransfer::PQ ? OutputTransfer::PQ : OutputTransfer::SDR_BT1886;
     params.sdr_white_nits = frame.sdr_white_nits;
     params.black_nits = frame.black_nits;
-    encoder_->Encode(target_.tex, frame.texture, params);
+    const CanvasLayout layout =
+        ComputeCanvasLayout(frame.width, frame.height, output_.layout.width, output_.layout.height, 1.0f);
+    const RectF rect = NormalizedPreview(layout);
+    if (rect.IsEmpty()) {
+      throw std::logic_error("degenerate canvas or monitor mode");
+    }
+    presenter_->Present(target_.frame, frame.texture, params, EncodeRect{rect.x, rect.y, rect.w, rect.h});
   } catch (const std::exception &e) {
     *stage = "render";
     *reason = e.what();

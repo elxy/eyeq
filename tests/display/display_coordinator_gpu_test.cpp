@@ -339,11 +339,10 @@ void TestFixedMappingTargetAndResize(EYEQ::RenderContext &context, AVStream *str
   Check(result.color.primaries == PL_COLOR_PRIM_BT_2020, "the common result uses the fixed mapping target primaries");
   Check(result.color.transfer == PL_COLOR_TRC_LINEAR, "the common result is display-linear");
 
-  // Present to two differently-sized targets with a target primaries that
-  // differs from the mapping target. The common result (and its primaries) must
-  // not drift with the presentation target.
-  auto small = CreateTarget(context.gpu(), 64, 48, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
-  auto large = CreateTarget(context.gpu(), 200, 120, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
+  // Present to two differently-sized targets. The common result (and its
+  // primaries) must not drift with the presentation target size.
+  auto small = CreateTarget(context.gpu(), 64, 48, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+  auto large = CreateTarget(context.gpu(), 200, 120, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
   const uint64_t renders_before = coordinator->scene_render_count();
   coordinator->PresentTo(small.frame, state);
   coordinator->PresentTo(large.frame, state);

@@ -31,7 +31,7 @@ uint64_t Quantize(float value) {
 DisplayCoordinator::DisplayCoordinator(RenderContext &context, const Config &config, ColorspaceHintFunc presenter_hint)
     : ui_thread_id_(std::this_thread::get_id()), presenter_hint_(std::move(presenter_hint)),
       mapping_target_(config.mapping_target), work_precision_(config.work_precision), monitoring_(config.monitoring),
-      canvas_w_(config.canvas_w), canvas_h_(config.canvas_h),
+      scale_method_(config.scale_method), canvas_w_(config.canvas_w), canvas_h_(config.canvas_h),
       validate_difference_result_(config.validate_difference_result) {
   ValidateMappingTarget(mapping_target_);
 
@@ -135,9 +135,11 @@ CanvasLayout DisplayCoordinator::canvas_layout(int window_w, int window_h) const
 std::vector<int> DisplayCoordinator::FeedFrames(const std::map<int, std::shared_ptr<AVFrame>> &frames) {
   AssertUiThread();
   std::vector<int> failed = renderer_->FeedFrames(frames);
-  // Without a mapping target the renderer resolves it on the first feed; keep this
-  // layer's copy (scene key, result metadata, precision changes) in sync.
-  if (renderer_->mapping_target().peak_nits != mapping_target_.peak_nits) {
+  // The renderer resolves the output primaries (and, without a mapping target,
+  // the peak) on the first feed; keep this layer's copy (scene key, result
+  // metadata, precision changes) in sync.
+  if (renderer_->mapping_target().peak_nits != mapping_target_.peak_nits ||
+      renderer_->mapping_target().primaries != mapping_target_.primaries) {
     mapping_target_ = renderer_->mapping_target();
     InvalidateScene();
   }
@@ -251,6 +253,24 @@ void DisplayCoordinator::PresentLocked(struct pl_frame &target, const DisplaySta
   const RectF np = NormalizedPreview(layout);
   ++present_count_;
   renderer_->PresentToTarget(target, state, EncodeRect{np.x, np.y, np.w, np.h});
+}
+
+void DisplayCoordinator::AdoptOutputPrimaries(const struct pl_color_space *output) {
+  AssertUiThread();
+  if (output->primaries == mapping_target_.primaries) {
+    return;
+  }
+  if (monitoring_) {
+    throw std::runtime_error(fmt::format("The window output uses {} primaries but the monitor needs {}: the window "
+                                         "cannot preview the monitor on this display",
+                                         pl_color_primaries_name(output->primaries),
+                                         pl_color_primaries_name(mapping_target_.primaries)));
+  }
+  Logger->info("The window output uses {} primaries instead of {}; mapping into them",
+               pl_color_primaries_name(output->primaries), pl_color_primaries_name(mapping_target_.primaries));
+  mapping_target_.primaries = output->primaries;
+  renderer_->SetMappingTarget(mapping_target_, work_precision_);
+  InvalidateScene();
 }
 
 void DisplayCoordinator::CheckOutput(const struct pl_color_space *output) const {

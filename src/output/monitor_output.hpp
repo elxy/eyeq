@@ -10,7 +10,7 @@
 #include <libplacebo/renderer.h>
 
 #include "display/display_coordinator.hpp"
-#include "display/output_encode.hpp"
+#include "display/output_present.hpp"
 #include "display/render.hpp"
 #include "display/render_context.hpp"
 #include "display/rendered_frame.hpp"
@@ -119,8 +119,9 @@ public:
 
   struct Request {
     // The already-composed common result to encode and display. It must be a
-    // valid display-linear frame whose size matches the resolved layout and whose
-    // primaries match the output (the coordinator's mapping target is expected to
+    // valid display-linear frame whose primaries match the output; a size that
+    // differs from the resolved layout is scaled and letterboxed like the
+    // desktop window (the coordinator's mapping target is expected to
     // be the output target). The frame is borrowed from the coordinator and only
     // has to stay valid until Submit() returns: the encode is dispatched inside
     // Submit() (invariant 1), after which this object reads only its own target.
@@ -313,7 +314,7 @@ private:
   ResolvedOutput output_;
 
   Target target_;
-  std::unique_ptr<OutputEncoder> encoder_;
+  std::unique_ptr<OutputPresenter> presenter_;
   std::unique_ptr<FramePacker> packer_;
 
   bool closed_ = false;

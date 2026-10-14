@@ -1195,6 +1195,45 @@ void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
   }
 }
 
+// The canvas size need not match the mode: the monitor scales and letterboxes the
+// canvas like the desktop window, so it shows what the window shows.
+void TestScaledCanvas(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[canvas scaled into the monitor mode]\n");
+  const EYEQ::ResolvedOutput resolved = BuildResolved(96, 64, EYEQ::PixelFormat::V210, false, 203.0, 0);
+  SinkPair sinks;
+  {
+    // A 48x16 canvas (3:1) into a 96x64 mode: full width, 32 rows, centered.
+    EYEQ::DisplayCoordinator::Config cfg;
+    cfg.mode = EYEQ::DisplayMode::Fill;
+    cfg.scale_method = EYEQ::ScaleMethod::Nearest;
+    cfg.plane_scale_method = EYEQ::ScaleMethod::Bicubic;
+    cfg.pixel_density = 1.0f;
+    cfg.enable_osd = false;
+    cfg.mapping_target.primaries = PL_COLOR_PRIM_BT_709;
+    cfg.mapping_target.peak_nits = 203.0f;
+    cfg.mapping_target.sdr_white_nits = PL_COLOR_SDR_WHITE;
+    cfg.canvas_w = 48;
+    cfg.canvas_h = 16;
+    auto coordinator = std::make_unique<EYEQ::DisplayCoordinator>(context, cfg, nullptr);
+    MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
+    auto frame = MakeFrame(stream, 48, 16,
+                           [](int x, int) { return x < 24 ? Color{1.0f, 0.0f, 0.0f} : Color{0.0f, 0.0f, 1.0f}; });
+    auto request = MakeRequest(*coordinator, {{5, frame}}, MakeState({5}, 5), 5, 701, 7001);
+    Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted,
+          "a canvas that differs from the mode is accepted");
+    const auto step = Drive(monitor);
+    Check(step.outcome == MonitorOutput::Outcome::Displayed, "the scaled canvas is displayed");
+    const std::vector<float> rgb = DownloadTargetRgb(gpu, monitor);
+    Check(Close(AtRgb(rgb, 96, 48, 4), {0.0f, 0.0f, 0.0f}, 1e-4f), "the top letterbox bar is black");
+    Check(Close(AtRgb(rgb, 96, 48, 59), {0.0f, 0.0f, 0.0f}, 1e-4f), "the bottom letterbox bar is black");
+    Check(Close(AtRgb(rgb, 96, 20, 32), {1.0f, 0.0f, 0.0f}, 0.02f),
+          "the left half is red, got " + ColorString(AtRgb(rgb, 96, 20, 32)));
+    Check(Close(AtRgb(rgb, 96, 76, 32), {0.0f, 0.0f, 1.0f}, 0.02f), "the right half is blue");
+    CheckPackedAgainstOracle(sinks, monitor, gpu, resolved, 701);
+    Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "scaled canvas closed");
+  }
+}
+
 void TestInitFailureRollback(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[constructor rollback]\n");
   const int w = 64;
@@ -1232,6 +1271,7 @@ int main() {
 
     TestSdrR210(gpu, context, owner.stream);
     TestPqV210(gpu, context, owner.stream);
+    TestScaledCanvas(gpu, context, owner.stream);
     TestSlideAndAmplify(gpu, context, owner.stream);
     TestGrid(gpu, context, owner.stream);
     TestStillBusy(gpu, context, owner.stream);

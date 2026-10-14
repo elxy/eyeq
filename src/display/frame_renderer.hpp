@@ -21,6 +21,7 @@ extern "C" {
 #include "mapping_target.hpp"
 #include "osd.hpp"
 #include "output_encode.hpp"
+#include "output_present.hpp"
 #include "render.hpp"
 #include "render_context.hpp"
 #include "video_frame.hpp"
@@ -94,6 +95,8 @@ public:
   float declared_peak_nits() const { return declared_peak_nits_; }
   // True when the fed sources and the configured target ask for a HDR output.
   bool expects_hdr_output() const { return expects_hdr_output_; }
+  // The resolved output color space (valid after the first feed).
+  const struct pl_color_space &output_color() const { return output_color_; }
   const MappingTarget &mapping_target() const { return mapping_target_; }
 
   /*
@@ -187,10 +190,12 @@ private:
   void ResolveHdrVividParams();
   const struct pl_hook *HdrVividHookForVideo(int video_id);
 
-  // Explicit transfer encode into the presentation target. Returns false when
-  // the target transfer is not PQ/BT.1886, in which case the color-managed
-  // presentation hop is used instead.
-  bool EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear, const EncodeRect &preview);
+  // Encodes the canvas into the presentation target (transfer only) and scales
+  // it into @p preview through the shared output stage.
+  void EncodeToTarget(struct pl_frame &target, const struct pl_frame &linear, const EncodeRect &preview);
+  // Resolves the output color space (and the mapping target primaries) once,
+  // on the first feed, after the declared peak.
+  void ResolveOutputColor();
 
   // Compose the desktop text OSD overlay; @p preview is the normalized target
   // rectangle the canvas is presented into. Returns nullptr when OSD is off.
@@ -214,9 +219,10 @@ private:
   MappingTarget mapping_target_;
   WorkPrecision work_precision_ = WorkPrecision::F16;
 
-  // Explicit display-linear -> wire-transfer encoder used for the presentation
-  // target when its transfer is PQ or SDR BT.1886 (no tone/gamut mapping).
-  std::unique_ptr<OutputEncoder> encoder_;
+  // The output stage: transfer encode, then scaling into the preview rectangle.
+  std::unique_ptr<OutputPresenter> presenter_;
+  // The resolved output color space (the swapchain hint).
+  struct pl_color_space output_color_{};
 
   // NaN/Inf fail-fast switch and the validity of the last compose.
   bool validate_linear_result_ = false;

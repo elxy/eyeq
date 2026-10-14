@@ -70,18 +70,6 @@ public:
   WorkPrecision DisPrecision() const { return dis_precision_; }
   WorkPrecision RefPrecision() const { return ref_precision_; }
 
-  /*
-   * Final color-managed conversion of the display-linear result into the
-   * presentation/encode target (swapchain or offscreen save texture). Kept in
-   * the compositor so the pl_renderer that owns the color management stays
-   * encapsulated.
-   *
-   * @p preview, when non-null, is the normalized target rectangle the canvas is
-   * scaled into; the target is cleared to black outside it (desktop letterbox).
-   * Null means the canvas covers the whole target (1:1 or plain scaling).
-   */
-  void PresentTo(struct pl_frame &target, const struct pl_frame *src, const EncodeRect *preview = nullptr);
-
   // Diagnostics: how many times the source mapping ran for @p video_id since the
   // last ResetMappingCounts(), and how many of those attached an HDR Vivid hook.
   // Used to prove that each compared source is mapped exactly once per compose
@@ -113,11 +101,6 @@ protected:
 
   pl_renderer renderer_;
   struct pl_render_params *render_params_;
-  // Presentation hop parameters: a pure color/transfer conversion with no tone
-  // or gamut compression (clip), so an already-mapped display-linear result is
-  // not re-mapped on its way to the swapchain/save target.
-  struct pl_color_map_params present_color_map_;
-  struct pl_render_params present_params_;
   float pixel_density_;
   HdrVividQueryFunc hdrvivid_query_;
   bool clip_ = false;

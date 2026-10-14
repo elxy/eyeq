@@ -24,6 +24,7 @@
 
 #include "display/mapping_target.hpp"
 #include "display/output_encode.hpp"
+#include "display/output_present.hpp"
 #include "display/render_context.hpp"
 
 namespace {
@@ -283,6 +284,67 @@ void TestBt1886Oracle() {
   Check(round_trip, "BT.1886 encode/decode round trip is stable");
 }
 
+void TestSrgbHlgOracle() {
+  std::fprintf(stdout, "[sRGB / HLG oracle]\n");
+  // sRGB: relative to the SDR white, matches libplacebo for a 203-nit white.
+  bool srgb_lp = true;
+  {
+    struct pl_color_space csp = {};
+    csp.primaries = PL_COLOR_PRIM_BT_709;
+    csp.transfer = PL_COLOR_TRC_SRGB;
+    csp.hdr.min_luma = PL_COLOR_HDR_BLACK;
+    csp.hdr.max_luma = PL_COLOR_SDR_WHITE;
+    for (float norm : {0.0f, 0.001f, 0.01f, 0.18f, 0.5f, 1.0f}) {
+      float color[3] = {norm, norm, norm};
+      pl_color_delinearize(&csp, color);
+      if (!Close(EYEQ::SrgbEncode(norm), color[0], 2e-4f)) {
+        srgb_lp = false;
+      }
+    }
+  }
+  Check(srgb_lp, "the sRGB oracle matches libplacebo pl_color_delinearize");
+  bool srgb_rt = true;
+  for (float v : {0.0005f, 0.01f, 0.2f, 0.7f, 1.0f}) {
+    srgb_rt = srgb_rt && Close(EYEQ::SrgbDecode(EYEQ::SrgbEncode(v)), v, v * 1e-4f + 1e-6f);
+  }
+  Check(srgb_rt, "sRGB encode/decode round trip is stable");
+
+  // HLG: display-referred encode for a 1000-nit display, including a colored
+  // pixel (the OOTF couples the channels through the BT.2020 luma).
+  bool hlg_lp = true;
+  for (float peak : {1000.0f, 600.0f}) {
+    struct pl_color_space csp = {};
+    csp.primaries = PL_COLOR_PRIM_BT_2020;
+    csp.transfer = PL_COLOR_TRC_HLG;
+    csp.hdr.min_luma = PL_COLOR_HDR_BLACK;
+    csp.hdr.max_luma = peak;
+    const pl_matrix3x3 rgb2xyz = pl_get_rgb2xyz_matrix(pl_raw_primaries_get(PL_COLOR_PRIM_BT_2020));
+    const float luma[3] = {rgb2xyz.m[1][0], rgb2xyz.m[1][1], rgb2xyz.m[1][2]};
+    const float samples[][3] = {{0.01f, 0.01f, 0.01f}, {1.0f, 1.0f, 1.0f}, {2.0f, 0.5f, 0.1f}, {4.0f, 4.0f, 4.0f}};
+    for (const auto &rgb : samples) {
+      float color[3] = {rgb[0], rgb[1], rgb[2]};
+      pl_color_delinearize(&csp, color);
+      float nits[3] = {rgb[0] * 203.0f, rgb[1] * 203.0f, rgb[2] * 203.0f};
+      EYEQ::HlgEncodeNits(nits, peak, PL_COLOR_HDR_BLACK, luma);
+      for (int c = 0; c < 3; ++c) {
+        if (!Close(nits[c], color[c], 5e-4f)) {
+          hlg_lp = false;
+          std::fprintf(stdout, "  HLG mismatch peak %.0f: oracle %f libplacebo %f\n", peak, nits[c], color[c]);
+        }
+      }
+    }
+  }
+  Check(hlg_lp, "the HLG oracle matches libplacebo pl_color_delinearize (neutral and colored)");
+  EYEQ::EncodeParams hlg;
+  hlg.transfer = EYEQ::OutputTransfer::HLG;
+  hlg.black_nits = PL_COLOR_HDR_BLACK;
+  bool hlg_rt = true;
+  for (float norm : {0.01f, 0.2f, 1.0f, 3.0f, 4.9f}) {
+    hlg_rt = hlg_rt && Close(EYEQ::DecodeCodeToNorm(EYEQ::EncodeNormToCode(norm, hlg), hlg), norm, norm * 1e-3f);
+  }
+  Check(hlg_rt, "HLG encode/decode round trip is stable for neutral values");
+}
+
 void TestEncodeNormAndClamp() {
   std::fprintf(stdout, "[encode norm and clamp]\n");
   EYEQ::EncodeParams pq;
@@ -442,6 +504,42 @@ void TestGpuEncodeMatchesOracle(pl_log log, pl_gpu gpu) {
   std::fprintf(stdout, "  SDR max |gpu-oracle| = %s\n", Fmt(sdr_max_error).c_str());
   Check(sdr_max_error <= 5e-4f, "SDR GPU encode matches the oracle within 5e-4 (max=" + Fmt(sdr_max_error) + ")");
 
+  // sRGB and HLG through the same shader.
+  EYEQ::EncodeParams srgb;
+  srgb.transfer = EYEQ::OutputTransfer::SRGB;
+  std::vector<float> srgb_codes = RunEncoder(gpu, log, norms, false, srgb);
+  float srgb_max_error = 0.0f;
+  for (size_t i = 0; i < norms.size(); ++i) {
+    srgb_max_error = std::max(srgb_max_error, std::fabs(srgb_codes[i] - EYEQ::EncodeNormToCode(norms[i], srgb)));
+  }
+  Check(srgb_max_error <= 5e-4f, "sRGB GPU encode matches the oracle within 5e-4 (max=" + Fmt(srgb_max_error) + ")");
+  EYEQ::EncodeParams hlg;
+  hlg.transfer = EYEQ::OutputTransfer::HLG;
+  hlg.black_nits = PL_COLOR_HDR_BLACK;
+  std::vector<float> hlg_codes = RunEncoder(gpu, log, norms, false, hlg);
+  float hlg_max_error = 0.0f;
+  for (size_t i = 0; i < norms.size(); ++i) {
+    hlg_max_error = std::max(hlg_max_error, std::fabs(hlg_codes[i] - EYEQ::EncodeNormToCode(norms[i], hlg)));
+  }
+  Check(hlg_max_error <= 5e-4f, "HLG GPU encode matches the oracle within 5e-4 (max=" + Fmt(hlg_max_error) + ")");
+  {
+    // A colored HLG pixel: the shader must use the BT.2020 luma like the oracle.
+    GpuTexture src = CreateFloatTexture(gpu, 1, 1, false, false);
+    GpuTexture dst = CreateFloatTexture(gpu, 1, 1, false, true);
+    UploadTexture(gpu, src, [](int, int) -> std::array<float, 4> { return {2.0f, 0.5f, 0.1f, 1.0f}; });
+    EYEQ::OutputEncoder encoder(log, gpu);
+    encoder.Encode(dst.tex, src.tex, hlg);
+    std::vector<float> px = DownloadTexture(gpu, dst);
+    const pl_matrix3x3 rgb2xyz = pl_get_rgb2xyz_matrix(pl_raw_primaries_get(PL_COLOR_PRIM_BT_2020));
+    const float luma[3] = {rgb2xyz.m[1][0], rgb2xyz.m[1][1], rgb2xyz.m[1][2]};
+    float nits[3] = {2.0f * 203.0f, 0.5f * 203.0f, 0.1f * 203.0f};
+    EYEQ::HlgEncodeNits(nits, 1000.0f, PL_COLOR_HDR_BLACK, luma);
+    Check(Close(px[0], nits[0], 5e-4f) && Close(px[1], nits[1], 5e-4f) && Close(px[2], nits[2], 5e-4f),
+          "HLG GPU encode of a colored pixel matches the oracle");
+    DestroyTexture(gpu, dst);
+    DestroyTexture(gpu, src);
+  }
+
   // Out-of-range linear values are clamped exactly once, at the encoder.
   EYEQ::EncodeParams sdr_std;
   sdr_std.transfer = EYEQ::OutputTransfer::SDR_BT1886;
@@ -521,6 +619,179 @@ void TestGpuNanInfPolicy(pl_log log, pl_gpu gpu) {
   DestroyTexture(gpu, src);
 }
 
+// ---------------------------------------------------------------------------
+// Output stage: encode 1:1, then scale the codes (OutputPresenter)
+// ---------------------------------------------------------------------------
+
+struct PresentTarget {
+  pl_tex tex = nullptr;
+  struct pl_frame frame = {};
+  int width = 0;
+  int height = 0;
+};
+
+PresentTarget CreatePresentTarget(pl_gpu gpu, int width, int height, enum pl_color_primaries primaries,
+                                  enum pl_color_transfer transfer) {
+  pl_fmt fmt = pl_find_fmt(
+      gpu, PL_FMT_FLOAT, 4, 32, 32,
+      static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE | PL_FMT_CAP_BLITTABLE));
+  if (!fmt) {
+    throw std::runtime_error("no blittable RGBA32F target format");
+  }
+  struct pl_tex_params params = {
+      .w = width, .h = height, .format = fmt, .renderable = true, .blit_dst = true, .host_readable = true};
+  PresentTarget t;
+  t.tex = pl_tex_create(gpu, &params);
+  if (!t.tex) {
+    throw std::runtime_error("present target creation failed");
+  }
+  t.width = width;
+  t.height = height;
+  t.frame.num_planes = 1;
+  t.frame.planes[0].texture = t.tex;
+  t.frame.planes[0].components = 4;
+  for (int c = 0; c < 4; ++c) {
+    t.frame.planes[0].component_mapping[c] = c;
+  }
+  t.frame.repr = pl_color_repr_rgb;
+  t.frame.color.primaries = primaries;
+  t.frame.color.transfer = transfer;
+  return t;
+}
+
+std::vector<float> DownloadPresent(pl_gpu gpu, const PresentTarget &t) {
+  std::vector<float> pixels(static_cast<size_t>(t.width) * t.height * 4);
+  struct pl_tex_transfer_params transfer = {
+      .tex = t.tex, .row_pitch = static_cast<size_t>(t.width) * 4 * sizeof(float), .ptr = pixels.data()};
+  if (!pl_tex_download(gpu, &transfer)) {
+    throw std::runtime_error("present target download failed");
+  }
+  return pixels;
+}
+
+void TestScalingPolicy() {
+  std::fprintf(stdout, "[scaling policy]\n");
+  struct pl_render_params params = pl_render_default_params;
+  EYEQ::ConfigureScaling(params, EYEQ::ScaleMethod::Nearest, EYEQ::ScaleMethod::Lanczos);
+  Check(params.upscaler == &pl_filter_nearest && params.downscaler == &pl_filter_nearest,
+        "up- and downscaling follow --scale-method");
+  Check(params.plane_upscaler == &pl_filter_lanczos && params.plane_downscaler == &pl_filter_lanczos,
+        "chroma up- and downscaling follow --plane-scale-method");
+  Check(params.sigmoid_params == nullptr && params.disable_linear_scaling,
+        "scaling stays in the signal encoding (no sigmoid, no linear light)");
+  Check(params.skip_anti_aliasing, "nearest samples one source pixel when downscaling");
+  EYEQ::ConfigureScaling(params, EYEQ::ScaleMethod::Lanczos, EYEQ::ScaleMethod::Lanczos);
+  Check(!params.skip_anti_aliasing, "other methods keep downscaling anti-aliasing");
+}
+
+void TestOutputPresenter(pl_log log, pl_gpu gpu) {
+  std::fprintf(stdout, "[output stage: encode then scale]\n");
+  EYEQ::EncodeParams pq;
+  pq.transfer = EYEQ::OutputTransfer::PQ;
+  const float lo = 0.05f;
+  const float hi = 4.0f; // 812 nits
+
+  // 1:1: the output equals the plain encode, and nothing goes through scaling.
+  {
+    GpuTexture canvas = CreateFloatTexture(gpu, 8, 4, true, false);
+    UploadTexture(gpu, canvas, [&](int x, int y) -> std::array<float, 4> {
+      const float v = ((x + y) % 2) ? hi : lo;
+      return {v, v * 0.5f, v * 0.25f, 1.0f};
+    });
+    PresentTarget target = CreatePresentTarget(gpu, 8, 4, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+    EYEQ::OutputPresenter presenter(log, gpu, EYEQ::ScaleMethod::Bilinear);
+    presenter.Present(target.frame, canvas.tex, pq, EYEQ::EncodeRect{});
+    std::vector<float> px = DownloadPresent(gpu, target);
+    bool exact = presenter.scaled_count() == 0;
+    for (int y = 0; y < 4; ++y) {
+      for (int x = 0; x < 8; ++x) {
+        const float v = ((x + y) % 2) ? hi : lo;
+        const float *p = &px[(static_cast<size_t>(y) * 8 + x) * 4];
+        exact = exact && Close(p[0], EYEQ::EncodeNormToCode(v, pq), 1e-3f) &&
+                Close(p[1], EYEQ::EncodeNormToCode(v * 0.5f, pq), 1e-3f);
+      }
+    }
+    Check(exact, "a 1:1 present is the plain encode, without the scaling pass");
+    pl_tex_destroy(gpu, &target.tex);
+    DestroyTexture(gpu, canvas);
+  }
+
+  // Scaling happens on the encoded codes: a PQ checkerboard downscaled 2x with
+  // bilinear averages the PQ codes, not the linear light.
+  {
+    GpuTexture canvas = CreateFloatTexture(gpu, 16, 16, true, false);
+    UploadTexture(gpu, canvas, [&](int x, int y) -> std::array<float, 4> {
+      const float v = ((x + y) % 2) ? hi : lo;
+      return {v, v, v, 1.0f};
+    });
+    PresentTarget target = CreatePresentTarget(gpu, 8, 8, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+    EYEQ::OutputPresenter presenter(log, gpu, EYEQ::ScaleMethod::Bilinear);
+    presenter.Present(target.frame, canvas.tex, pq, EYEQ::EncodeRect{});
+    std::vector<float> px = DownloadPresent(gpu, target);
+    const float code_mean = 0.5f * (EYEQ::EncodeNormToCode(lo, pq) + EYEQ::EncodeNormToCode(hi, pq));
+    const float linear_mean = EYEQ::EncodeNormToCode(0.5f * (lo + hi), pq);
+    const float got = px[(4 * 8 + 4) * 4];
+    std::fprintf(stdout, "  2x bilinear: got %s, code mean %s, linear mean %s\n", Fmt(got).c_str(),
+                 Fmt(code_mean).c_str(), Fmt(linear_mean).c_str());
+    Check(presenter.scaled_count() == 1, "a different size goes through the scaling pass");
+    Check(Close(got, code_mean, 2e-3f), "downscaling averages the PQ codes (scaling in the output encoding)");
+    pl_tex_destroy(gpu, &target.tex);
+    DestroyTexture(gpu, canvas);
+  }
+
+  // nearest downscaling picks source pixels: only the two codes appear.
+  {
+    GpuTexture canvas = CreateFloatTexture(gpu, 30, 30, true, false);
+    UploadTexture(gpu, canvas, [&](int x, int y) -> std::array<float, 4> {
+      const float v = ((x + y) % 2) ? hi : lo;
+      return {v, v, v, 1.0f};
+    });
+    PresentTarget target = CreatePresentTarget(gpu, 13, 13, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+    EYEQ::OutputPresenter presenter(log, gpu, EYEQ::ScaleMethod::Nearest);
+    presenter.Present(target.frame, canvas.tex, pq, EYEQ::EncodeRect{});
+    std::vector<float> px = DownloadPresent(gpu, target);
+    const float a = EYEQ::EncodeNormToCode(lo, pq);
+    const float b = EYEQ::EncodeNormToCode(hi, pq);
+    bool only_source = true;
+    for (size_t i = 0; i < px.size(); i += 4) {
+      only_source = only_source && (Close(px[i], a, 1e-3f) || Close(px[i], b, 1e-3f));
+    }
+    Check(only_source, "nearest downscaling only outputs source values (no averaging)");
+    pl_tex_destroy(gpu, &target.tex);
+    DestroyTexture(gpu, canvas);
+  }
+
+  // Letterbox: bars are black (code 0), the image keeps its encoded value.
+  {
+    GpuTexture canvas = CreateFloatTexture(gpu, 16, 9, true, false);
+    UploadTexture(gpu, canvas, [&](int, int) -> std::array<float, 4> { return {1.0f, 1.0f, 1.0f, 1.0f}; });
+    PresentTarget target = CreatePresentTarget(gpu, 64, 64, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
+    EYEQ::EncodeParams sdr;
+    sdr.transfer = EYEQ::OutputTransfer::SDR_BT1886;
+    EYEQ::OutputPresenter presenter(log, gpu, EYEQ::ScaleMethod::Lanczos);
+    // 16:9 into a square: full width, 36 rows high, centered.
+    presenter.Present(target.frame, canvas.tex, sdr, EYEQ::EncodeRect{0.0f, 14.0f / 64.0f, 1.0f, 36.0f / 64.0f});
+    std::vector<float> px = DownloadPresent(gpu, target);
+    const float bar = px[(2 * 64 + 32) * 4];
+    const float center = px[(32 * 64 + 32) * 4];
+    Check(Close(bar, 0.0f, 1e-6f), "the letterbox bar is code 0 (black)");
+    Check(Close(center, 1.0f, 2e-3f), "the scaled image keeps the encoded white");
+    pl_tex_destroy(gpu, &target.tex);
+    DestroyTexture(gpu, canvas);
+  }
+
+  Check(EYEQ::OutputTransferFor(PL_COLOR_TRC_HLG) == EYEQ::OutputTransfer::HLG &&
+            EYEQ::OutputTransferFor(PL_COLOR_TRC_SRGB) == EYEQ::OutputTransfer::SRGB,
+        "HLG and sRGB outputs map to the encoder");
+  bool threw = false;
+  try {
+    EYEQ::OutputTransferFor(PL_COLOR_TRC_GAMMA22);
+  } catch (const std::runtime_error &) {
+    threw = true;
+  }
+  Check(threw, "an output transfer the encoder cannot produce fails instead of being converted silently");
+}
+
 } // namespace
 
 int main() {
@@ -528,9 +799,11 @@ int main() {
   try {
     TestPqOracle();
     TestBt1886Oracle();
+    TestSrgbHlgOracle();
     TestEncodeNormAndClamp();
     TestMappingTarget();
     TestWorkFormatSelection();
+    TestScalingPolicy();
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FATAL (CPU section): %s\n", e.what());
     ++g_failures;
@@ -549,6 +822,7 @@ int main() {
       TestGpuEncodeMatchesOracle(log, gpu);
       TestGpuPrecisionPair(log, gpu);
       TestGpuNanInfPolicy(log, gpu);
+      TestOutputPresenter(log, gpu);
     }
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FATAL (GPU section): %s\n", e.what());
