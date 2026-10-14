@@ -249,16 +249,16 @@ eyeq --hdrvivid-render --target-display-nits 1000 <test_0> <test_1>
 
    其他可能的原因包括：画面缩放算法（视频分辨率与窗口像素不一致时）、去块效应、去振铃、位深抖动，部分播放器甚至会做色彩增强。EyeQ相较于[libplacebo的默认渲染设置](https://code.videolan.org/videolan/libplacebo/-/blob/v7.351/src/renderer.c?ref_type=heads#L201)，任何阶段都不做位深抖动，同时允许通过`--scale-method`和`--plane-scale-method`分别调整画面缩放和色度上采样算法。
 
-2. 为什么保存的png视频帧，在Preview和EyeQ中颜色不一致？
+2. 保存的png视频帧，在Preview和EyeQ中颜色一致吗？
 
    EyeQ调用ffmpeg库保存视频帧为png。对于不含ICC profile且非sRGB的帧，会将color_primaries和color_trc写入cICP tag。
 
    对于HDR10，cICP tag中的color_trc为BT.2100 (PQ)，macOS会复用HDR的渲染流程，Preview和QuickTime的显示一致。
 
-   对于BT.709，ffmpeg除了写入cICP tag，还会按照gamma ≈ 1.961写入gAMA tag。而cICP的优先级高于gAMA。会发现：
-   - 对比Preview和Safari，Preview偏暗，而Safari偏亮。cICP tag是2023年12月才正式加入png-3标准，可能macOS对SDR的支持尚不完善？
-   - 移除png的cICP和gAMA tag，Preview按照sRGB渲染，颜色与EyeQ只在暗部有一点点差别。原因是sRGB的非线性部分和BT.1886都是2.4 gamma，只在暗部能看出细微差别。
-   - 移除png的cICP tag，Preview按照gamma = 1.961进行渲染，与QuickTime播放BT.709视频的颜色看不出差别。
+   对于BT.709，ffmpeg会写入cICP tag（BT.709）和gAMA tag（1/2.2）。实测：
+   - Preview使用cICP tag，按BT.1886（2.4 gamma）渲染，与EyeQ相差约2%以内。
+   - QuickTime播放BT.709视频时的gamma约为1.96（见第1问），所以比两者都亮。把gAMA改为1.961并移除cICP tag，Preview与QuickTime一致。
+   - 不支持cICP的看图软件按gAMA或sRGB渲染，比EyeQ亮，暗部尤其明显。
 
 3. 能否同时对比HDR和SDR视频？
 

@@ -251,16 +251,16 @@ After launching, the following keyboard and mouse controls are available:
 
    Other possible causes include: the picture scaling algorithm (when the video resolution differs from the window's pixels), deblocking, deringing, bit-depth dithering, and some players even apply color enhancement. Compared to [libplacebo's default rendering settings](https://code.videolan.org/videolan/libplacebo/-/blob/v7.351/src/renderer.c?ref_type=heads#L201), EyeQ does not dither at any stage, and lets you adjust the picture scaling and the chroma upsampling algorithms separately with `--scale-method` and `--plane-scale-method`.
 
-2. **Why does a saved PNG frame look different in Preview and EyeQ?**
+2. **Does a saved PNG frame look the same in Preview as in EyeQ?**
 
    EyeQ uses the FFmpeg library to save video frames as PNG. For frames without an ICC profile and not in sRGB, the color_primaries and color_trc are written into the cICP tag.
 
    For HDR10, the cICP tag's color_trc is BT.2100 (PQ), and macOS reuses the HDR rendering pipeline, so Preview and QuickTime display consistently.
 
-   For BT.709, FFmpeg writes both a cICP tag and a gAMA tag (gamma ≈ 1.961). Since cICP takes priority over gAMA:
-   - Comparing Preview and Safari, Preview appears darker while Safari appears brighter. The cICP tag was only officially added to the PNG-3 specification in December 2023, so macOS's SDR support may not be fully mature.
-   - Removing both the cICP and gAMA tags causes Preview to render as sRGB, and the colors differ from EyeQ only slightly in dark areas. This is because sRGB's nonlinear segment and BT.1886 both use 2.4 gamma, with only subtle differences visible in the shadows.
-   - Removing only the cICP tag causes Preview to render with gamma = 1.961, matching QuickTime's BT.709 video rendering.
+   For BT.709, FFmpeg writes a cICP tag (BT.709) and a gAMA tag (1/2.2). As measured:
+   - Preview uses the cICP tag and renders BT.1886 (2.4 gamma), matching EyeQ within about 2%.
+   - QuickTime renders BT.709 video with a gamma of about 1.96 (see question 1), so it looks brighter than both. Writing gAMA as 1.961 and removing the cICP tag makes Preview match QuickTime.
+   - Viewers that ignore cICP render with gAMA or as sRGB, which is brighter than EyeQ, especially in the shadows.
 
 3. **Can I compare HDR and SDR videos simultaneously?**
 
