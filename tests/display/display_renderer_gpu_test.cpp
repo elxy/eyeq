@@ -14,7 +14,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <functional>
 #include <limits>
 #include <map>
@@ -395,33 +394,6 @@ AVPixelFormat FindUnsupportedFormat(pl_gpu gpu) {
     }
   }
   return AV_PIX_FMT_NONE;
-}
-
-std::vector<std::filesystem::path> IccProfileCandidates() {
-  return {
-      "/System/Library/ColorSync/Profiles/Display P3.icc",
-      "/System/Library/ColorSync/Profiles/sRGB Profile.icc",
-      "/System/Library/ColorSync/Profiles/AdobeRGB1998.icc",
-  };
-}
-
-std::vector<uint8_t> ReadFile(const std::filesystem::path &path) {
-  std::FILE *file = std::fopen(path.string().c_str(), "rb");
-  if (!file) {
-    return {};
-  }
-  std::vector<uint8_t> data;
-  std::fseek(file, 0, SEEK_END);
-  long size = std::ftell(file);
-  std::fseek(file, 0, SEEK_SET);
-  if (size > 0) {
-    data.resize(static_cast<std::size_t>(size));
-    if (std::fread(data.data(), 1, data.size(), file) != data.size()) {
-      data.clear();
-    }
-  }
-  std::fclose(file);
-  return data;
 }
 
 } // namespace
@@ -907,54 +879,6 @@ int main() {
       Check(Close(center, Color{pq_100, pq_100, pq_100}, 0.02f),
             "PQ 100-nit code passes through to a PQ target, got " + ColorString(center));
       Check(DestroyTarget(gpu, target), "PQ anchor target destroyed");
-    }
-
-    // ------------------------------------------------------------- ICC isolation
-    {
-      std::vector<uint8_t> icc_data;
-      std::filesystem::path icc_path;
-      for (const auto &candidate : IccProfileCandidates()) {
-        icc_data = ReadFile(candidate);
-        if (!icc_data.empty()) {
-          icc_path = candidate;
-          break;
-        }
-      }
-
-      if (icc_data.empty()) {
-        Skip("ICC isolation subtest: no system ICC profile found in the candidate list");
-      } else {
-        EYEQ::FrameRenderer renderer_a(context, fill_config);
-        EYEQ::FrameRenderer renderer_b(context, fill_config);
-        auto source = MakeFrame(owner.stream, 32, 32, [](int, int) { return Color{0.4f, 0.5f, 0.6f}; });
-        std::map<int, std::shared_ptr<AVFrame>> frames_a;
-        std::map<int, std::shared_ptr<AVFrame>> frames_b;
-        frames_a[0] = source;
-        frames_b[0] = source;
-        renderer_a.SetMainSource(0);
-        renderer_b.SetMainSource(0);
-        renderer_a.FeedFrames(frames_a);
-        renderer_b.FeedFrames(frames_b);
-
-        auto target = CreateTarget(gpu, 64, 64, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
-        auto state = MakeBaseState({0}, 0);
-        renderer_b.Render(target.frame, state);
-        std::vector<float> b_before = DownloadTarget(gpu, target);
-
-        renderer_a.SetICCProfile(icc_data, icc_path.string());
-
-        Check(renderer_a.GetICCObjectForVideo(0) != nullptr, "ICC object is attached to renderer A");
-        Check(renderer_b.GetICCObjectForVideo(0) == nullptr, "renderer B has no ICC object");
-        struct pl_color_space icc_target{};
-        Check(renderer_a.GetICCTargetColorSpace(&icc_target), "renderer A reports an ICC target color space");
-        Check(!renderer_b.GetICCTargetColorSpace(&icc_target), "renderer B reports no ICC target color space");
-
-        renderer_a.Render(target.frame, state);
-        renderer_b.Render(target.frame, state);
-        std::vector<float> b_after = DownloadTarget(gpu, target);
-        Check(AllClose(b_before, b_after, 1e-5f), "renderer B output is unaffected by renderer A's ICC profile");
-        Check(DestroyTarget(gpu, target), "ICC target destroyed");
-      }
     }
 
     // -------------------------------------------------------------------- OSD

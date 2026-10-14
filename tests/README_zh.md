@@ -13,7 +13,7 @@
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | 构建DeckLink CPU/fake契约测试；配合`EYEQ_ENABLE_DECKLINK`还会构建确定性的SDK故障注入与输出后端测试。无需GPU、设备 |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | 构建GPU打包测试：CPU oracle、真实GPU对比/读回测试、生命周期故障注入测试。运行时需要libplacebo与可用的Vulkan设备；不需要SDK，也不需要DeckLink设备 |
-| `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | 构建离屏显示/渲染测试与监看组合层测试：在无窗口的headless Vulkan设备上运行真实`RenderContext`/`FrameRenderer`/`MonitorOutput`，覆盖Fill/Slide/Grid、双实例交错、HDR override、ICC隔离、OSD开关与paced监看路径。运行时需要libplacebo与可用的Vulkan设备；不需要SDK、窗口或DeckLink设备 |
+| `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | 构建离屏显示/渲染测试与监看组合层测试：在无窗口的headless Vulkan设备上运行真实`RenderContext`/`FrameRenderer`/`MonitorOutput`，覆盖Fill/Slide/Grid、双实例交错、HDR override、OSD开关与paced监看路径。运行时需要libplacebo与可用的Vulkan设备；不需要SDK、窗口或DeckLink设备 |
 | `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | 构建纯CPU播放器测试：用本地合成的YUV4MPEG2文件驱动真实`SyncPlayer`/`VideoSource`，覆盖帧快照发布、控制完成顺序、相对seek累积、多源EOF对齐、有界命令预算、Stop取消与seek失败传播。无需GPU、窗口、SDK或DeckLink设备 |
 
 `EYEQ_ENABLE_DECKLINK`与`DECKLINK_SDK_ROOT`是后端构建开关而非测试开关，详见顶层
@@ -96,7 +96,7 @@ ctest --test-dir build-display -R display_renderer_gpu --output-on-failure
 测试把Fill/Slide/Grid（含参考/差异放大）渲染到不同的full-range RGB浮点目标，并对像素与
 几何做可失败断言；在同一GPU上把两个不同尺寸、不同色彩目标的renderer交错调用，检查一个
 renderer的输出不受另一个影响、且另一个被销毁后仍可继续；还覆盖失败帧更新（有效→无效→有效）、
-目标局部HDR nits override、ICC隔离与OSD开关。它不验证窗口present路径、桌面视觉输出或任何
+目标局部HDR nits override与OSD开关。它不验证窗口present路径、桌面视觉输出或任何
 硬件映射，这些仍属于人工/环境受限项。
 
 `present_target_gpu_test`覆盖普通离屏测试漏掉的呈现目标契约。桌面呈现传给renderer的是

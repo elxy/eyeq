@@ -1,7 +1,6 @@
 #include "window.hpp"
 
 #include <cassert>
-#include <fstream>
 #include <stdexcept>
 #include <vector>
 
@@ -18,7 +17,6 @@ extern "C" {
 #include <libplacebo/swapchain.h>
 
 #include "platform_display.h"
-#include "platform_icc.h"
 
 using namespace EYEQ;
 
@@ -287,10 +285,7 @@ void Window::CreateVulkanContext() {
 }
 
 void Window::ColorspaceHint(const struct pl_color_space *colorspace) {
-  // The coordinator has already resolved the ICC policy: in monitoring mode it
-  // never hands over an ICC target, and in the plain desktop it hands over the
-  // ICC target when a global profile is active. This function only applies the
-  // hint, the HDR-on-SDR warning and the EDR reference-mode report.
+  // Applies the hint, the HDR-on-SDR warning and the EDR reference-mode report.
   if (colorspace) {
     SDL_DisplayID display_id = SDL_GetDisplayForWindow(window_);
     SDL_PropertiesID prop_id = SDL_GetDisplayProperties(display_id);
@@ -350,38 +345,4 @@ void Window::CheckDisplayEDR() {
                  "'HDR Video (P3-ST 2084)' for absolute PQ",
                  info.display_name);
   }
-}
-
-void Window::LoadICCProfile(const std::string &path, std::optional<int> video_id) {
-  ICCProfileInfo profile_info;
-
-  if (path == "auto") {
-    profile_info = GetSystemDisplayICCProfile(window_);
-    if (profile_info.data.empty()) {
-      Logger->warn("Failed to get system display ICC profile: {}", profile_info.source);
-      return;
-    }
-    Logger->debug("Loaded auto ICC profile: '{}' from {}", profile_info.name, profile_info.source);
-  } else {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-      throw std::runtime_error(fmt::format("Failed to open ICC profile: {}", path));
-    }
-    auto size = file.tellg();
-    if (size <= 0) {
-      throw std::runtime_error(fmt::format("ICC profile is empty: {}", path));
-    }
-    profile_info.data.resize(static_cast<size_t>(size));
-    file.seekg(0);
-    file.read(reinterpret_cast<char *>(profile_info.data.data()), size);
-    profile_info.source = path;
-  }
-
-  // The window only resolves the raw profile bytes (including "auto"); the
-  // coordinator owns the ICC policy (monitoring mode disables all application
-  // ICC) and the renderer owns the ICC objects.
-  if (!coordinator_) {
-    throw std::logic_error("Window::LoadICCProfile called before SetCoordinator");
-  }
-  coordinator_->LoadICCProfile(std::move(profile_info.data), profile_info.source, video_id);
 }

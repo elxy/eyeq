@@ -1,6 +1,6 @@
 // Coordination-layer tests: the DisplayCoordinator owns the single FrameRenderer,
-// the fixed mapping target, the canvas and the scene/render identity, and the ICC
-// / precision / NaN-Inf policies live here. Headless Vulkan device, no window, no
+// the fixed mapping target, the canvas and the scene/render identity, and the
+// precision / NaN-Inf policies live here. Headless Vulkan device, no window, no
 // DeckLink SDK.
 
 #include <algorithm>
@@ -10,8 +10,6 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -158,7 +156,6 @@ EYEQ::MappingTarget MakeMappingTarget(enum pl_color_primaries primaries, float p
 
 std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &context, EYEQ::DisplayMode mode,
                                                           int canvas_w, int canvas_h, const EYEQ::MappingTarget &target,
-                                                          EYEQ::IccMode icc_mode = EYEQ::IccMode::Enabled,
                                                           bool validate_difference = true) {
   EYEQ::DisplayCoordinator::Config cfg;
   cfg.mode = mode;
@@ -166,7 +163,6 @@ std::unique_ptr<EYEQ::DisplayCoordinator> MakeCoordinator(EYEQ::RenderContext &c
   cfg.plane_scale_method = EYEQ::ScaleMethod::Bicubic;
   cfg.pixel_density = 1.0f;
   cfg.enable_osd = false;
-  cfg.icc_mode = icc_mode;
   cfg.work_precision = EYEQ::WorkPrecision::F16;
   cfg.mapping_target = target;
   cfg.canvas_w = canvas_w;
@@ -236,29 +232,6 @@ std::vector<float> DownloadTexture(pl_gpu gpu, pl_tex tex) {
     throw std::runtime_error("texture download failed");
   }
   return pixels;
-}
-
-std::vector<std::filesystem::path> IccProfileCandidates() {
-  return {
-      "/System/Library/ColorSync/Profiles/Display P3.icc",
-      "/System/Library/ColorSync/Profiles/sRGB Profile.icc",
-      "/System/Library/ColorSync/Profiles/AdobeRGB1998.icc",
-  };
-}
-
-std::vector<uint8_t> ReadFile(const std::filesystem::path &path) {
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
-  if (!file.is_open()) {
-    return {};
-  }
-  const auto size = file.tellg();
-  if (size <= 0) {
-    return {};
-  }
-  std::vector<uint8_t> data(static_cast<std::size_t>(size));
-  file.seekg(0);
-  file.read(reinterpret_cast<char *>(data.data()), size);
-  return data;
 }
 
 // 8-bit UNORM target, like an sRGB desktop swapchain (a transfer the explicit
@@ -404,10 +377,11 @@ void TestFixedMappingTargetAndResize(EYEQ::RenderContext &context, AVStream *str
 // (coordinator compose + presenter hop) against the migrated baseline chain
 // (FrameRenderer::Render, the fused V2-1 path) on the same scene and target.
 // Differences are reported, not assumed equal. Neither side dithers, so only the
-// structural path is compared; the ICC case is compared too.
+// structural path is compared.
 // ---------------------------------------------------------------------------
-void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std::vector<uint8_t> *icc,
-                      const std::string &icc_source, const char *label) {
+void TestMigratedBaselineCompatibility(EYEQ::RenderContext &context, AVStream *stream) {
+  std::fprintf(stdout, "[V2-1 migrated-baseline compatibility]\n");
+  const char *label = "migrated baseline";
   const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 203.0f);
   const int w = 96;
   const int h = 48;
@@ -424,16 +398,10 @@ void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std:
   old_renderer.SetMappingTarget(mt, EYEQ::WorkPrecision::F16);
   old_renderer.SetMainSource(5);
   old_renderer.FeedFrames({{5, source}});
-  if (icc != nullptr) {
-    old_renderer.SetICCProfile(*icc, icc_source);
-  }
 
-  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, w, h, mt, EYEQ::IccMode::Enabled, false);
+  auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, w, h, mt, false);
   coordinator->SetMainSource(5);
   coordinator->FeedFrames({{5, source}});
-  if (icc != nullptr) {
-    coordinator->LoadICCProfile(*icc, icc_source);
-  }
 
   auto old_target = CreateTarget(context.gpu(), w, h, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
   auto new_target = CreateTarget(context.gpu(), w, h, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
@@ -453,25 +421,6 @@ void CompareOldAndNew(EYEQ::RenderContext &context, AVStream *stream, const std:
 
   pl_tex_destroy(context.gpu(), &new_target.tex);
   pl_tex_destroy(context.gpu(), &old_target.tex);
-}
-
-void TestMigratedBaselineCompatibility(EYEQ::RenderContext &context, AVStream *stream) {
-  std::fprintf(stdout, "[V2-1 migrated-baseline compatibility]\n");
-  CompareOldAndNew(context, stream, nullptr, "", "no ICC");
-  std::vector<uint8_t> icc_data;
-  std::string icc_source;
-  for (const auto &candidate : IccProfileCandidates()) {
-    icc_data = ReadFile(candidate);
-    if (!icc_data.empty()) {
-      icc_source = candidate.string();
-      break;
-    }
-  }
-  if (icc_data.empty()) {
-    Skip("ICC compatibility: no system ICC profile found");
-  } else {
-    CompareOldAndNew(context, stream, &icc_data, icc_source, "global ICC");
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -574,82 +523,6 @@ void TestPresentNoDither(EYEQ::RenderContext &context, AVStream *stream) {
   }
   Check(flat, "a flat source stays flat through the 8-bit sRGB hop (no dither)");
   pl_tex_destroy(gpu, &target.tex);
-}
-
-// ---------------------------------------------------------------------------
-// ICC mode isolation
-// ---------------------------------------------------------------------------
-void TestIccModeIsolation(EYEQ::RenderContext &context, AVStream *stream) {
-  std::fprintf(stdout, "[ICC mode isolation]\n");
-  std::vector<uint8_t> icc_data;
-  std::filesystem::path icc_path;
-  for (const auto &candidate : IccProfileCandidates()) {
-    icc_data = ReadFile(candidate);
-    if (!icc_data.empty()) {
-      icc_path = candidate;
-      break;
-    }
-  }
-  if (icc_data.empty()) {
-    Skip("ICC mode isolation: no system ICC profile found in the candidate list");
-    return;
-  }
-
-  const EYEQ::MappingTarget mt = MakeMappingTarget(PL_COLOR_PRIM_BT_709, 203.0f);
-  auto source = MakeFrame(stream, 32, 32, [](int, int) { return Color{0.4f, 0.5f, 0.6f}; });
-
-  {
-    // Plain desktop: ICC stays available (global and per-video).
-    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 32, 32, mt, EYEQ::IccMode::Enabled);
-    coordinator->SetMainSource(5);
-    coordinator->FeedFrames({{5, source}});
-    coordinator->LoadICCProfile(icc_data, icc_path.string());
-    Check(coordinator->IsIccActive(), "plain desktop reports ICC active after a global profile");
-  }
-  {
-    // Monitoring mode: every application ICC is disabled, and loading one is
-    // reported, not silently applied.
-    auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 32, 32, mt, EYEQ::IccMode::MonitoringDisabled);
-    coordinator->SetMainSource(5);
-    coordinator->FeedFrames({{5, source}});
-    coordinator->LoadICCProfile(icc_data, icc_path.string());
-    coordinator->LoadICCProfile(icc_data, icc_path.string(), 5);
-    Check(!coordinator->IsIccActive(), "monitoring mode reports ICC inactive after global and per-video loads");
-    struct pl_color_space icc_target{};
-    Check(!coordinator->GetICCTargetColorSpace(&icc_target), "monitoring mode never reports an ICC target color space");
-    EYEQ::DisplayState state = MakeState({5}, 5);
-    const EYEQ::RenderedFrame &result = coordinator->RenderScene(state);
-    Check(result.IsValid(), "monitoring mode still composes a valid result");
-  }
-  {
-    // The same profile must change the result on the desktop and not change it in
-    // monitoring mode (a behaviour separation, not a flag-only check).
-    auto desktop = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 32, 32, mt, EYEQ::IccMode::Enabled);
-    auto monitor = MakeCoordinator(context, EYEQ::DisplayMode::Fill, 32, 32, mt, EYEQ::IccMode::MonitoringDisabled);
-    EYEQ::DisplayState state = MakeState({5}, 5);
-    desktop->SetMainSource(5);
-    monitor->SetMainSource(5);
-    desktop->FeedFrames({{5, source}});
-    monitor->FeedFrames({{5, source}});
-    desktop->RenderScene(state);
-    monitor->RenderScene(state);
-    const std::vector<float> before = DownloadTexture(context.gpu(), monitor->result().texture);
-    desktop->LoadICCProfile(icc_data, icc_path.string());
-    monitor->LoadICCProfile(icc_data, icc_path.string());
-    // Re-feed so both compose again with the new ICC state.
-    desktop->FeedFrames({{5, source}});
-    monitor->FeedFrames({{5, source}});
-    desktop->RenderScene(state);
-    const EYEQ::RenderedFrame &monitor_result = monitor->RenderScene(state);
-    const std::vector<float> after = DownloadTexture(context.gpu(), monitor_result.texture);
-    bool identical = before.size() == after.size();
-    for (std::size_t i = 0; identical && i < before.size(); ++i) {
-      if (std::fabs(before[i] - after[i]) > 1e-5f) {
-        identical = false;
-      }
-    }
-    Check(identical, "monitoring-mode output is unchanged by an ICC profile that the desktop would apply");
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +702,6 @@ int main() {
     TestSceneCacheAndIdentity(context, owner.stream);
     TestFixedMappingTargetAndResize(context, owner.stream);
     TestPresentNoDither(context, owner.stream);
-    TestIccModeIsolation(context, owner.stream);
     TestMigratedBaselineCompatibility(context, owner.stream);
     TestPrecisionReconfigure(context, owner.stream);
     TestTargetSemantics(context, owner.stream);

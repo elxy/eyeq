@@ -13,8 +13,8 @@
 using namespace EYEQ;
 
 FillRender::FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density,
-                       ICCQueryFunc icc_query, HdrVividQueryFunc hdrvivid_query)
-    : gpu_(gpu), render_params_(render_params), pixel_density_(pixel_density), icc_query_(std::move(icc_query)),
+                       HdrVividQueryFunc hdrvivid_query)
+    : gpu_(gpu), render_params_(render_params), pixel_density_(pixel_density),
       hdrvivid_query_(std::move(hdrvivid_query)) {
   renderer_ = pl_renderer_create(log, gpu_);
   if (!renderer_) {
@@ -185,18 +185,6 @@ void FillRender::RenderFrame(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], in
   PrepareLinearFrame(dst, tex, width, height, precision);
   dst.crop = dst_crop;
   Logger->trace("dst.crop is ({}, {}, {}, {})", dst_crop.x0, dst_crop.y0, dst_crop.x1, dst_crop.y1);
-
-  // Per-video ICC is intentionally kept on the source mapping in V2-1: the
-  // application ICC is a desktop presentation concern, and moving it after the
-  // shared comparison would lose the per-video profile selection (V2.1 4.3).
-  // In monitoring mode every application ICC is disabled (V2-2), which is what
-  // makes the public result ICC-free.
-  if (icc_query_) {
-    pl_icc_object icc = icc_query_(video_id);
-    if (icc) {
-      dst.icc = icc;
-    }
-  }
 
   MapSource(src, &dst, params ? params : render_params_, video_id);
 }

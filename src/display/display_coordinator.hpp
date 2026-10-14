@@ -24,19 +24,6 @@ extern "C" {
 namespace EYEQ {
 
 /*
- * Application-side ICC master switch (V2.1 D2). This is a coordinator-level
- * configuration; the user-visible CLI wiring lands in V2-3.
- */
-enum class IccMode {
-  // Plain desktop: global / auto / per-video ICC keep their original behavior.
-  Enabled,
-  // Monitoring mode: the common render, the monitor encode path and the Mac
-  // preview all disable every application ICC. macOS system color management is
-  // not touched.
-  MonitoringDisabled,
-};
-
-/*
  * Small application coordination layer (V2.1 section 2.1). It owns the *single*
  * FrameRenderer, the fixed common MappingTarget, the work precision, the canvas
  * size and the scene/render identity. Desktop presentation (Window) and the
@@ -63,7 +50,9 @@ public:
     // TargetKind::None the peak of mapping_target is only the initial value.
     TargetKind target_kind = TargetKind::HdrNits;
     ToneMapping tone_mapping = ToneMapping::Spline;
-    IccMode icc_mode = IccMode::Enabled;
+    // Monitoring: the desktop window is only a preview of the monitor, so a SDR
+    // window output is not an error there (see CheckOutput).
+    bool monitoring = false;
     // F16 is the plain-display candidate; the difference path upgrades to F32
     // per render. This is a functional choice, never load-adaptive.
     WorkPrecision work_precision = WorkPrecision::F16;
@@ -92,20 +81,6 @@ public:
   DisplayCoordinator &operator=(DisplayCoordinator &&) = delete;
 
   // ---- configuration / identity -------------------------------------------
-  IccMode icc_mode() const { return icc_mode_; }
-  void SetIccMode(IccMode mode);
-  // True when application ICC is enabled and at least one profile is loaded.
-  bool IsIccActive() const;
-
-  /*
-   * Load an application ICC profile. While ICC is disabled (monitoring mode)
-   * this is a no-op that reports the mode explicitly instead of silently
-   * applying or dropping the profile. @p data is the raw profile binary; the
-   * "auto" resolution to system display data is the desktop layer's job.
-   */
-  void LoadICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id = std::nullopt);
-  bool GetICCTargetColorSpace(struct pl_color_space *out) const;
-
   void SetMainSource(int id);
   void SetSdrWhiteOnHdr(float nits);
   // --default-mastering-nits: mastering peak for HDR sources that have none.
@@ -157,10 +132,6 @@ public:
    */
   void PresentTo(struct pl_frame &target, const DisplayState &state);
 
-  // Recalibrate the open ICC objects for the final presentation color space.
-  // No-op in monitoring mode (no application ICC is loaded).
-  void RecalibrateICC(const struct pl_color_space *target_color);
-
   // Fail fast when a HDR output was requested but the swapchain ended up SDR
   // (the platform offers no HDR surface format): presenting would silently clip
   // everything above the SDR white. Called before PresentTo with the final
@@ -191,7 +162,7 @@ private:
 
   MappingTarget mapping_target_;
   WorkPrecision work_precision_ = WorkPrecision::F16;
-  IccMode icc_mode_ = IccMode::Enabled;
+  bool monitoring_ = false;
 
   int canvas_w_ = 0;
   int canvas_h_ = 0;

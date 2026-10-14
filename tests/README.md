@@ -14,7 +14,7 @@ real DeckLink device, a window present path, or desktop visual output.
 |---|---|---|
 | `EYEQ_BUILD_DECKLINK_TESTS` | `OFF` | Build the DeckLink CPU/fake contract tests and, together with `EYEQ_ENABLE_DECKLINK`, the deterministic SDK fault-injection and output-backend tests. No GPU, no device. |
 | `EYEQ_BUILD_DECKLINK_GPU_TESTS` | `OFF` | Build the GPU packing tests: a CPU oracle, a real-GPU comparison/readback test and a lifecycle fault-injection test. Needs libplacebo and a working Vulkan device at runtime; no SDK and no DeckLink device. |
-| `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | Build the offscreen display/rendering tests and the monitor composition tests: the real `RenderContext`/`FrameRenderer`/`MonitorOutput` on a headless Vulkan device, covering Fill/Slide/Grid, two-instance interleaving, HDR override, ICC isolation, OSD switches and the paced monitor path. Needs libplacebo and a working Vulkan device at runtime; no SDK, no window and no DeckLink device. |
+| `EYEQ_BUILD_DISPLAY_GPU_TESTS` | `OFF` | Build the offscreen display/rendering tests and the monitor composition tests: the real `RenderContext`/`FrameRenderer`/`MonitorOutput` on a headless Vulkan device, covering Fill/Slide/Grid, two-instance interleaving, HDR override, OSD switches and the paced monitor path. Needs libplacebo and a working Vulkan device at runtime; no SDK, no window and no DeckLink device. |
 | `EYEQ_BUILD_PLAYER_TESTS` | `OFF` | Build the CPU-only player tests: the real `SyncPlayer`/`VideoSource` over locally synthesized YUV4MPEG2 files, covering frame snapshot publication, serialized control completion, relative seeks, multi-source EOF alignment, bounded command work, stop cancellation and seek-failure propagation. No GPU, window, SDK or DeckLink device. |
 
 `EYEQ_ENABLE_DECKLINK` and `DECKLINK_SDK_ROOT` are backend build switches, not test
@@ -107,7 +107,7 @@ distinct full-range RGB float targets, assert pixel and geometry results, run tw
 renderers with different sizes and color targets on the same GPU interleaved, check
 that one renderer's output is unchanged by the other and survives its destruction,
 and cover a failed frame update (valid-invalid-valid), the target-local HDR nits
-override, ICC isolation and the OSD enable/disable switch. They do not verify the
+override and the OSD enable/disable switch. They do not verify the
 window present path, desktop visual output or any hardware mapping; those remain
 manual/environment-limited.
 

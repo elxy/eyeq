@@ -18,7 +18,7 @@ message(STATUS "EyeQ version: ${GIT_VERSION}")
 option(EYEQ_ENABLE_DECKLINK "Enable the DeckLink SDK backend (read-only catalog plus scheduled output) and its tools" OFF)
 set(DECKLINK_SDK_ROOT "" CACHE PATH "Path to the Blackmagic DeckLink SDK root (read-only; used from phase 1-A)")
 
-# macOS requires Objective-C++ support (ICC profile auto-detection)
+# macOS requires Objective-C++ support (display EDR query and app activation)
 if(APPLE)
   enable_language(OBJCXX)
 endif()
@@ -126,11 +126,9 @@ list(FILTER CXX_SOURCES EXCLUDE REGEX "/src/output/")
 # Platform-specific source files
 if(APPLE)
   # macOS: use .mm implementations, exclude stubs
-  list(REMOVE_ITEM CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_icc_stub.cpp")
   list(REMOVE_ITEM CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_activate_stub.cpp")
   list(REMOVE_ITEM CXX_SOURCES "${CMAKE_SOURCE_DIR}/src/display/platform_display_stub.cpp")
   set(PLATFORM_SOURCES
-    "${CMAKE_SOURCE_DIR}/src/display/platform_icc_mac.mm"
     "${CMAKE_SOURCE_DIR}/src/display/platform_activate_mac.mm"
     "${CMAKE_SOURCE_DIR}/src/display/platform_display_mac.mm")
 else()
@@ -165,7 +163,7 @@ target_link_libraries(
           FFmpeg::avutil
           FFmpeg::swscale)
 
-# macOS: link AppKit framework (required for ICC profile auto-detection)
+# macOS: link AppKit framework (display EDR query and app activation)
 if(APPLE)
   target_link_libraries(${PROJECT_NAME} PRIVATE "-framework AppKit")
 endif()

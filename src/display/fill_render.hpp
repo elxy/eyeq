@@ -5,7 +5,6 @@
 
 #include <libplacebo/colorspace.h>
 #include <libplacebo/shaders/custom.h>
-#include <libplacebo/shaders/icc.h>
 #include <libplacebo/renderer.h>
 
 #include "mapping_target.hpp"
@@ -30,7 +29,6 @@ namespace EYEQ {
  */
 class FillRender {
 public:
-  using ICCQueryFunc = std::function<pl_icc_object(int video_id)>;
   // Returns the HDR Vivid hook already solved for this video (or nullptr to skip
   // the dynamic tone mapping for that source). The hook maps the source to the
   // same common MappingTarget the generic mapper uses, so a source with dynamic
@@ -38,7 +36,7 @@ public:
   using HdrVividQueryFunc = std::function<const struct pl_hook *(int video_id)>;
 
   FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density = 1.0,
-             ICCQueryFunc icc_query = nullptr, HdrVividQueryFunc hdrvivid_query = nullptr);
+             HdrVividQueryFunc hdrvivid_query = nullptr);
   virtual ~FillRender();
 
   void SetMappingTarget(const MappingTarget &target, WorkPrecision precision);
@@ -76,8 +74,7 @@ public:
    * Final color-managed conversion of the display-linear result into the
    * presentation/encode target (swapchain or offscreen save texture). Kept in
    * the compositor so the pl_renderer that owns the color management stays
-   * encapsulated. No application ICC is applied here: ICC already belongs to
-   * the per-source mapping.
+   * encapsulated.
    *
    * @p preview, when non-null, is the normalized target rectangle the canvas is
    * scaled into; the target is cleared to black outside it (desktop letterbox).
@@ -122,7 +119,6 @@ protected:
   struct pl_color_map_params present_color_map_;
   struct pl_render_params present_params_;
   float pixel_density_;
-  ICCQueryFunc icc_query_;
   HdrVividQueryFunc hdrvivid_query_;
   bool clip_ = false;
   const struct pl_hook *clip_hook_ = nullptr;

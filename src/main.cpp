@@ -76,7 +76,6 @@ struct EyeQArgs {
   LoggingLevel log_level;
   HardwareDecoder hardware_decoder;
 
-  std::vector<std::string> icc_profiles; // ICC profile specifications
   // Single SDR reference white (nits). Applied to the source interpretation when the
   // main video is HDR and to the monitor mapping/wire when monitoring; a pure SDR
   // desktop is unaffected. Replaces --sdr-white-on-hdr and --monitor-sdr-white.
@@ -127,20 +126,6 @@ static std::string generate_title(const struct EyeQArgs &args, const std::vector
   }
 
   return args.videos[ids[0]] + " | " + args.videos[ids[1]];
-}
-
-// An --icc-profile value without an "N:" video prefix is a global profile
-// (including "auto"); it replaces the output color space with the ICC target.
-static bool IsGlobalIccSpec(const std::string &spec) {
-  const size_t colon_pos = spec.find(':');
-  if (colon_pos == std::string::npos || colon_pos == 0 || colon_pos >= spec.size() - 1) {
-    return true;
-  }
-  return !std::all_of(spec.begin(), spec.begin() + static_cast<std::ptrdiff_t>(colon_pos), ::isdigit);
-}
-
-static bool HasGlobalIcc(const EyeQArgs &args) {
-  return std::any_of(args.icc_profiles.begin(), args.icc_profiles.end(), IsGlobalIccSpec);
 }
 
 static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
@@ -294,12 +279,6 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   app.add_option("--hardware-decoder", args.hardware_decoder, "Hardware decoder")
       ->transform(CLI::CheckedTransformer(hw_map, CLI::ignore_case))
       ->option_text("{none,auto,videotoolbox,vaapi,cuda,d3d12va,d3d11va,dxva2}");
-
-  app.add_option("--icc-profile", args.icc_profiles,
-                 "ICC profile for display color management. "
-                 "Use 'auto' for system profile, a file path for custom profile, "
-                 "or 'N:path' to assign to specific video N (e.g. '0:display.icc')")
-      ->expected(1, 10);
 
 #ifdef EYEQ_ENABLE_DECKLINK
   app.add_flag("--monitor-status", args.monitor_status,
@@ -816,8 +795,7 @@ int main(int argc, char **argv) {
   // The two questions are independent but not every pair is meaningful: mapping
   // needs a target, and "system" means eyeq has none. Every path where eyeq itself
   // must map to a known display is refused without a target instead of silently
-  // mapping to a guessed one. A global ICC only takes part in these checks; it
-  // never changes another option.
+  // mapping to a guessed one.
   {
     const bool system_mapping = args.tone_mapping == ToneMapping::System;
     std::string conflict;
@@ -829,9 +807,6 @@ int main(int argc, char **argv) {
                  "--target-display-nits";
     } else if (args.hdrvivid_render && !args.target_display_set) {
       conflict = "--hdrvivid-render needs a target display luminance: pass --target-display-nits <nits|sdr>";
-    } else if (HasGlobalIcc(args) && args.target_kind == TargetKind::HdrNits) {
-      conflict = "a global --icc-profile describes a SDR display, so it cannot be combined with a HDR "
-                 "--target-display-nits; pass --target-display-nits sdr";
     }
 #ifdef EYEQ_ENABLE_DECKLINK
     if (conflict.empty() && args.monitor_device.has_value() && !args.target_display_set) {
@@ -986,8 +961,7 @@ int main(int argc, char **argv) {
   const int canvas_h = (DisplayMode::Grid == args.display_mode) ? window.PixelHeight() : player.Height();
 
   // Monitoring (SDK-enabled builds) makes the external monitor the comparison
-  // target and disables every application-side ICC (V2.1 decision D2). Plain
-  // desktop keeps the original ICC behavior and mapping peak.
+  // target; the desktop window is then a preview.
   bool monitoring = false;
 #ifdef EYEQ_ENABLE_DECKLINK
   monitoring = args.monitor_device.has_value();
@@ -995,8 +969,8 @@ int main(int argc, char **argv) {
 
   // Without a mapping target eyeq does not map, so the output follows the main
   // video and the system maps it. That only works when the output can carry every
-  // source: a SDR output (SDR main video or a global ICC) cannot carry a HDR
-  // source, and nothing would map it. Refuse instead of clipping silently.
+  // source: a SDR output (SDR main video) cannot carry a HDR source, and nothing
+  // would map it. Refuse instead of clipping silently.
   if (args.target_kind == TargetKind::None) {
     bool any_hdr = false;
     for (int id = 0; id < static_cast<int>(args.videos.size()); ++id) {
@@ -1004,10 +978,7 @@ int main(int argc, char **argv) {
     }
     const bool main_is_hdr = player.GetVideoSource(args.main_id)->IsHdr();
     std::string conflict;
-    if (any_hdr && HasGlobalIcc(args)) {
-      conflict = "a global --icc-profile makes the output SDR but there is a HDR video: pass "
-                 "--target-display-nits sdr to map it to SDR";
-    } else if (any_hdr && !main_is_hdr) {
+    if (any_hdr && !main_is_hdr) {
       conflict = "the main video is SDR but there is a HDR video: pass --target-display-nits sdr to map it "
                  "to SDR, or --target-display-nits <nits> for a HDR output";
     }
@@ -1027,7 +998,7 @@ int main(int argc, char **argv) {
   coordinator_config.enable_osd = true;
   coordinator_config.target_kind = args.target_kind;
   coordinator_config.tone_mapping = args.tone_mapping;
-  coordinator_config.icc_mode = monitoring ? IccMode::MonitoringDisabled : IccMode::Enabled;
+  coordinator_config.monitoring = monitoring;
   coordinator_config.work_precision = WorkPrecision::F16;
   coordinator_config.hdrvivid = args.hdrvivid_render;
   // The monitor encode is transfer-only, so a sdr709 monitor needs a BT.709
@@ -1055,31 +1026,6 @@ int main(int argc, char **argv) {
   window.SetCoordinator(coordinator.get());
   if (args.default_mastering_nits_set) {
     coordinator->SetDefaultMasteringNits(args.default_mastering_nits);
-  }
-
-  // Load ICC profiles
-  for (const auto &spec : args.icc_profiles) {
-    // Parse "N:path" or "path" format
-    size_t colon_pos = spec.find(':');
-    if (colon_pos != std::string::npos && colon_pos > 0 && colon_pos < spec.size() - 1) {
-      // Check if all characters before the colon are digits
-      std::string prefix = spec.substr(0, colon_pos);
-      bool all_digits = std::all_of(prefix.begin(), prefix.end(), ::isdigit);
-      if (all_digits) {
-        int video_id = std::stoi(prefix);
-        std::string path = spec.substr(colon_pos + 1);
-        Logger->info("Loading ICC profile '{}' for video {}", path, video_id);
-        window.LoadICCProfile(path, video_id);
-        continue;
-      }
-    }
-    // Global ICC profile (including "auto" and plain paths)
-    Logger->info("Loading ICC profile '{}' globally", spec);
-    window.LoadICCProfile(spec, std::nullopt);
-  }
-  if (monitoring && !args.icc_profiles.empty()) {
-    Logger->info("Monitoring mode: {} ICC profile argument(s) have no effect (application ICC is disabled)",
-                 args.icc_profiles.size());
   }
 
   if (args.reference_white_set) {

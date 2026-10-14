@@ -14,7 +14,6 @@ extern "C" {
 }
 
 #include "log.hpp"
-#include "platform_icc.h"
 #include "slide_render.hpp"
 #include "grid_render.hpp"
 #include "hdrvivid_meta.hpp"
@@ -76,7 +75,6 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   render_params_.upscaler = get_filter_config(config.scale_method);
   render_params_.plane_upscaler = get_filter_config(config.plane_scale_method);
 
-  FillRender::ICCQueryFunc icc_query = [this](int video_id) -> pl_icc_object { return GetICCObjectForVideo(video_id); };
   // The HDR Vivid hook is selected per source inside the compositor, so Grid can
   // attach a different curve to each cell from one shared renderer.
   FillRender::HdrVividQueryFunc hdrvivid_query = [this](int video_id) -> const struct pl_hook * {
@@ -87,15 +85,15 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   switch (mode_) {
   case DisplayMode::Fill:
     display_render_ =
-        std::make_unique<FillRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query, hdrvivid_query);
+        std::make_unique<FillRender>(context_->log(), gpu, &render_params_, pixel_density_, hdrvivid_query);
     break;
   case DisplayMode::Slide:
     display_render_ =
-        std::make_unique<SlideRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query, hdrvivid_query);
+        std::make_unique<SlideRender>(context_->log(), gpu, &render_params_, pixel_density_, hdrvivid_query);
     break;
   case DisplayMode::Grid:
     display_render_ =
-        std::make_unique<GridRender>(context_->log(), gpu, &render_params_, pixel_density_, icc_query, hdrvivid_query);
+        std::make_unique<GridRender>(context_->log(), gpu, &render_params_, pixel_density_, hdrvivid_query);
     break;
   default:
     throw std::runtime_error("Unsupported display mode for FrameRenderer");
@@ -138,18 +136,6 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
 }
 
 FrameRenderer::~FrameRenderer() {
-  // ICC objects hold GPU-related state and must be released before the
-  // context's Vulkan device goes away.
-  if (global_icc_object_) {
-    pl_icc_close(&global_icc_object_);
-  }
-  for (auto &[id, obj] : per_video_icc_objects_) {
-    if (obj) {
-      pl_icc_close(&obj);
-    }
-  }
-  per_video_icc_objects_.clear();
-
   // Frame mappings (pl_unmap_avframe, hwframe references) and the compositor's
   // GPU resources must be released before the context releases the FFmpeg
   // hw_device wrapper and the Vulkan device.
@@ -322,133 +308,6 @@ void FrameRenderer::SetMappingTarget(const MappingTarget &target, WorkPrecision 
     display_render_->SetMappingTarget(mapping_target_, work_precision_);
   }
   ResolveHdrVividParams();
-}
-
-void FrameRenderer::SetICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id) {
-  if (!icc_enabled_) {
-    // Monitoring mode (V2.1 D2): no application-side ICC is loaded or applied.
-    // Report explicitly instead of silently dropping the profile.
-    static bool logged = false;
-    if (!logged) {
-      Logger->info("Application ICC is disabled in monitoring mode; profile '{}' is ignored", source);
-      logged = true;
-    }
-    return;
-  }
-  OpenICCProfile(std::move(data), source, video_id);
-}
-
-void FrameRenderer::SetIccEnabled(bool enabled) {
-  if (icc_enabled_ == enabled) {
-    return;
-  }
-  icc_enabled_ = enabled;
-  if (!enabled) {
-    // Close the GPU-backed ICC objects so nothing can apply them afterwards.
-    CloseICCProfiles();
-  }
-  Logger->info("Application ICC {}", enabled ? "enabled" : "disabled");
-}
-
-void FrameRenderer::CloseICCProfiles() {
-  if (global_icc_object_) {
-    pl_icc_close(&global_icc_object_);
-  }
-  for (auto &[id, obj] : per_video_icc_objects_) {
-    if (obj) {
-      pl_icc_close(&obj);
-    }
-  }
-  per_video_icc_objects_.clear();
-  per_video_icc_data_.clear();
-  global_icc_data_.clear();
-  last_icc_target_luma_ = -1.0f;
-}
-
-void FrameRenderer::OpenICCProfile(std::vector<uint8_t> data, const std::string &source, std::optional<int> video_id) {
-  if (data.empty()) {
-    Logger->warn("Empty ICC profile data from '{}'", source);
-    return;
-  }
-
-  ICCProfileInfo profile_info;
-  profile_info.data = std::move(data);
-  profile_info.source = source;
-  ParseICCProfileHeader(profile_info);
-
-  Logger->debug("Loaded ICC profile from '{}'", source);
-  Logger->debug("  Version: {}.{}, Color Space: {}, PCS: {}, Header Intent: {}, Size: {} bytes",
-                profile_info.version_major, profile_info.version_minor, profile_info.color_space,
-                profile_info.connection_space, profile_info.header_intent, profile_info.data.size());
-
-  size_t data_size = profile_info.data.size();
-  struct pl_icc_profile pl_profile{};
-
-  if (video_id.has_value()) {
-    int id = video_id.value();
-    per_video_icc_data_[id] = std::move(profile_info.data);
-    pl_profile.data = per_video_icc_data_[id].data();
-    pl_profile.len = per_video_icc_data_[id].size();
-    pl_icc_profile_compute_signature(&pl_profile);
-
-    // Close the old ICC object (if any)
-    if (per_video_icc_objects_.count(id) && per_video_icc_objects_[id]) {
-      pl_icc_close(&per_video_icc_objects_[id]);
-    }
-    Logger->debug("Opening ICC profile for video {} ...", id);
-    per_video_icc_objects_[id] = pl_icc_open(context_->log(), &pl_profile, nullptr);
-    if (!per_video_icc_objects_[id]) {
-      Logger->error("Failed to open ICC profile for video {}", id);
-      return;
-    }
-    Logger->debug("ICC profile assigned to video {}: {} ({} bytes, {} → {}), gamma={:.3f}, primaries={}", id,
-                  profile_info.name, data_size, profile_info.color_space, profile_info.connection_space,
-                  per_video_icc_objects_[id]->gamma,
-                  pl_color_primaries_name(per_video_icc_objects_[id]->containing_primaries));
-  } else {
-    global_icc_data_ = std::move(profile_info.data);
-    pl_profile.data = global_icc_data_.data();
-    pl_profile.len = global_icc_data_.size();
-    pl_icc_profile_compute_signature(&pl_profile);
-
-    // Close the old ICC object (if any)
-    if (global_icc_object_) {
-      pl_icc_close(&global_icc_object_);
-    }
-    Logger->debug("Opening ICC profile globally ...");
-    global_icc_object_ = pl_icc_open(context_->log(), &pl_profile, nullptr);
-    if (!global_icc_object_) {
-      Logger->error("Failed to open ICC profile globally");
-      return;
-    }
-    Logger->debug("ICC profile assigned globally: {} ({} bytes, {} → {}), gamma={:.3f}, primaries={}",
-                  profile_info.name, global_icc_data_.size(), profile_info.color_space, profile_info.connection_space,
-                  global_icc_object_->gamma, pl_color_primaries_name(global_icc_object_->containing_primaries));
-  }
-}
-
-pl_icc_object FrameRenderer::GetICCObjectForVideo(int video_id) const {
-  if (!icc_enabled_) {
-    return nullptr;
-  }
-  auto it = per_video_icc_objects_.find(video_id);
-  if (it != per_video_icc_objects_.end())
-    return it->second;
-  if (global_icc_object_)
-    return global_icc_object_;
-  return nullptr;
-}
-
-bool FrameRenderer::GetICCTargetColorSpace(struct pl_color_space *out) const {
-  if (!icc_enabled_ || !global_icc_object_) {
-    return false;
-  }
-  *out = {};
-  out->primaries = global_icc_object_->containing_primaries;
-  if (global_icc_object_->csp.transfer) {
-    out->transfer = global_icc_object_->csp.transfer;
-  }
-  return true;
 }
 
 const struct pl_frame *FrameRenderer::GetSourceFrame(int video_id) const {
@@ -792,49 +651,4 @@ bool FrameRenderer::EncodeToTarget(struct pl_frame &target, const struct pl_fram
   params.black_nits = mapping_target_.black_nits;
   encoder_->Encode(target.planes[0].texture, linear.planes[0].texture, params, preview);
   return true;
-}
-
-void FrameRenderer::RecalibrateICCParams(const struct pl_color_space *target_color) {
-  if (!global_icc_object_ && per_video_icc_objects_.empty())
-    return;
-
-  // Similar to plplay's render_frame approach:
-  // Compute max_luma from the target's final color space, then use
-  // pl_icc_update to recalibrate the ICC LUT (libplacebo skips if params unchanged)
-  float target_luma = 0.0f;
-  struct pl_nominal_luma_params luma_params{};
-  luma_params.metadata = PL_HDR_METADATA_HDR10;
-  luma_params.scaling = PL_HDR_NITS;
-  luma_params.color = target_color;
-  luma_params.out_max = &target_luma;
-  pl_color_space_nominal_luma_ex(&luma_params);
-
-  // Skip if params unchanged (libplacebo checks internally too, but early skip avoids redundant logging)
-  if (target_luma == last_icc_target_luma_)
-    return;
-
-  Logger->debug("ICC recalibrating: target_luma {:.1f} → {:.1f} nits", last_icc_target_luma_, target_luma);
-  last_icc_target_luma_ = target_luma;
-
-  // Build update_params from each ICC object's parsed params, only updating max_luma.
-  // Note: cannot use the original icc_params_.intent because PL_INTENT_AUTO (-1) is resolved
-  // to the actual intent value from the ICC header inside pl_icc_open. Passing AUTO directly
-  // would cause pl_icc_update to detect a param mismatch and trigger an unnecessary icc_reopen.
-  if (global_icc_object_) {
-    struct pl_icc_params update_params = global_icc_object_->params;
-    update_params.max_luma = target_luma;
-    if (!pl_icc_update(context_->log(), &global_icc_object_, nullptr, &update_params)) {
-      Logger->error("Failed to recalibrate global ICC object");
-    }
-  }
-
-  for (auto &[video_id, icc_obj] : per_video_icc_objects_) {
-    if (icc_obj) {
-      struct pl_icc_params update_params = icc_obj->params;
-      update_params.max_luma = target_luma;
-      if (!pl_icc_update(context_->log(), &icc_obj, nullptr, &update_params)) {
-        Logger->error("Failed to recalibrate ICC object for video {}", video_id);
-      }
-    }
-  }
 }

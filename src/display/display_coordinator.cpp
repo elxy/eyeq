@@ -30,7 +30,7 @@ uint64_t Quantize(float value) {
 
 DisplayCoordinator::DisplayCoordinator(RenderContext &context, const Config &config, ColorspaceHintFunc presenter_hint)
     : ui_thread_id_(std::this_thread::get_id()), presenter_hint_(std::move(presenter_hint)),
-      mapping_target_(config.mapping_target), work_precision_(config.work_precision), icc_mode_(config.icc_mode),
+      mapping_target_(config.mapping_target), work_precision_(config.work_precision), monitoring_(config.monitoring),
       canvas_w_(config.canvas_w), canvas_h_(config.canvas_h),
       validate_difference_result_(config.validate_difference_result) {
   ValidateMappingTarget(mapping_target_);
@@ -44,72 +44,13 @@ DisplayCoordinator::DisplayCoordinator(RenderContext &context, const Config &con
   renderer_config.target_kind = config.target_kind;
   renderer_config.tone_mapping = config.tone_mapping;
 
-  // The color space the swapchain hint should declare. In monitoring mode the
-  // application ICC is disabled, so the source color space is used directly;
-  // otherwise an active global ICC overrides the hint.
-  FrameRenderer::ColorspaceHintFunc hint;
-  if (presenter_hint_) {
-    hint = [this](const struct pl_color_space *source) {
-      if (source == nullptr) {
-        presenter_hint_(nullptr);
-        return;
-      }
-      struct pl_color_space icc_target{};
-      if (icc_mode_ == IccMode::Enabled && renderer_ && renderer_->GetICCTargetColorSpace(&icc_target)) {
-        presenter_hint_(&icc_target);
-      } else {
-        presenter_hint_(source);
-      }
-    };
-  }
-
-  renderer_ = std::make_unique<FrameRenderer>(context, renderer_config, hint);
-  renderer_->SetIccEnabled(icc_mode_ == IccMode::Enabled);
+  renderer_ = std::make_unique<FrameRenderer>(context, renderer_config, presenter_hint_);
   renderer_->SetMappingTarget(mapping_target_, work_precision_);
   renderer_->SetValidateLinearResult(false);
   renderer_->SetHdrVividEnabled(config.hdrvivid);
-
-  if (icc_mode_ == IccMode::MonitoringDisabled) {
-    Logger->info("Monitoring mode: all application ICC profiles are disabled (macOS system color management is "
-                 "unchanged)");
-  }
 }
 
 DisplayCoordinator::~DisplayCoordinator() = default;
-
-void DisplayCoordinator::SetIccMode(IccMode mode) {
-  AssertUiThread();
-  if (icc_mode_ == mode) {
-    return;
-  }
-  icc_mode_ = mode;
-  renderer_->SetIccEnabled(mode == IccMode::Enabled);
-  if (mode == IccMode::MonitoringDisabled) {
-    Logger->info("Monitoring mode: application ICC disabled; any ICC argument has no effect in this mode");
-  }
-}
-
-bool DisplayCoordinator::IsIccActive() const {
-  return icc_mode_ == IccMode::Enabled && renderer_->IsIccEnabled() && renderer_->HasAnyICC();
-}
-
-void DisplayCoordinator::LoadICCProfile(std::vector<uint8_t> data, const std::string &source,
-                                        std::optional<int> video_id) {
-  AssertUiThread();
-  if (icc_mode_ == IccMode::MonitoringDisabled) {
-    Logger->info("Monitoring mode: ICC profile '{}' is not loaded or applied", source);
-    return;
-  }
-  renderer_->SetICCProfile(std::move(data), source, video_id);
-}
-
-bool DisplayCoordinator::GetICCTargetColorSpace(struct pl_color_space *out) const {
-  AssertUiThread();
-  if (icc_mode_ != IccMode::Enabled) {
-    return false;
-  }
-  return renderer_->GetICCTargetColorSpace(out);
-}
 
 void DisplayCoordinator::SetMainSource(int id) {
   AssertUiThread();
@@ -314,18 +255,10 @@ void DisplayCoordinator::PresentLocked(struct pl_frame &target, const DisplaySta
 
 void DisplayCoordinator::CheckOutput(const struct pl_color_space *output) const {
   AssertUiThread();
-  if (icc_mode_ != IccMode::Enabled || !renderer_->expects_hdr_output() || pl_color_space_is_hdr(output)) {
+  if (monitoring_ || !renderer_->expects_hdr_output() || pl_color_space_is_hdr(output)) {
     return;
   }
   throw std::runtime_error(fmt::format("A HDR output was requested but the window output is SDR ({}): this platform "
                                        "offers no HDR surface. Pass --target-display-nits sdr to map to SDR",
                                        pl_color_transfer_name(output->transfer)));
-}
-
-void DisplayCoordinator::RecalibrateICC(const struct pl_color_space *target_color) {
-  AssertUiThread();
-  if (icc_mode_ != IccMode::Enabled) {
-    return;
-  }
-  renderer_->RecalibrateICCParams(target_color);
 }

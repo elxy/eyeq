@@ -18,7 +18,6 @@ extern "C" {
 #include <libplacebo/swapchain.h>
 
 #include <libplacebo/colorspace.h>
-#include <libplacebo/shaders/icc.h>
 
 #include "display_coordinator.hpp"
 #include "log.hpp"
@@ -37,8 +36,8 @@ class Window {
    * The window owns the SDL window, its Vulkan surface and the swapchain and
    * drives presentation; the shared GPU context (RenderContext) and the
    * target-related rendering resources (FrameRenderer) are delegated. It also
-   * keeps the desktop-only concerns: swapchain colorspace hints, ICC
-   * auto-discovery from the system display and the Ctrl+E screenshot path.
+   * keeps the desktop-only concerns: swapchain colorspace hints and the Ctrl+E
+   * screenshot path.
    */
 public:
   Window(const std::string &title, int video_width, int video_height, LoggingLevel log_level, bool high_dpi = false,
@@ -55,8 +54,7 @@ public:
   // source mapping or the scene comparison itself.
   void SetCoordinator(DisplayCoordinator *coordinator) { coordinator_ = coordinator; }
   RenderContext &context() { return *context_; }
-  // Presents a color space hint to the swapchain on behalf of the coordinator
-  // (the coordinator resolves the ICC policy before calling this).
+  // Presents a color space hint to the swapchain on behalf of the coordinator.
   void PresenterColorspaceHint(const struct pl_color_space *csp) { ColorspaceHint(csp); }
 
   int Width() const {
@@ -111,14 +109,6 @@ public:
    * next Render() call.
    */
   void RequestSaveRenderedFrame(const std::filesystem::path &path) { pending_render_save_ = path; }
-
-  /**
-   * @brief Load ICC profile
-   *
-   * @param path ICC file path, or "auto" to auto-detect system display ICC
-   * @param video_id Specific video ID; nullopt means apply globally
-   */
-  void LoadICCProfile(const std::string &path, std::optional<int> video_id = std::nullopt);
 
   // Present the common result owned by the coordinator into the swapchain.
   void Render(const DisplayState &state);

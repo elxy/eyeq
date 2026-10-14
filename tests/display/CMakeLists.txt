@@ -3,9 +3,8 @@
 # SDK or a window.
 #
 # The player is an executable, not a library, so the display rendering sources
-# are compiled directly into the test. platform_icc_stub.cpp is used so no
-# system display query is required; ICC isolation is exercised with an explicit
-# profile file. Added when EYEQ_BUILD_DISPLAY_GPU_TESTS is ON.
+# are compiled directly into the test. Added when EYEQ_BUILD_DISPLAY_GPU_TESTS
+# is ON.
 
 set(_display_test_sources
   ${CMAKE_SOURCE_DIR}/src/display/render_context.cpp
@@ -23,7 +22,6 @@ set(_display_test_sources
   ${CMAKE_SOURCE_DIR}/src/display/hdrvivid_shader.cpp
   ${CMAKE_SOURCE_DIR}/src/display/clip_hook.cpp
   ${CMAKE_SOURCE_DIR}/src/display/vulkan_exts.cpp
-  ${CMAKE_SOURCE_DIR}/src/display/platform_icc_stub.cpp
   ${CMAKE_SOURCE_DIR}/src/log.cpp
   ${CMAKE_SOURCE_DIR}/src/libav_impl.c)
 
@@ -73,7 +71,6 @@ set(_linear_test_sources
   ${CMAKE_SOURCE_DIR}/src/display/mapping_target.cpp
   ${CMAKE_SOURCE_DIR}/src/display/output_encode.cpp
   ${CMAKE_SOURCE_DIR}/src/display/vulkan_exts.cpp
-  ${CMAKE_SOURCE_DIR}/src/display/platform_icc_stub.cpp
   ${CMAKE_SOURCE_DIR}/src/log.cpp
   ${CMAKE_SOURCE_DIR}/src/libav_impl.c)
 add_executable(display_linear_gpu_test
@@ -91,7 +88,7 @@ add_test(NAME display_linear_gpu COMMAND display_linear_gpu_test)
 set_tests_properties(display_linear_gpu PROPERTIES TIMEOUT 600)
 
 # Coordination-layer tests: the DisplayCoordinator owns the single FrameRenderer,
-# the fixed mapping target, the canvas and the ICC/precision/NaN-Inf policies.
+# the fixed mapping target, the canvas and the precision/NaN-Inf policies.
 # Headless Vulkan device; no window, no SDK.
 add_executable(display_coordinator_gpu_test
   display_coordinator_gpu_test.cpp

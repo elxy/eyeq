@@ -16,8 +16,8 @@ using namespace EYEQ;
 static constexpr float kComparisonLineLightNorm = 0.5f;
 
 GridRender::GridRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density,
-                       ICCQueryFunc icc_query, HdrVividQueryFunc hdrvivid_query)
-    : FillRender(log, gpu, render_params, pixel_density, std::move(icc_query), std::move(hdrvivid_query)) {
+                       HdrVividQueryFunc hdrvivid_query)
+    : FillRender(log, gpu, render_params, pixel_density, std::move(hdrvivid_query)) {
 
   grid_dp_ = pl_dispatch_create(log, gpu_);
   for (int i = 0; i < PL_MAX_PLANES; i++) {
@@ -141,7 +141,7 @@ void GridRender::RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], int
 
       // Use a local frame view and local render params: the shared source
       // pl_frame and the shared render params must not be modified, even
-      // transiently, and the ICC pointer must not leak from one cell to the next.
+      // transiently.
       struct pl_frame src_frame = *frame;
       src_frame.crop = in_crop;
       struct pl_render_params params = *render_params_;
@@ -151,13 +151,6 @@ void GridRender::RenderGrid(struct pl_frame &dst, pl_tex tex[PL_MAX_PLANES], int
       } else {
         params.border = PL_CLEAR_SKIP;
         dst.crop = out_crop;
-        dst.icc = nullptr;
-        // Apply ICC profile to target frame
-        if (icc_query_) {
-          pl_icc_object icc = icc_query_(id);
-          if (icc)
-            dst.icc = icc;
-        }
         MapSource(&src_frame, &dst, &params, id);
       }
     }

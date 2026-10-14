@@ -50,9 +50,6 @@ void Window::Render(const DisplayState &state) {
     swapchain_csp_logged = true;
   }
 
-  // Dynamically recalibrate ICC parameters based on the swapchain's final color
-  // space. In monitoring mode the coordinator has no ICC to recalibrate.
-  coordinator_->RecalibrateICC(&target.color);
   // A requested HDR output that ended up SDR would clip silently: fail instead.
   coordinator_->CheckOutput(&target.color);
 

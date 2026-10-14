@@ -16,8 +16,8 @@ using namespace EYEQ;
 static constexpr float kComparisonLineLightNorm = 0.5f;
 
 SlideRender::SlideRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_params, float pixel_density,
-                         ICCQueryFunc icc_query, HdrVividQueryFunc hdrvivid_query)
-    : FillRender(log, gpu, render_params, pixel_density, std::move(icc_query), std::move(hdrvivid_query)) {
+                         HdrVividQueryFunc hdrvivid_query)
+    : FillRender(log, gpu, render_params, pixel_density, std::move(hdrvivid_query)) {
 
   split_dp_ = pl_dispatch_create(log, gpu_);
 
