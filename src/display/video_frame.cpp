@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 extern "C" {
 #include <libavutil/bprint.h>
+#include <libavutil/dovi_meta.h>
 #include <libavutil/hwcontext_vulkan.h>
 #include <libavutil/pixdesc.h>
 }
@@ -80,8 +81,7 @@ void VideoFrame::GeneratePLFrame(AVBufferRef *hw_device_ref) {
   int ret;
 
   // Refresh the private header so the map/transfer helpers below never mutate
-  // the caller's AVFrame. Pixel buffers stay shared through refcounting. The
-  // stream stored in AVFrame::opaque is not kept alive by this clone.
+  // the caller's AVFrame. Pixel buffers stay shared through refcounting.
   av_frame_unref(mapped_frame_);
   ret = av_frame_ref(mapped_frame_, frame_.get());
   if (ret < 0) {
@@ -163,10 +163,6 @@ convert:
   Logger->trace("convert avframe from format {} to pl_frame texture {}",
                 av_get_pix_fmt_name(static_cast<enum AVPixelFormat>(mapped_frame_->format)),
                 tex_[0]->params.format->name);
-  // The stream-level props come from the caller's frame: av_frame_ref does not
-  // own AVFrame::opaque, so the caller has to keep that stream alive.
-  AVStream *stream = (AVStream *)frame_->opaque;
-  pl_frame_copy_stream_props(&pl_frame_, stream);
 }
 
 int VideoFrame::create_hw_frame(AVBufferRef *hw_device_ref, AVFrame *frame) {
@@ -305,4 +301,141 @@ int VideoFrame::transfer_frame(AVFrame *frame, int use_hw_frame) {
 exit:
   av_frame_free(&vk_frame);
   return ret;
+}
+
+namespace {
+
+// Short names for the interpretation log; libplacebo's own names are long
+const char *SystemShort(enum pl_color_system sys) {
+  switch (sys) {
+  case PL_COLOR_SYSTEM_BT_601:
+    return "bt601";
+  case PL_COLOR_SYSTEM_BT_709:
+    return "bt709";
+  case PL_COLOR_SYSTEM_SMPTE_240M:
+    return "smpte240m";
+  case PL_COLOR_SYSTEM_BT_2020_NC:
+    return "bt2020nc";
+  case PL_COLOR_SYSTEM_BT_2020_C:
+    return "bt2020c";
+  case PL_COLOR_SYSTEM_BT_2100_PQ:
+    return "ictcp-pq";
+  case PL_COLOR_SYSTEM_BT_2100_HLG:
+    return "ictcp-hlg";
+  case PL_COLOR_SYSTEM_DOLBYVISION:
+    return "dolbyvision";
+  case PL_COLOR_SYSTEM_YCGCO:
+    return "ycgco";
+  case PL_COLOR_SYSTEM_YCGCO_RE:
+    return "ycgco-re";
+  case PL_COLOR_SYSTEM_YCGCO_RO:
+    return "ycgco-ro";
+  default:
+    return "unknown";
+  }
+}
+
+// FFmpeg-style names for the libplacebo primaries/transfer values that have an
+// FFmpeg equivalent, libplacebo's own name otherwise
+std::string PrimariesShort(enum pl_color_primaries prim) {
+  const char *name = av_color_primaries_name(pl_primaries_to_av(prim));
+  return (prim != PL_COLOR_PRIM_UNKNOWN && pl_primaries_to_av(prim) != AVCOL_PRI_UNSPECIFIED && name)
+             ? name
+             : pl_color_primaries_name(prim);
+}
+
+std::string TransferShort(enum pl_color_transfer trc) {
+  if (trc == PL_COLOR_TRC_BT_1886) {
+    return "bt1886"; // pl_transfer_to_av() maps it back to bt709, which names the OETF
+  }
+  const char *name = av_color_transfer_name(pl_transfer_to_av(trc));
+  return (trc != PL_COLOR_TRC_UNKNOWN && pl_transfer_to_av(trc) != AVCOL_TRC_UNSPECIFIED && name)
+             ? name
+             : pl_color_transfer_name(trc);
+}
+
+} // namespace
+
+Interpretation EYEQ::DescribeInterpretation(const AVFrame *frame) {
+  struct pl_frame out;
+  pl_frame_from_avframe(&out, frame);
+
+  Interpretation result;
+  std::string &desc = result.text;
+  // Every annotation below marks a value that does not come from the tags
+  auto note = [&](const std::string &text) {
+    desc += text;
+    result.notable = true;
+  };
+  AVPixelFormat format = static_cast<AVPixelFormat>(frame->format);
+  if (frame->hw_frames_ctx) {
+    format = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data)->sw_format;
+  }
+  const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(format);
+  const bool gray = pix_desc && pix_desc->nb_components < 3;
+  // Representation: matrix and levels
+  switch (gray ? PL_COLOR_SYSTEM_COUNT : out.repr.sys) {
+  case PL_COLOR_SYSTEM_COUNT:
+    desc = "gray"; // libplacebo decodes it as the luma of a YCbCr system; the matrix is irrelevant
+    break;
+  case PL_COLOR_SYSTEM_RGB:
+    desc = "RGB";
+    break;
+  case PL_COLOR_SYSTEM_XYZ:
+    desc = "XYZ";
+    note(" (as DCI-P3, st428)");
+    break;
+  default: {
+    const AVFrameSideData *dovi = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
+    desc = fmt::format("YCbCr {}", SystemShort(out.repr.sys));
+    if (dovi && !av_dovi_get_header(reinterpret_cast<const AVDOVIMetadata *>(dovi->data))->disable_residual_flag) {
+      // pl_map_avframe_ex() only maps RPUs that do not need an enhancement layer
+      note(" (Dolby Vision RPU needs an enhancement layer, showing the base layer)");
+    } else if (dovi) {
+      note(" (Dolby Vision RPU)");
+    }
+    break;
+  }
+  }
+  const enum pl_color_levels levels = pl_color_levels_guess(&out.repr);
+  desc += levels == PL_COLOR_LEVELS_LIMITED ? ", limited" : ", full";
+  if (out.repr.sys == PL_COLOR_SYSTEM_RGB && frame->color_range == AVCOL_RANGE_MPEG) {
+    note(" (tv tag ignored for RGB)");
+  } else if (out.repr.levels == PL_COLOR_LEVELS_UNKNOWN) {
+    note(" (default)");
+  }
+
+  // Color space: an embedded ICC profile replaces primaries and transfer in
+  // the renderer (pass_fix_frames), so the tags are not used at all
+  if (out.profile.len) {
+    note(fmt::format(", embedded ICC profile ({} bytes) overrides primaries/transfer", out.profile.len));
+    return result;
+  }
+  if (out.repr.sys == PL_COLOR_SYSTEM_XYZ) {
+    return result;
+  }
+  if (out.color.primaries != PL_COLOR_PRIM_UNKNOWN) {
+    desc += ", " + PrimariesShort(out.color.primaries);
+  } else {
+    // Renderer default (fix_frame): guessed from the frame size
+    desc += ", " + PrimariesShort(pl_color_primaries_guess(frame->width, frame->height));
+    note(" (default)");
+  }
+  if (out.color.transfer != PL_COLOR_TRC_UNKNOWN) {
+    // SDR camera OETF tags (bt709, bt2020-10, ...) deliberately become the
+    // BT.1886 display EOTF, so only other substitutions are worth a note
+    desc += ", " + TransferShort(out.color.transfer);
+    if (out.color.transfer != PL_COLOR_TRC_BT_1886 && frame->color_trc != AVCOL_TRC_UNSPECIFIED &&
+        pl_transfer_to_av(out.color.transfer) != frame->color_trc) {
+      note(fmt::format(" (from {})", av_color_transfer_name(frame->color_trc)));
+    }
+  } else {
+    // Renderer default (pl_color_space_infer)
+    desc += ", " + TransferShort(PL_COLOR_TRC_BT_1886);
+    note(" (default)");
+    if (frame->color_trc != AVCOL_TRC_UNSPECIFIED) {
+      note(fmt::format(", {} not supported", av_color_transfer_name(frame->color_trc)));
+    }
+  }
+  return result;
 }

@@ -34,6 +34,7 @@ extern "C" {
 #include "display/canvas_geometry.hpp"
 #include "display/display_coordinator.hpp"
 #include "display/render.hpp"
+#include "display/video_frame.hpp"
 #include "display/platform_activate.h"
 
 #ifdef EYEQ_ENABLE_DECKLINK
@@ -54,6 +55,7 @@ struct EyeQArgs {
   std::optional<int> ref_id;
   std::string default_filter; // Global default filter
   std::string filter_sep;     // Per-video filter separator
+  bool autorotate;            // Apply the display matrix before the per-video filter
 
   DisplayMode display_mode;
   float flicker_interval;
@@ -90,6 +92,7 @@ struct EyeQArgs {
   bool tone_mapping_set;           // Whether --tone-mapping was explicitly passed
   double default_mastering_nits;   // Mastering peak (nits) for HDR sources that have none
   bool default_mastering_nits_set; // Whether --default-mastering-nits was explicitly passed
+  bool hardware_decoder_set;       // Whether --hardware-decoder was explicitly passed
 
 #ifdef EYEQ_ENABLE_DECKLINK
   // External monitoring (SDK-enabled builds only). --monitor-device enables it;
@@ -174,6 +177,8 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
 
   app.add_option("--filter", args.default_filter, "Default filter applied to videos without per-video filter");
   app.add_option("--filter-sep", args.filter_sep, "Separator for per-video filter in video path (default: @)");
+  app.add_flag("!--no-autorotate", args.autorotate,
+               "Do not apply the display rotation (display matrix) of the videos; show the decoded orientation");
 
   std::optional<DisplayMode> display_mode;
   std::map<std::string, DisplayMode> dm_map{
@@ -335,6 +340,7 @@ static void parse_args(struct EyeQArgs &args, int argc, char **argv) {
   }
   args.default_mastering_nits_set = app.count("--default-mastering-nits") > 0;
   args.reference_white_set = app.count("--reference-white") > 0;
+  args.hardware_decoder_set = app.count("--hardware-decoder") > 0;
 
 #ifdef EYEQ_ENABLE_DECKLINK
   if (!args.monitor_device.has_value() && args.monitor_mode.has_value()) {
@@ -735,6 +741,7 @@ int main(int argc, char **argv) {
 
   struct EyeQArgs args{
       .filter_sep = "@",
+      .autorotate = true,
       .flicker_interval = 0,
       .win_w = 0,
       .win_h = 0,
@@ -762,6 +769,7 @@ int main(int argc, char **argv) {
       .tone_mapping_set = false,
       .default_mastering_nits = 0.0,
       .default_mastering_nits_set = false,
+      .hardware_decoder_set = false,
   };
 
   parse_args(args, argc, argv);
@@ -839,8 +847,9 @@ int main(int argc, char **argv) {
   std::vector<int> ids;
   for (int i = 0; i < num_videos; i++) {
     try {
-      player.AddVideoSource(
-          std::make_unique<VideoSource>(args.videos[i], args.filters[i], decode_threads, args.hardware_decoder), i);
+      player.AddVideoSource(std::make_unique<VideoSource>(args.videos[i], args.filters[i], decode_threads,
+                                                          args.hardware_decoder, args.autorotate),
+                            i);
     } catch (const std::exception &e) {
       Logger->critical(e.what());
       return 1;
@@ -888,12 +897,28 @@ int main(int argc, char **argv) {
   }
 
   // The stream line printed by AddVideoSource() describes the decoder input; the
-  // per-video filter (e.g. setparams) only shows up on the decoded output frames.
+  // per-video filter (e.g. setparams) and the renderer's reading of the frame
+  // are only known once frames are decoded.
   for (auto &[id, src] : player) {
-    if (src->FilterGraph().empty()) {
-      Logger->info("Video #{} output: {}", id, src->OutputFrameString());
+    // The frame the renderer receives, after the filter graph (user filter,
+    // display rotation). What matters to the user is reported by "rendered as".
+    const std::string filter = src->EffectiveFilter();
+    const std::string via = filter.empty() ? "" : fmt::format(", filter: {}", filter);
+    const auto decoded = src->FilterChangeString();
+    Logger->debug("Video #{} after filters: {} ({}){}", id, src->OutputFrameString(),
+                  decoded ? "decoded: " + *decoded : std::string("unchanged"), via);
+    // How the renderer reads that frame. Tags it ignores or overrides and the
+    // defaults it fills in are applied silently by libplacebo, so they are INFO.
+    Interpretation interpretation = DescribeInterpretation(src->CurrentFrame().get());
+    if (const auto tag = src->MatrixGuessedFrom()) {
+      const char *name = av_color_space_name(*tag);
+      interpretation.text += fmt::format(" [matrix guessed from size, tag '{}']", name ? name : "invalid");
+      interpretation.notable = true;
+    }
+    if (interpretation.notable) {
+      Logger->info("Video #{} rendered as: {}", id, interpretation.text);
     } else {
-      Logger->info("Video #{} output: {}, filter: {}", id, src->OutputFrameString(), src->FilterGraph());
+      Logger->debug("Video #{} rendered as: {}", id, interpretation.text);
     }
   }
 
@@ -915,9 +940,12 @@ int main(int argc, char **argv) {
       };
       auto it = hw_names.find(args.hardware_decoder);
       const char *hardware_decoder = (it != hw_names.end()) ? it->second : "unknown";
-      Logger->warn("Hardware decoder {} is requested but NOT USED for: {}. "
-                   "These video streams may use unsupported codecs.",
-                   hardware_decoder, codec_list);
+      // Only a decoder the user asked for is worth a warning; the default
+      // `auto` silently falling back to software decoding is expected (DPX, PNG, ...)
+      Logger->log(args.hardware_decoder_set ? spdlog::level::warn : spdlog::level::debug,
+                  "Hardware decoder {} is requested but NOT USED for: {}. "
+                  "These video streams may use unsupported codecs.",
+                  hardware_decoder, codec_list);
     }
   }
 
@@ -935,8 +963,8 @@ int main(int argc, char **argv) {
       Window::GetDisplayResolution(display_w, display_h, display_id, false);
       high_dpi = player.Width() > display_w || player.Height() > display_h;
       if (high_dpi) {
-        Logger->info("Auto-enabling high-dpi mode: video {}x{} exceeds display {}x{} (pixel density: {:.1f})",
-                     player.Width(), player.Height(), display_w, display_h, pixel_density);
+        Logger->debug("Auto-enabling high-dpi mode: video {}x{} exceeds display {}x{} (pixel density: {:.1f})",
+                      player.Width(), player.Height(), display_w, display_h, pixel_density);
       }
     } else {
       high_dpi = false;

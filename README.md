@@ -213,6 +213,7 @@ After launching, the following keyboard and mouse controls are available:
 - `--grid-size <size>`: Grid layout size, e.g. `--grid-size 2x2`. Defaults to automatic selection
 - `--filter <filter>`: Default video filter applied to videos without a per-video filter, using [FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html) syntax. Per-video filters can be appended after the video path with `@`, e.g. `video.mp4@"filter"`
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
+- `--no-autorotate`: Do not apply the display rotation (display matrix, e.g. from phone recordings). By default EyeQ applies it like the `ffmpeg` CLI: a `transpose`/`hflip`/`vflip` filter is inserted before the per-video filter, so filters see the upright picture and the window matches the rotated size. Hardware-decoded frames are then downloaded to system memory
 - `--reference-white <nits>`: SDR reference white in nits (default 203, ITU-R BT.2408). Used when SDR videos are placed into a HDR output; when monitoring, also the white of a SDR monitor
 - `--target-display-nits <nits|sdr>`: The mapping target. A value in nits is a HDR display with that peak, and the output is PQ; `sdr` is a SDR display, and the output is SDR. There is no default; without it EyeQ does not map and leaves it to the system. It is also the monitor peak when monitoring and the target display luminance of the Vivid curve
 - `--tone-mapping {system,clip,clip-rgb,spline}`: What to do with what exceeds the mapping target. `system`: the default without `--target-display-nits`; EyeQ does nothing and leaves it to the system. `clip`: clip and keep the hue. `clip-rgb`: clip R, G and B separately. `spline`: roll off the highlights; the default with `--target-display-nits`. Does not affect Vivid sources with `--hdrvivid-render`
@@ -280,6 +281,32 @@ After launching, the following keyboard and mouse controls are available:
    ```
 
    Use the output peak the frame was saved with: the `--target-display-nits` value if one was given, otherwise the source's mastering peak. Use `color_trc=arib-std-b67` for HLG. For the reason, see section 6 of [HDR display and luminance mapping](docs/HDR_DISPLAY.md).
+
+6. **Why does `setparams=range=limited` have no effect on an RGB video (e.g. DPX)?**
+
+   FFmpeg defines `color_range` for YCbCr (and luma) only; in its model RGB is always full range. swscale ignores the range of RGB input and output, and since FFmpeg 7.0 libavfilter resets the range of RGB links to full. libplacebo follows this convention: `pl_frame_from_avframe()` forces full range for every RGB pixel format, and the tag on the frame is dropped. The renderer itself can decode limited-range RGB, but the FFmpeg bridge never asks for it.
+
+   Narrow-range RGB does exist in broadcast (ITU-R BT.2100 defines it, and SDI RGB 4:4:4 often uses it), and a DPX header cannot always tell it apart from full range. EyeQ keeps the FFmpeg/libplacebo convention and warns (`RGB frame is tagged as limited range`) when an RGB frame carries the `tv` tag. To display such content correctly, expand it to full range in the filter. For 16-bit RGB (black 4096, white 60160):
+
+   ```
+   eyeq 'foo.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084,lutrgb=r=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535):g=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535):b=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535)'
+   ```
+
+   For N-bit content the constants are black = 16·2^(N-8), span = 219·2^(N-8) and max = 2^N-1; the warning prints the expression for the frame's bit depth. Do not add `range=limited`: after `lutrgb` the data is full range.
+
+   The `Video #N rendered as:` line at startup shows how the renderer actually reads each video, including tags that are ignored or overridden and defaults that are filled in.
+
+7. **Does a frame saved with `Ctrl + S` match what EyeQ displays?**
+
+   `Ctrl + S` saves the frame after the filters (including autorotate) and before rendering; FFmpeg (swscale) converts YCbCr to the RGB that PNG needs, while the display is rendered by libplacebo on the GPU. EyeQ keeps the two consistent on these points, following libplacebo's rules:
+   - YCbCr matrix: the frame's matrix tag is used. When it is missing or not implemented by libplacebo, EyeQ fills it in right after decoding with libplacebo's rule (BT.709 when width ≥ 1280 or height > 576, BT.601 otherwise), and both saving and display use it instead of swscale's default BT.601. The startup line `Video #N rendered as:` then says `matrix guessed from size`.
+   - Range: YCbCr follows the frame's tag and is limited when untagged; RGB is always full (see the previous question).
+
+   Differences that remain:
+   - Matrices swscale does not implement (YCgCo, BT.2020-CL, ICtCp, ...): displayed correctly, saved with BT.601 and a warning.
+   - Dolby Vision: the base layer is saved without the RPU reshaping.
+   - Chroma upsampling differs (spline when saving, lanczos by default for display), so chroma edges differ slightly.
+   - Saving applies no tone mapping or gamut mapping; primaries/transfer are only written to the PNG as tags (see question 2). Use `Ctrl + E` to save the rendered frame that matches the screen.
 
 ## License
 

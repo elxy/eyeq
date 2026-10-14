@@ -377,7 +377,7 @@ std::vector<int> FrameRenderer::FeedFrames(const std::map<int, std::shared_ptr<A
         Logger->warn("Video #{}: RGB frame is tagged as limited range (tv), but libplacebo always treats RGB as full "
                      "range, so the tag is ignored and the picture is shown as full range. To display limited-range "
                      "RGB, expand it in the filter, e.g. lutrgb=r='clip(floor((val-{})*{}/{}+0.5),0,{})' (same for g "
-                     "and b)",
+                     "and b; see the README FAQ)",
                      i, black, max, span, max);
       }
 

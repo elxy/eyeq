@@ -32,7 +32,6 @@
 #include <vector>
 
 extern "C" {
-#include <libavformat/avformat.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/rational.h>
@@ -72,32 +71,8 @@ using Color = std::array<float, 3>;
 using PixelFunc = std::function<Color(int, int)>;
 using EYEQ::MonitorOutput;
 
-struct SourceOwner {
-  AVFormatContext *format = nullptr;
-  AVStream *stream = nullptr;
-  SourceOwner() {
-    format = avformat_alloc_context();
-    if (!format) {
-      throw std::runtime_error("avformat_alloc_context failed");
-    }
-    stream = avformat_new_stream(format, nullptr);
-    if (!stream) {
-      avformat_free_context(format);
-      format = nullptr;
-      throw std::runtime_error("avformat_new_stream failed");
-    }
-  }
-  ~SourceOwner() {
-    if (format) {
-      avformat_free_context(format);
-    }
-  }
-  SourceOwner(const SourceOwner &) = delete;
-  SourceOwner &operator=(const SourceOwner &) = delete;
-};
-
 // Full-range GBRPF32LE software frame (planes G/B/R).
-std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, const PixelFunc &pixel) {
+std::shared_ptr<AVFrame> MakeFrame(int width, int height, const PixelFunc &pixel) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -124,7 +99,6 @@ std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, cons
       r[x] = c[0];
     }
   }
-  frame->opaque = stream;
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
@@ -289,7 +263,7 @@ void CheckPackedAgainstOracle(SinkPair &sinks, MonitorOutput &monitor, pl_gpu gp
 // The invariant under test: an encode dispatched by Submit is ordered before a
 // recomposition that immediately overwrites the borrowed common result texture.
 // ---------------------------------------------------------------------------
-void TestEncodeBeforeImmediateRecompose(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestEncodeBeforeImmediateRecompose(pl_gpu gpu, EYEQ::RenderContext &context) {
   const int w = 96;
   const int h = 64;
   const EYEQ::ResolvedOutput resolved = BuildResolved(w, h, EYEQ::PixelFormat::R210, false, 203.0);
@@ -301,7 +275,7 @@ void TestEncodeBeforeImmediateRecompose(pl_gpu gpu, EYEQ::RenderContext &context
   const Color scene_b{0.1f, 0.15f, 0.8f};
 
   // Scene A is composed and submitted (encoded into the monitor target) first.
-  auto frame_a = MakeFrame(stream, w, h, [&](int, int) { return scene_a; });
+  auto frame_a = MakeFrame(w, h, [&](int, int) { return scene_a; });
   EYEQ::DisplayState state = MakeState({5}, 5);
   EYEQ::MonitorOutput::Request request_a = ComposeRequest(*coordinator, {{5, frame_a}}, state, 5, 101);
   const pl_tex borrowed = request_a.frame.texture;
@@ -311,7 +285,7 @@ void TestEncodeBeforeImmediateRecompose(pl_gpu gpu, EYEQ::RenderContext &context
   // Immediately (no pump, no wait) compose a different scene B. pl_tex_recreate
   // reuses the same work texture, so this overwrites the texture scene A still
   // refers to. The encode dispatched by Submit must already have read A.
-  auto frame_b = MakeFrame(stream, w, h, [&](int, int) { return scene_b; });
+  auto frame_b = MakeFrame(w, h, [&](int, int) { return scene_b; });
   EYEQ::MonitorOutput::Request request_b = ComposeRequest(*coordinator, {{5, frame_b}}, state, 5, 102);
   Check(request_b.frame.texture == borrowed,
         "the recomposition reused the borrowed common result texture (otherwise the test would be vacuous)");
@@ -356,9 +330,8 @@ int main() {
     EYEQ::RenderContext context(EYEQ::LoggingLevel::WARN, nullptr, nullptr, 0);
     context.CreateHeadlessDevice();
     pl_gpu gpu = context.gpu();
-    SourceOwner owner;
 
-    TestEncodeBeforeImmediateRecompose(gpu, context, owner.stream);
+    TestEncodeBeforeImmediateRecompose(gpu, context);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FATAL: %s\n", e.what());
     ++g_failures;

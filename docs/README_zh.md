@@ -211,6 +211,7 @@ eyeq --hdrvivid-render --target-display-nits 1000 <test_0> <test_1>
 - `--grid-size <size>`：指定`grid`显示时的网格大小，如`--grid-size 2x2`，默认自适应选择
 - `--filter <filter>`：指定视频滤镜，作为未单独指定滤镜的视频的默认滤镜，即[FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html)。也可以在视频路径后使用`@`分隔符为单个视频指定滤镜，如`video.mp4@"filter"`
 - `--filter-sep <sep>`：指定per-video filter的分隔符，默认为`@`。当文件名包含`@`时，可使用该选项指定其他分隔符
+- `--no-autorotate`：不应用视频的显示旋转（display matrix，如手机拍摄的视频）。默认与`ffmpeg`命令行一致：在per-video filter之前插入`transpose`/`hflip`/`vflip`滤镜，因此滤镜看到的是转正后的画面，窗口也按旋转后的尺寸创建。此时硬件解码的帧会先下载到内存
 - `--reference-white <nits>`：SDR参考白，单位nits，默认203（ITU-R BT.2408）。SDR视频放入HDR输出时使用；监看时也作为SDR监视器的白
 - `--target-display-nits <nits|sdr>`：映射目标。数值表示峰值为该值的HDR显示，输出PQ；`sdr`表示SDR显示，输出SDR。没有默认值，不指定时EyeQ不映射，交给系统。它也是监看时的监视器峰值和Vivid曲线的目标显示亮度
 - `--tone-mapping {system,clip,clip-rgb,spline}`：超出映射目标时的处理。`system`：不指定`--target-display-nits`时的默认值，此时EyeQ不处理，交给系统处理；`clip`：截断并保持色调；`clip-rgb`：R、G、B各自截断；`spline`：压缩高光，指定`--target-display-nits`时默认启用本选项。不影响`--hdrvivid-render`下的Vivid源
@@ -278,6 +279,32 @@ eyeq --hdrvivid-render --target-display-nits 1000 <test_0> <test_1>
    ```
 
    峰值填保存该帧时的输出峰值：指定过`--target-display-nits`时为该值，否则为源的母版峰值。HLG用`color_trc=arib-std-b67`。原因见[HDR显示与亮度映射说明](./HDR_DISPLAY_zh.md)第6节。
+
+6. 为什么对RGB视频（如DPX）设置`setparams=range=limited`不生效？
+
+   FFmpeg只为YCbCr（及亮度）定义`color_range`，在它的模型里RGB始终是full range：swscale忽略RGB输入输出的range，FFmpeg 7.0起libavfilter也会把RGB链路的range重置为full。libplacebo遵循这一约定：`pl_frame_from_avframe()`对所有RGB像素格式强制full range，帧上的标签被丢弃。libplacebo的渲染器本身能解码limited range RGB，只是FFmpeg桥接层从不这样请求。
+
+   广播领域确实存在narrow range RGB（ITU-R BT.2100有定义，SDI的RGB 4:4:4也常用），而DPX文件头不一定能区分它与full range。EyeQ保持FFmpeg/libplacebo的约定，当RGB帧带有`tv`标签时给出警告（`RGB frame is tagged as limited range`）。要正确显示这类内容，请在滤镜中把它展开为full range。16-bit RGB（黑4096、白60160）示例：
+
+   ```
+   eyeq 'foo.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084,lutrgb=r=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535):g=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535):b=clip(floor((val-4096)*65535/56064+0.5)\,0\,65535)'
+   ```
+
+   N-bit内容的常量为：黑=16·2^(N-8)，跨度=219·2^(N-8)，最大值=2^N-1；警告中会按帧的实际位深给出表达式。不要再加`range=limited`：经过`lutrgb`后数据已是full range。
+
+   启动时的`Video #N rendered as:`日志显示渲染器对每个视频的实际解读，包括被忽略或被覆盖的标签，以及补上的默认值。
+
+7. `Ctrl + S`保存的视频帧与EyeQ的显示一致吗？
+
+   `Ctrl + S`保存的是经过滤镜（含自动旋转）之后、渲染之前的视频帧，由FFmpeg（swscale）把YCbCr转换为png所需的RGB；屏幕显示则由libplacebo在GPU上完成。EyeQ让两者在以下两点上保持一致，均以libplacebo的规则为准：
+   - YCbCr矩阵：使用帧上的矩阵标签。标签缺失或libplacebo不支持时，EyeQ在解码后就按libplacebo的规则（宽≥1280或高>576为BT.709，否则为BT.601）补全，保存与显示都使用该矩阵，而不是swscale默认的BT.601。启动日志`Video #N rendered as:`会注明`matrix guessed from size`。
+   - range：YCbCr按帧上的标签，未标注时按limited；RGB始终按full（见上一条）。
+
+   以下情况两者仍有差异：
+   - swscale未实现的矩阵（YCgCo、BT.2020-CL、ICtCp等）：显示正确，保存时会给出警告并按BT.601转换。
+   - 杜比视界：保存的是未经RPU重塑的基本层。
+   - 色度上采样算法不同（保存用spline，显示默认lanczos），色度边缘会有细微差别。
+   - 保存不做色调映射和色域转换，primaries/transfer只作为标签写入png（见第2条）。需要与屏幕一致的画面，请使用`Ctrl + E`保存渲染后的帧。
 
 ## 许可证
 

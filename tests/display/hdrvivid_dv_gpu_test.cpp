@@ -29,7 +29,6 @@
 #include <vector>
 
 extern "C" {
-#include <libavformat/avformat.h>
 #include <libavutil/dovi_meta.h>
 #include <libavutil/frame.h>
 #include <libavutil/hdr_dynamic_vivid_metadata.h>
@@ -74,36 +73,12 @@ void CheckNear(double actual, double expected, double tolerance, const std::stri
   Check(std::fabs(actual - expected) <= tolerance, what);
 }
 
-struct SourceOwner {
-  AVFormatContext *format = nullptr;
-  AVStream *stream = nullptr;
-  SourceOwner() {
-    format = avformat_alloc_context();
-    if (!format) {
-      throw std::runtime_error("avformat_alloc_context failed");
-    }
-    stream = avformat_new_stream(format, nullptr);
-    if (!stream) {
-      avformat_free_context(format);
-      format = nullptr;
-      throw std::runtime_error("avformat_new_stream failed");
-    }
-  }
-  ~SourceOwner() {
-    if (format) {
-      avformat_free_context(format);
-    }
-  }
-  SourceOwner(const SourceOwner &) = delete;
-  SourceOwner &operator=(const SourceOwner &) = delete;
-};
-
 using Color = std::array<float, 3>;
 using PixelFunc = std::function<Color(int, int)>;
 
 // A PQ / BT.2020 full-range RGB frame. libplacebo treats the stored float as the
 // PQ code value, which is what both the CUVA curve and the DV reshape expect.
-std::shared_ptr<AVFrame> MakePqRgbFrame(AVStream *stream, int width, int height, const PixelFunc &pixel) {
+std::shared_ptr<AVFrame> MakePqRgbFrame(int width, int height, const PixelFunc &pixel) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -130,7 +105,6 @@ std::shared_ptr<AVFrame> MakePqRgbFrame(AVStream *stream, int width, int height,
       r[x] = c[0];
     }
   }
-  frame->opaque = stream;
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
@@ -494,7 +468,7 @@ double PqToDisplayLinearNorm(double pq) { return EYEQ::HDRVividPQDecode(pq) * 10
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-void TestVividCountsAndResidue(EYEQ::RenderContext &context, AVStream *stream) {
+void TestVividCountsAndResidue(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[HDR Vivid: single mapping, no residual metadata]\n");
   const int w = 32;
   const int h = 24;
@@ -502,7 +476,7 @@ void TestVividCountsAndResidue(EYEQ::RenderContext &context, AVStream *stream) {
   auto renderer = MakeRenderer(context, MakeMappingTarget(target_nits), /*vivid=*/true);
 
   const double input_pq = 0.6;
-  auto frame = MakePqRgbFrame(stream, w, h, [&](int, int) {
+  auto frame = MakePqRgbFrame(w, h, [&](int, int) {
     return Color{static_cast<float>(input_pq), static_cast<float>(input_pq), static_cast<float>(input_pq)};
   });
   AttachMastering(frame.get(), 4000.0);
@@ -527,7 +501,7 @@ void TestVividCountsAndResidue(EYEQ::RenderContext &context, AVStream *stream) {
   CheckNear(result.color.hdr.max_luma, target_nits, 1.0, "the common result declares the mapping target peak");
 }
 
-void TestVividKnownPoints(EYEQ::RenderContext &context, AVStream *stream) {
+void TestVividKnownPoints(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[HDR Vivid: known luminance points vs the CPU curve oracle]\n");
   const int w = 16;
   const int h = 16;
@@ -543,7 +517,7 @@ void TestVividKnownPoints(EYEQ::RenderContext &context, AVStream *stream) {
   const double known_nits[] = {203.0, 400.0, 1000.0, 4000.0};
   for (double nits : known_nits) {
     const double input_pq = EYEQ::HDRVividPQEncode(nits / 10000.0);
-    auto frame = MakePqRgbFrame(stream, w, h, [&](int, int) {
+    auto frame = MakePqRgbFrame(w, h, [&](int, int) {
       return Color{static_cast<float>(input_pq), static_cast<float>(input_pq), static_cast<float>(input_pq)};
     });
     AttachMastering(frame.get(), mastering_nits);
@@ -565,12 +539,12 @@ void TestVividKnownPoints(EYEQ::RenderContext &context, AVStream *stream) {
   }
 }
 
-void TestVividInertWithoutMetadata(EYEQ::RenderContext &context, AVStream *stream) {
+void TestVividInertWithoutMetadata(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[HDR Vivid: inert without dynamic metadata]\n");
   const int w = 24;
   const int h = 16;
   const double input_pq = 0.55;
-  auto frame = MakePqRgbFrame(stream, w, h, [&](int, int) {
+  auto frame = MakePqRgbFrame(w, h, [&](int, int) {
     return Color{static_cast<float>(input_pq), static_cast<float>(input_pq), static_cast<float>(input_pq)};
   });
   AttachMastering(frame.get(), 4000.0);
@@ -590,12 +564,12 @@ void TestVividInertWithoutMetadata(EYEQ::RenderContext &context, AVStream *strea
   Check(off_pixels == on_pixels, "a source without HDR Vivid metadata renders byte-identically with the feature on");
 }
 
-void TestVividChangesResultAndEquivalence(EYEQ::RenderContext &context, AVStream *stream) {
+void TestVividChangesResultAndEquivalence(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[HDR Vivid: active, deterministic and equivalent]\n");
   const int w = 24;
   const int h = 16;
   const double input_pq = 0.75;
-  auto frame = MakePqRgbFrame(stream, w, h, [&](int, int) {
+  auto frame = MakePqRgbFrame(w, h, [&](int, int) {
     return Color{static_cast<float>(input_pq), static_cast<float>(input_pq), static_cast<float>(input_pq)};
   });
   AttachMastering(frame.get(), 4000.0);
@@ -622,12 +596,12 @@ void TestVividChangesResultAndEquivalence(EYEQ::RenderContext &context, AVStream
   Check(on_a->HdrVividApplyCount() == 1 && on_b->HdrVividApplyCount() == 1, "each renderer applied the hook once");
 }
 
-void TestVividTargetMovesResult(EYEQ::RenderContext &context, AVStream *stream) {
+void TestVividTargetMovesResult(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[HDR Vivid: the common mapping target drives the curve]\n");
   const int w = 16;
   const int h = 16;
   const double input_pq = 0.75;
-  auto frame = MakePqRgbFrame(stream, w, h, [&](int, int) {
+  auto frame = MakePqRgbFrame(w, h, [&](int, int) {
     return Color{static_cast<float>(input_pq), static_cast<float>(input_pq), static_cast<float>(input_pq)};
   });
   AttachMastering(frame.get(), 4000.0);
@@ -642,7 +616,7 @@ void TestVividTargetMovesResult(EYEQ::RenderContext &context, AVStream *stream) 
   // Point the same source at a lower common target. A fresh frame is needed
   // because attaching side data again would leave the first block in place, and
   // the parser reads the first one.
-  auto low_frame = MakePqRgbFrame(stream, w, h, [&](int, int) {
+  auto low_frame = MakePqRgbFrame(w, h, [&](int, int) {
     return Color{static_cast<float>(input_pq), static_cast<float>(input_pq), static_cast<float>(input_pq)};
   });
   AttachMastering(low_frame.get(), 4000.0);
@@ -660,7 +634,7 @@ void TestVividTargetMovesResult(EYEQ::RenderContext &context, AVStream *stream) 
   Check(low_value < high_value, "a lower common target maps the same source darker");
 }
 
-void TestDolbyVisionPath(EYEQ::RenderContext &context, AVStream *stream) {
+void TestDolbyVisionPath(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[Dolby Vision: reshape path, common result, no residue]\n");
   const int w = 16;
   const int h = 16;
@@ -668,7 +642,7 @@ void TestDolbyVisionPath(EYEQ::RenderContext &context, AVStream *stream) {
   auto renderer = MakeRenderer(context, MakeMappingTarget(target_nits), /*vivid=*/false);
 
   const double input_pq = 0.6;
-  auto frame = MakePqRgbFrame(stream, w, h, [&](int, int) {
+  auto frame = MakePqRgbFrame(w, h, [&](int, int) {
     return Color{static_cast<float>(input_pq), static_cast<float>(input_pq), static_cast<float>(input_pq)};
   });
   AttachMastering(frame.get(), 1000.0);
@@ -710,17 +684,17 @@ void TestDolbyVisionPath(EYEQ::RenderContext &context, AVStream *stream) {
             "an identity-RPU neutral grey stays within 2% of its input luminance");
 }
 
-void TestVividAndDolbyShareOneTarget(EYEQ::RenderContext &context, AVStream *stream) {
+void TestVividAndDolbyShareOneTarget(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[shared mapping exit: Vivid and Dolby Vision use one target]\n");
   const int w = 16;
   const int h = 16;
   const float target_nits = 1000.0f;
   auto renderer = MakeRenderer(context, MakeMappingTarget(target_nits), /*vivid=*/true);
 
-  auto vivid_frame = MakePqRgbFrame(stream, w, h, [](int, int) { return Color{0.6f, 0.6f, 0.6f}; });
+  auto vivid_frame = MakePqRgbFrame(w, h, [](int, int) { return Color{0.6f, 0.6f, 0.6f}; });
   AttachMastering(vivid_frame.get(), 4000.0);
   AttachVivid(vivid_frame.get(), target_nits);
-  auto dv_frame = MakePqRgbFrame(stream, w, h, [](int, int) { return Color{0.6f, 0.6f, 0.6f}; });
+  auto dv_frame = MakePqRgbFrame(w, h, [](int, int) { return Color{0.6f, 0.6f, 0.6f}; });
   AttachMastering(dv_frame.get(), 1000.0);
   AttachDolbyVision(dv_frame.get());
 
@@ -804,7 +778,7 @@ std::array<float, 3> PixelRgb(const std::vector<float> &pixels, int width, int x
 // ---------------------------------------------------------------------------
 // Debt 1: spline branch coverage on the GPU against the CPU oracle
 // ---------------------------------------------------------------------------
-void TestVividSplineBranches(EYEQ::RenderContext &context, AVStream *stream) {
+void TestVividSplineBranches(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[HDR Vivid spline branches: GPU vs CPU oracle]\n");
   const int w = 16;
   const int h = 16;
@@ -836,7 +810,7 @@ void TestVividSplineBranches(EYEQ::RenderContext &context, AVStream *stream) {
     double max_spline_delta = 0.0;
     for (int i = 0; i < kInputCount; ++i) {
       const double input_pq = inputs[i];
-      auto frame = MakePqRgbFrame(stream, w, h, [&](int, int) {
+      auto frame = MakePqRgbFrame(w, h, [&](int, int) {
         return Color{static_cast<float>(input_pq), static_cast<float>(input_pq), static_cast<float>(input_pq)};
       });
       AttachMastering(frame.get(), mastering_nits);
@@ -868,7 +842,7 @@ void TestVividSplineBranches(EYEQ::RenderContext &context, AVStream *stream) {
 // ---------------------------------------------------------------------------
 // Debt 1: colour-saturation mapping on the GPU
 // ---------------------------------------------------------------------------
-void TestVividSaturation(EYEQ::RenderContext &context, AVStream *stream) {
+void TestVividSaturation(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[HDR Vivid colour-saturation mapping]\n");
   const int w = 16;
   const int h = 16;
@@ -890,7 +864,7 @@ void TestVividSaturation(EYEQ::RenderContext &context, AVStream *stream) {
 
   auto render = [&](const Color &color, VividOptions opt) {
     auto renderer = MakeRenderer(context, MakeMappingTarget(target_nits), /*vivid=*/true);
-    auto frame = MakePqRgbFrame(stream, w, h, [&](int, int) { return color; });
+    auto frame = MakePqRgbFrame(w, h, [&](int, int) { return color; });
     AttachMastering(frame.get(), mastering_nits);
     AttachVivid(frame.get(), target_nits, opt);
     std::map<int, std::shared_ptr<AVFrame>> frames{{0, frame}};
@@ -994,13 +968,13 @@ PrecisionStats ComparePrecision(const std::vector<float> &f16, const std::vector
   return stats;
 }
 
-std::vector<float> RenderAtPrecision(EYEQ::RenderContext &context, AVStream *stream, bool vivid, bool with_dovi,
+std::vector<float> RenderAtPrecision(EYEQ::RenderContext &context, bool vivid, bool with_dovi,
                                      EYEQ::WorkPrecision precision) {
   const int w = 32;
   const int h = 24;
   auto renderer = MakeRenderer(context, MakeMappingTarget(1000.0f), vivid);
   renderer->SetMappingTarget(MakeMappingTarget(1000.0f), precision);
-  auto frame = MakePqRgbFrame(stream, w, h, [](int, int) { return Color{0.58f, 0.42f, 0.30f}; });
+  auto frame = MakePqRgbFrame(w, h, [](int, int) { return Color{0.58f, 0.42f, 0.30f}; });
   AttachMastering(frame.get(), 4000.0);
   if (vivid) {
     AttachVivid(frame.get(), 1000.0);
@@ -1014,14 +988,13 @@ std::vector<float> RenderAtPrecision(EYEQ::RenderContext &context, AVStream *str
   return Download(context.gpu(), renderer->GetLinearResultTexture(), w, h);
 }
 
-void TestPrecisionDynamicSources(EYEQ::RenderContext &context, AVStream *stream) {
+void TestPrecisionDynamicSources(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[16F vs 32F on dynamic-HDR sources]\n");
 
-  const PrecisionStats vivid =
-      ComparePrecision(RenderAtPrecision(context, stream, true, false, EYEQ::WorkPrecision::F16),
-                       RenderAtPrecision(context, stream, true, false, EYEQ::WorkPrecision::F32));
-  const PrecisionStats dv = ComparePrecision(RenderAtPrecision(context, stream, false, true, EYEQ::WorkPrecision::F16),
-                                             RenderAtPrecision(context, stream, false, true, EYEQ::WorkPrecision::F32));
+  const PrecisionStats vivid = ComparePrecision(RenderAtPrecision(context, true, false, EYEQ::WorkPrecision::F16),
+                                                RenderAtPrecision(context, true, false, EYEQ::WorkPrecision::F32));
+  const PrecisionStats dv = ComparePrecision(RenderAtPrecision(context, false, true, EYEQ::WorkPrecision::F16),
+                                             RenderAtPrecision(context, false, true, EYEQ::WorkPrecision::F32));
 
   std::fprintf(stdout, "      Vivid source: max linear |16F-32F| = %.6f, mean = %.8f, max 10-bit code = %.4f\n",
                vivid.max_linear_diff, vivid.mean_linear_diff, vivid.max_code_diff);
@@ -1039,7 +1012,7 @@ void TestPrecisionDynamicSources(EYEQ::RenderContext &context, AVStream *stream)
     auto render_level = [&](double pq, EYEQ::WorkPrecision precision) {
       auto renderer = MakeRenderer(context, MakeMappingTarget(1000.0f), /*vivid=*/true);
       renderer->SetMappingTarget(MakeMappingTarget(1000.0f), precision);
-      auto frame = MakePqRgbFrame(stream, 16, 16, [&](int, int) {
+      auto frame = MakePqRgbFrame(16, 16, [&](int, int) {
         return Color{static_cast<float>(pq), static_cast<float>(pq), static_cast<float>(pq)};
       });
       AttachMastering(frame.get(), 4000.0);
@@ -1073,17 +1046,16 @@ int main() {
       std::fprintf(stderr, "FATAL: no headless Vulkan device\n");
       return 1;
     }
-    SourceOwner owner;
-    TestVividCountsAndResidue(context, owner.stream);
-    TestVividKnownPoints(context, owner.stream);
-    TestVividInertWithoutMetadata(context, owner.stream);
-    TestVividChangesResultAndEquivalence(context, owner.stream);
-    TestVividTargetMovesResult(context, owner.stream);
-    TestDolbyVisionPath(context, owner.stream);
-    TestVividAndDolbyShareOneTarget(context, owner.stream);
-    TestVividSplineBranches(context, owner.stream);
-    TestVividSaturation(context, owner.stream);
-    TestPrecisionDynamicSources(context, owner.stream);
+    TestVividCountsAndResidue(context);
+    TestVividKnownPoints(context);
+    TestVividInertWithoutMetadata(context);
+    TestVividChangesResultAndEquivalence(context);
+    TestVividTargetMovesResult(context);
+    TestDolbyVisionPath(context);
+    TestVividAndDolbyShareOneTarget(context);
+    TestVividSplineBranches(context);
+    TestVividSaturation(context);
+    TestPrecisionDynamicSources(context);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FATAL: %s\n", e.what());
     ++g_failures;

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,8 +41,12 @@ struct AVFrameDeleter {
 
 class VideoSource {
 public:
+  /**
+   * @param autorotate apply the display matrix (rotation/flip) in the filter graph before the user filter, like the
+   *                   ffmpeg CLI; when false the display matrix is ignored. The matrix is never passed to the renderer.
+   */
   explicit VideoSource(std::string filename, std::string filter_graph, int decode_threads = 0,
-                       HardwareDecoder hw_decoder = HardwareDecoder::None);
+                       HardwareDecoder hw_decoder = HardwareDecoder::None, bool autorotate = true);
   ~VideoSource();
 
   const std::string &Filename() const { return filename_; }
@@ -70,6 +75,20 @@ public:
   const char *ColorPrimaries() const { return av_color_primaries_name(dec_ctx_->color_primaries); }
   const char *ColorTransfer() const { return av_color_transfer_name(dec_ctx_->color_trc); }
   const std::string &FilterGraph() const { return filter_graph_; }
+  /**
+   * @brief Filter graph actually built: hwdownload, autorotate, user filter and format fallback, in that order.
+   * Empty until the first frame is decoded.
+   */
+  std::string EffectiveFilter();
+  /**
+   * @brief Original colorspace tag when the YCbCr matrix had to be guessed (missing or not implemented by
+   * libplacebo); the guess is written to every decoded frame before filtering. Empty when the tag was used as is.
+   */
+  std::optional<AVColorSpace> MatrixGuessedFrom();
+  /**
+   * @brief Filtered frame at the current position. Requires a decoded frame (call after WaitForFrameAvailable()).
+   */
+  std::shared_ptr<AVFrame> CurrentFrame();
   // HDR is decided by the transfer function of the filtered output frame only:
   // PQ (SMPTE ST 2084) and HLG (ARIB STD-B67). Wide-gamut SDR (e.g. P3) is not
   // HDR. Requires a decoded frame (call after WaitForFrameAvailable()).
@@ -79,6 +98,12 @@ public:
    * Requires a decoded frame (call after WaitForFrameAvailable()).
    */
   std::string OutputFrameString();
+  /**
+   * @brief The first decoded frame (after the YCbCr matrix is resolved, before the filter graph) in the
+   * OutputFrameString() format, or empty when the filter graph left the frame unchanged (ignoring hardware download).
+   * Requires a decoded frame.
+   */
+  std::optional<std::string> FilterChangeString();
   float Bitrate() const { return (float)fmt_ctx_->bit_rate / 1000; }
   float FrameRate() const { return frame_rate_; }
   float TimeBase() const { return time_base_; }
@@ -236,6 +261,14 @@ private:
   bool hw_decode_enabled_ = false; // Whether hardware decoding is actually used (determined on first frame)
 
   std::string filter_graph_;
+  bool autorotate_;
+  bool rotation_logged_ = false;                    // decode thread only
+  std::string effective_filter_;                    // guarded by buffer_mutex_
+  std::string decoded_frame_string_;                // first decoded frame, guarded by buffer_mutex_
+  std::string decoded_frame_key_;                   // same, without the hardware format, for comparison
+  std::optional<AVColorSpace> matrix_guessed_from_; // written by the decode thread under buffer_mutex_
+  // Replaces a missing/unsupported YCbCr matrix tag with libplacebo's guess (decode thread only)
+  void ResolveMatrix(AVFrame *frame);
   AVFilterGraph *graph_;
   AVFilterContext *filt_in_, *filt_out_;
   std::atomic<bool> need_format_fallback_{false};    // Signal decode thread to append format filter

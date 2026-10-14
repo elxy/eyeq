@@ -36,7 +36,6 @@
 #include <vector>
 
 extern "C" {
-#include <libavformat/avformat.h>
 #include <libavutil/buffer.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixdesc.h>
@@ -139,40 +138,12 @@ private:
   std::vector<std::string> messages_;
 };
 
-struct SourceOwner {
-  AVFormatContext *format = nullptr;
-  AVStream *stream = nullptr;
-
-  SourceOwner() {
-    format = avformat_alloc_context();
-    if (!format) {
-      throw std::runtime_error("avformat_alloc_context failed");
-    }
-    stream = avformat_new_stream(format, nullptr);
-    if (!stream) {
-      avformat_free_context(format);
-      format = nullptr;
-      throw std::runtime_error("avformat_new_stream failed");
-    }
-  }
-
-  ~SourceOwner() {
-    if (format) {
-      avformat_free_context(format);
-    }
-  }
-
-  SourceOwner(const SourceOwner &) = delete;
-  SourceOwner &operator=(const SourceOwner &) = delete;
-};
-
 using Color = std::array<float, 3>;
 using PixelFunc = std::function<Color(int, int)>;
 
 // Build a full-range GBRPF32LE software frame. GBR planar data is stored as
-// G/B/R in planes 0/1/2. The frame carries an AVStream in opaque to model the
-// decode path (pl_frame_copy_stream_props reads stream side data).
-std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, const PixelFunc &pixel) {
+// G/B/R in planes 0/1/2.
+std::shared_ptr<AVFrame> MakeFrame(int width, int height, const PixelFunc &pixel) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -199,7 +170,6 @@ std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, cons
       r[x] = c[0];
     }
   }
-  frame->opaque = stream;
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
@@ -405,17 +375,15 @@ int main() {
     // mistaken for render errors.
     trap.Install(context.log());
 
-    SourceOwner owner;
-
     const int width = 96;
     const int height = 72;
     const float pq_100 = EYEQ::PqEncodeNits(100.0f);
 
-    auto sdr_frame = MakeFrame(owner.stream, 64, 48, [](int x, int y) {
+    auto sdr_frame = MakeFrame(64, 48, [](int x, int y) {
       const float v = 0.1f + 0.6f * (static_cast<float>(x + y) / 110.0f);
       return Color{v, 0.5f * v + 0.2f, 1.0f - v};
     });
-    auto hdr_frame = MakeFrame(owner.stream, 64, 48, [&](int x, int y) {
+    auto hdr_frame = MakeFrame(64, 48, [&](int x, int y) {
       const float v = pq_100 * (0.5f + 0.5f * static_cast<float>(x) / 64.0f);
       (void)y;
       return Color{v, v, v};
@@ -423,7 +391,7 @@ int main() {
     hdr_frame->color_primaries = AVCOL_PRI_BT2020;
     hdr_frame->color_trc = AVCOL_TRC_SMPTE2084;
 
-    auto sdr_ref = MakeFrame(owner.stream, 64, 48, [](int x, int y) {
+    auto sdr_ref = MakeFrame(64, 48, [](int x, int y) {
       const float v = 0.2f + 0.4f * (static_cast<float>(x) / 64.0f);
       (void)y;
       return Color{v, v, v};

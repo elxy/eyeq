@@ -11,6 +11,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
+#include <libavutil/display.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
 }
@@ -21,6 +22,86 @@ extern "C" {
 using namespace EYEQ;
 
 namespace {
+
+// Filter that turns a frame with the given display matrix upright, or "" when
+// none is needed. This mirrors the ffmpeg CLI autorotate (get_rotation() in
+// fftools/cmdutils.c and the insertion in fftools/ffmpeg_filter.c), so eyeq
+// shows a tagged file in the same orientation as `ffmpeg` transcodes it.
+std::string AutorotateFilter(const int32_t *matrix) {
+  double theta = -std::round(av_display_rotation_get(matrix));
+  theta -= 360 * std::floor(theta / 360 + 0.9 / 360);
+  if (std::fabs(theta - 90) < 1.0) {
+    return matrix[3] > 0 ? "transpose=cclock_flip" : "transpose=clock";
+  }
+  if (std::fabs(theta - 180) < 1.0) {
+    std::string filter = matrix[0] < 0 ? "hflip" : "";
+    if (matrix[4] < 0) {
+      filter += filter.empty() ? "vflip" : ",vflip";
+    }
+    return filter;
+  }
+  if (std::fabs(theta - 270) < 1.0) {
+    return matrix[3] < 0 ? "transpose=clock_flip" : "transpose=cclock";
+  }
+  if (std::fabs(theta) > 1.0) {
+    return fmt::format("rotate={:f}*PI/180", theta);
+  }
+  return matrix[4] < 0 ? "vflip" : "";
+}
+
+// "fmt(range, colorspace/primaries/transfer), WxH". Hardware frames are shown
+// as "hwfmt[swfmt]" when with_hw is set, as their software format otherwise,
+// so that frames differing only in where they live compare equal.
+std::string FrameString(const AVFrame *frame, bool with_hw) {
+  // av_*_name() returns nullptr for values outside the known tables
+  auto name = [](const char *s) { return s ? s : "invalid"; };
+  std::string format = name(av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
+  if (frame->hw_frames_ctx) {
+    const auto *hw_frames = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data);
+    const char *sw = name(av_get_pix_fmt_name(hw_frames->sw_format));
+    format = with_hw ? fmt::format("{}[{}]", format, sw) : sw;
+  }
+  return fmt::format("{}({}, {}/{}/{}), {}x{}", format, name(av_color_range_name(frame->color_range)),
+                     name(av_color_space_name(frame->colorspace)),
+                     name(av_color_primaries_name(frame->color_primaries)),
+                     name(av_color_transfer_name(frame->color_trc)), frame->width, frame->height);
+}
+
+// Matrix libplacebo would guess for a YCbCr frame whose colorspace tag it does
+// not implement, or AVCOL_SPC_UNSPECIFIED when the tag is usable as is (or the
+// frame is not ordinary YCbCr). Mirrors pl_frame_from_avframe(): tags that
+// pl_system_from_av() maps to UNKNOWN (or RGB on a YCbCr format) fall back to
+// pl_color_system_guess_ycbcr(), i.e. BT.709 for HD and BT.601 for SD.
+AVColorSpace GuessedMatrix(const AVFrame *frame) {
+  AVPixelFormat format = static_cast<AVPixelFormat>(frame->format);
+  if (frame->hw_frames_ctx) {
+    format = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data)->sw_format;
+  }
+  const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(format);
+  // Same notion of "regular YUV" as libavfilter's ff_fmt_is_regular_yuv(); gray
+  // has no chroma, so the matrix does not matter for it
+  if (!desc || desc->nb_components < 3 ||
+      (desc->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_XYZ | AV_PIX_FMT_FLAG_FLOAT |
+                      AV_PIX_FMT_FLAG_BAYER))) {
+    return AVCOL_SPC_UNSPECIFIED;
+  }
+  switch (frame->colorspace) {
+  case AVCOL_SPC_BT709:
+  case AVCOL_SPC_BT470BG:
+  case AVCOL_SPC_SMPTE170M:
+  case AVCOL_SPC_SMPTE240M:
+  case AVCOL_SPC_YCGCO:
+  case AVCOL_SPC_YCGCO_RE:
+  case AVCOL_SPC_YCGCO_RO:
+  case AVCOL_SPC_BT2020_NCL:
+  case AVCOL_SPC_BT2020_CL:
+  case AVCOL_SPC_ICTCP:
+    return AVCOL_SPC_UNSPECIFIED; // implemented by libplacebo
+  default:
+    break;
+  }
+  return (frame->width >= 1280 || frame->height > 576) ? AVCOL_SPC_BT709 : AVCOL_SPC_SMPTE170M;
+}
 
 // Glob metacharacters recognized by FFmpeg's image2 demuxer (see is_glob() in img2dec.c)
 constexpr std::string_view kGlobMetaChars = "*?[]{}";
@@ -102,9 +183,10 @@ std::string add_glob_escapes(const std::string &path) {
 
 } // namespace
 
-VideoSource::VideoSource(std::string filename, std::string filter_graph, int decode_threads, HardwareDecoder hw_decoder)
+VideoSource::VideoSource(std::string filename, std::string filter_graph, int decode_threads, HardwareDecoder hw_decoder,
+                         bool autorotate)
     : filename_(std::move(filename)), hw_decoder_(hw_decoder), filter_graph_(std::move(filter_graph)),
-      max_cached_frames_(kMaxCachedFrames), decode_threads_(decode_threads) {
+      autorotate_(autorotate), max_cached_frames_(kMaxCachedFrames), decode_threads_(decode_threads) {
   fmt_ctx_ = nullptr;
   dec_ctx_ = nullptr;
   stream_index_ = -1;
@@ -179,6 +261,49 @@ int VideoSource::Height() {
   }
 }
 
+void VideoSource::ResolveMatrix(AVFrame *frame) {
+  // The YCbCr matrix is decided once, here, before the filter graph: swscale
+  // (any format conversion in the filter graph, including the rgb48le
+  // fallback) assumes BT.601 for an unspecified matrix whatever the size,
+  // while libplacebo guesses by size. Writing libplacebo's guess to the frame
+  // makes both paths decode with the same matrix.
+  const AVColorSpace guess = GuessedMatrix(frame);
+  if (guess == AVCOL_SPC_UNSPECIFIED) {
+    return;
+  }
+  if (!matrix_guessed_from_.has_value()) {
+    const char *tag = av_color_space_name(frame->colorspace);
+    Logger->debug(
+        "{}: YCbCr matrix tag '{}' is {}; assuming {} from the {}x{} frame size (libplacebo's rule), for both "
+        "the filters and the rendering",
+        filename_, tag ? tag : "invalid",
+        frame->colorspace == AVCOL_SPC_UNSPECIFIED ? "missing" : "not supported by libplacebo",
+        av_color_space_name(guess), frame->width, frame->height);
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    matrix_guessed_from_ = frame->colorspace;
+  }
+  frame->colorspace = guess;
+}
+
+std::optional<AVColorSpace> VideoSource::MatrixGuessedFrom() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  return matrix_guessed_from_;
+}
+
+std::shared_ptr<AVFrame> VideoSource::CurrentFrame() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  RequireCurrentFrameLocked("CurrentFrame");
+  if (current_frame_index_ >= 0) {
+    return frame_buffer_[current_frame_index_];
+  }
+  return frame_buffer_[0];
+}
+
+std::string VideoSource::EffectiveFilter() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  return effective_filter_;
+}
+
 bool VideoSource::IsHdr() {
   std::unique_lock<std::mutex> lock(buffer_mutex_);
   const AVFrame *frame = RequireCurrentFrameLocked("IsHdr");
@@ -187,19 +312,16 @@ bool VideoSource::IsHdr() {
 
 std::string VideoSource::OutputFrameString() {
   std::unique_lock<std::mutex> lock(buffer_mutex_);
-  const AVFrame *frame = RequireCurrentFrameLocked("OutputFrameString");
+  return FrameString(RequireCurrentFrameLocked("OutputFrameString"), true);
+}
 
-  // av_*_name() returns nullptr for values outside the known tables
-  auto name = [](const char *s) { return s ? s : "invalid"; };
-  std::string format = name(av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
-  if (frame->hw_frames_ctx) {
-    const auto *hw_frames = reinterpret_cast<const AVHWFramesContext *>(frame->hw_frames_ctx->data);
-    format += fmt::format("[{}]", name(av_get_pix_fmt_name(hw_frames->sw_format)));
+std::optional<std::string> VideoSource::FilterChangeString() {
+  std::unique_lock<std::mutex> lock(buffer_mutex_);
+  const AVFrame *frame = RequireCurrentFrameLocked("FilterChangeString");
+  if (FrameString(frame, false) == decoded_frame_key_) {
+    return std::nullopt;
   }
-  return fmt::format("{}({}, {}/{}/{}), {}x{}", format, name(av_color_range_name(frame->color_range)),
-                     name(av_color_space_name(frame->colorspace)),
-                     name(av_color_primaries_name(frame->color_primaries)),
-                     name(av_color_transfer_name(frame->color_trc)), frame->width, frame->height);
+  return decoded_frame_string_;
 }
 
 void VideoSource::SetMaxCachedFrames(size_t max_cached_frames) {
@@ -1063,7 +1185,17 @@ void VideoSource::AllInOneThread() {
         }
       }
 
+      if (AVERROR_EOF != ret) {
+        ResolveMatrix(frame);
+      }
       if (!graph_) {
+        if (AVERROR_EOF != ret) {
+          std::lock_guard<std::mutex> lock(buffer_mutex_);
+          if (decoded_frame_string_.empty()) {
+            decoded_frame_string_ = FrameString(frame, true);
+            decoded_frame_key_ = FrameString(frame, false);
+          }
+        }
         CreateFilterGraph(frame);
       }
       ret = FilterNextFrame(filt_frame, AVERROR_EOF == ret ? nullptr : frame);
@@ -1073,10 +1205,18 @@ void VideoSource::AllInOneThread() {
       } else if (ret < 0) {
         throw std::runtime_error(fmt::format("Error in filtering, {}: {}", ret, ffmpeg_error_string(ret)));
       } else if (0 <= ret) {
+        // Drop the display matrix before the frame reaches libplacebo, which
+        // would otherwise rotate it in pl_frame_from_avframe(). With autorotate
+        // the filter graph has already turned the pixels upright, and libavfilter
+        // does not update the tag (transpose keeps it), so libplacebo would
+        // rotate a second time. With --no-autorotate the tag is ignored on
+        // purpose. In both cases eyeq sizes the window and canvas from the
+        // filtered frame, which only matches what is drawn if nothing rotates
+        // after the filter graph.
+        av_frame_remove_side_data(filt_frame, AV_FRAME_DATA_DISPLAYMATRIX);
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         // Frame may be shared across threads; use shared_ptr for management
         frame_buffer_.push_back(std::shared_ptr<AVFrame>(filt_frame, AVFrameDeleter()));
-        filt_frame->opaque = stream_;
         SPDLOG_LOGGER_TRACE(Logger, "pushed frame {} pts {}", fmt::ptr(filt_frame), filt_frame->pts);
         buffer_cv_.notify_all(); // Notify waiting threads
       }
@@ -1228,12 +1368,42 @@ void VideoSource::CreateFilterGraph(const AVFrame *frame) {
     throw std::runtime_error("Could not init sink filter");
   }
 
-  // Auto-insert hwdownload before user filter when frame is a hardware frame
-  std::string effective_filter = filter_graph_;
-  if (frame->hw_frames_ctx && !filter_graph_.empty()) {
+  // Display rotation (the container/codec display matrix, attached to every
+  // frame by the decoder) is applied here, before the user filter, the same way
+  // the ffmpeg CLI does it. The user filter then sees upright frames, and the
+  // filtered frame size is the size eyeq builds its window and canvas from.
+  std::string rotate_filter;
+  if (const AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX)) {
+    const auto *matrix = reinterpret_cast<const int32_t *>(sd->data);
+    const std::string filter = AutorotateFilter(matrix);
+    if (!filter.empty()) {
+      if (autorotate_) {
+        rotate_filter = filter;
+      }
+      if (!rotation_logged_) {
+        // Same angle convention as ffprobe ("rotation of N degrees", counterclockwise)
+        const double degrees = av_display_rotation_get(matrix);
+        if (autorotate_) {
+          Logger->info("{}: display matrix rotation {:.0f} degrees, applied with {}; use --no-autorotate to show the "
+                       "decoded orientation",
+                       filename_, degrees, filter);
+        } else {
+          Logger->info("{}: display matrix rotation {:.0f} degrees ignored (--no-autorotate)", filename_, degrees);
+        }
+        rotation_logged_ = true;
+      }
+    }
+  }
+
+  std::string effective_filter = rotate_filter;
+  if (!filter_graph_.empty()) {
+    effective_filter += (effective_filter.empty() ? "" : ",") + filter_graph_;
+  }
+  // Software filters need system-memory frames: download hardware frames first
+  if (frame->hw_frames_ctx && !effective_filter.empty()) {
     AVHWFramesContext *hw_frames = (AVHWFramesContext *)frame->hw_frames_ctx->data;
     const char *sw_fmt_name = av_get_pix_fmt_name(hw_frames->sw_format);
-    effective_filter = fmt::format("hwdownload,format={},{}", sw_fmt_name, filter_graph_);
+    effective_filter = fmt::format("hwdownload,format={},{}", sw_fmt_name, effective_filter);
     Logger->debug("Auto-inserted hwdownload for hardware frames, effective filter: {}", effective_filter);
   }
 
@@ -1289,6 +1459,10 @@ void VideoSource::CreateFilterGraph(const AVFrame *frame) {
   graph_ = graph;
   filt_in_ = filt_src;
   filt_out_ = filt_out;
+  {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    effective_filter_ = effective_filter;
+  }
 
   avfilter_inout_free(&outputs);
   avfilter_inout_free(&inputs);

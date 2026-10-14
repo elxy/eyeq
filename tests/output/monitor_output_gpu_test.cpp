@@ -25,7 +25,6 @@
 #include <vector>
 
 extern "C" {
-#include <libavformat/avformat.h>
 #include <libavutil/frame.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixdesc.h>
@@ -67,32 +66,8 @@ using Color = std::array<float, 3>;
 using PixelFunc = std::function<Color(int, int)>;
 using EYEQ::MonitorOutput;
 
-struct SourceOwner {
-  AVFormatContext *format = nullptr;
-  AVStream *stream = nullptr;
-  SourceOwner() {
-    format = avformat_alloc_context();
-    if (!format) {
-      throw std::runtime_error("avformat_alloc_context failed");
-    }
-    stream = avformat_new_stream(format, nullptr);
-    if (!stream) {
-      avformat_free_context(format);
-      format = nullptr;
-      throw std::runtime_error("avformat_new_stream failed");
-    }
-  }
-  ~SourceOwner() {
-    if (format) {
-      avformat_free_context(format);
-    }
-  }
-  SourceOwner(const SourceOwner &) = delete;
-  SourceOwner &operator=(const SourceOwner &) = delete;
-};
-
 // Full-range GBRPF32LE software frame (planes G/B/R).
-std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, const PixelFunc &pixel) {
+std::shared_ptr<AVFrame> MakeFrame(int width, int height, const PixelFunc &pixel) {
   AVFrame *frame = av_frame_alloc();
   if (!frame) {
     throw std::runtime_error("av_frame_alloc failed");
@@ -119,7 +94,6 @@ std::shared_ptr<AVFrame> MakeFrame(AVStream *stream, int width, int height, cons
       r[x] = c[0];
     }
   }
-  frame->opaque = stream;
   return std::shared_ptr<AVFrame>(frame, [](AVFrame *f) { av_frame_free(&f); });
 }
 
@@ -335,13 +309,13 @@ void CheckPackedAgainstOracle(SinkPair &sinks, MonitorOutput &monitor, pl_gpu gp
   Check(stats.exact > 0, "oracle comparison actually compared real fields");
 }
 
-void TestSdrR210(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestSdrR210(pl_gpu gpu, EYEQ::RenderContext &context) {
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 64, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
   {
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 96, 64, [](int x, int y) { return QuadrantPixel(x, y, 96, 64); });
+    auto frame = MakeFrame(96, 64, [](int x, int y) { return QuadrantPixel(x, y, 96, 64); });
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 101, 5001);
 
@@ -366,14 +340,14 @@ void TestSdrR210(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   }
 }
 
-void TestPqV210(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestPqV210(pl_gpu gpu, EYEQ::RenderContext &context) {
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 54, EYEQ::PixelFormat::V210, true, 1000.0, 16);
   const float pq100 = PqCodeForNits(100.0f);
   SinkPair sinks;
   {
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 96, 54, [&](int, int) { return Color{pq100, pq100, pq100}; });
+    auto frame = MakeFrame(96, 54, [&](int, int) { return Color{pq100, pq100, pq100}; });
     frame->color_primaries = AVCOL_PRI_BT2020;
     frame->color_trc = AVCOL_TRC_SMPTE2084;
     SetSourceMasteringPeak(frame.get(), 1000.0);
@@ -394,14 +368,14 @@ void TestPqV210(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   }
 }
 
-void TestSlideAndAmplify(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestSlideAndAmplify(pl_gpu gpu, EYEQ::RenderContext &context) {
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 48, EYEQ::PixelFormat::R210, false, 203.0, 0);
   {
     SinkPair sinks;
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Slide, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto left = MakeFrame(stream, 96, 48, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
-    auto right = MakeFrame(stream, 96, 48, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
+    auto left = MakeFrame(96, 48, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
+    auto right = MakeFrame(96, 48, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
     EYEQ::DisplayState request_state = MakeState({5, 9}, 5);
     auto request = MakeRequest(*coordinator, {{5, left}, {9, right}}, request_state, 5, 303, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "Slide request accepted");
@@ -416,8 +390,8 @@ void TestSlideAndAmplify(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *str
     SinkPair sinks;
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto dis = MakeFrame(stream, 96, 48, [](int, int) { return Color{0.4f, 0.4f, 0.4f}; });
-    auto ref = MakeFrame(stream, 96, 48, [](int, int) { return Color{0.2f, 0.2f, 0.2f}; });
+    auto dis = MakeFrame(96, 48, [](int, int) { return Color{0.4f, 0.4f, 0.4f}; });
+    auto ref = MakeFrame(96, 48, [](int, int) { return Color{0.2f, 0.2f, 0.2f}; });
     EYEQ::DisplayState request_state = MakeState({5, 9}, 5);
     request_state.ref_id = 9;
     request_state.amplify = 2.0f;
@@ -438,13 +412,13 @@ void TestSlideAndAmplify(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *str
   }
 }
 
-void TestGrid(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestGrid(pl_gpu gpu, EYEQ::RenderContext &context) {
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 48, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Grid, resolved);
   MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-  auto red = MakeFrame(stream, 48, 48, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
-  auto blue = MakeFrame(stream, 48, 48, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
+  auto red = MakeFrame(48, 48, [](int, int) { return Color{1.0f, 0.0f, 0.0f}; });
+  auto blue = MakeFrame(48, 48, [](int, int) { return Color{0.0f, 0.0f, 1.0f}; });
   EYEQ::DisplayState request_state = MakeState({5, 9}, 5);
   request_state.grid.cols = 2;
   request_state.grid.rows = 1;
@@ -458,13 +432,13 @@ void TestGrid(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "Grid closed");
 }
 
-void TestStillBusy(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestStillBusy(pl_gpu gpu, EYEQ::RenderContext &context) {
   const EYEQ::ResolvedOutput resolved = BuildResolved(64, 64, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
   sinks.scripted->ScriptStill(EYEQ::StillOutcome::Busy, 3);
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
   MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-  auto frame = MakeFrame(stream, 64, 64, [](int x, int y) { return QuadrantPixel(x, y, 64, 64); });
+  auto frame = MakeFrame(64, 64, [](int x, int y) { return QuadrantPixel(x, y, 64, 64); });
   EYEQ::DisplayState request_state = MakeState({5}, 5);
   auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 506, 77);
   Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "Busy test request accepted");
@@ -509,7 +483,7 @@ void TestStillBusy(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   // The next request is accepted and reuses the packer ring; the first sink copy
   // must remain its own independent snapshot.
   const std::vector<uint8_t> first_copy = *sinks.fake.copy(506);
-  auto other = MakeFrame(stream, 64, 64, [](int, int) { return Color{0.1f, 0.2f, 0.3f}; });
+  auto other = MakeFrame(64, 64, [](int, int) { return Color{0.1f, 0.2f, 0.3f}; });
   EYEQ::DisplayState third_state = MakeState({9}, 9);
   auto third = MakeRequest(*coordinator, {{9, other}}, third_state, 9, 508, 0);
   Check(monitor.Submit(third) == MonitorOutput::SubmitOutcome::Accepted, "next request accepted after completion");
@@ -519,7 +493,7 @@ void TestStillBusy(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "Busy test closed");
 }
 
-void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context) {
   (void)gpu;
   const EYEQ::ResolvedOutput resolved = BuildResolved(64, 54, EYEQ::PixelFormat::R210, false, 203.0, 0);
   {
@@ -527,7 +501,7 @@ void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     SinkPair sinks;
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
+    auto frame = MakeFrame(64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 601, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "cancel test request accepted");
@@ -544,7 +518,7 @@ void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     sinks.scripted->ScriptStill(EYEQ::StillOutcome::Busy, 100);
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
+    auto frame = MakeFrame(64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 602, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "cancel-busy request accepted");
@@ -576,7 +550,7 @@ void TestCancel(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   }
 }
 
-void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context) {
   (void)gpu;
   const EYEQ::ResolvedOutput resolved = BuildResolved(64, 54, EYEQ::PixelFormat::R210, false, 203.0, 0);
   {
@@ -584,7 +558,7 @@ void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream
     sinks.scripted->ScriptStill(EYEQ::StillOutcome::DeviceError, 1);
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
+    auto frame = MakeFrame(64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 701, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "device-error request accepted");
@@ -602,7 +576,7 @@ void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream
     sinks.scripted->ScriptStill(EYEQ::StillOutcome::Closed, 1);
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
+    auto frame = MakeFrame(64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 702, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "sink-closed request accepted");
@@ -621,7 +595,7 @@ void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream
     sinks.scripted->ScriptEvent(event);
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
+    auto frame = MakeFrame(64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 703, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "error-event request accepted");
@@ -633,7 +607,7 @@ void TestSinkFailures(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream
   }
 }
 
-void TestClose(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestClose(pl_gpu gpu, EYEQ::RenderContext &context) {
   (void)gpu;
   const EYEQ::ResolvedOutput resolved = BuildResolved(64, 54, EYEQ::PixelFormat::R210, false, 203.0, 0);
   {
@@ -642,7 +616,7 @@ void TestClose(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     sinks.scripted->ScriptStill(EYEQ::StillOutcome::Busy, 100);
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
+    auto frame = MakeFrame(64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 801, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "close-pending request accepted");
@@ -657,7 +631,7 @@ void TestClose(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
     sinks.scripted->ScriptClose(EYEQ::CloseStatus::DrainTimeout, 1);
     auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
+    auto frame = MakeFrame(64, 54, [](int, int) { return Color{0.3f, 0.3f, 0.3f}; });
     EYEQ::DisplayState request_state = MakeState({5}, 5);
     auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 802, 0);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "close-timeout request accepted");
@@ -669,7 +643,7 @@ void TestClose(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   }
 }
 
-void TestIsolation(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestIsolation(pl_gpu gpu, EYEQ::RenderContext &context) {
   // A second, independent consumer (its own coordinator/renderer) with a
   // different target must not affect the monitor output. This only shows resource
   // isolation, not a UI viewport.
@@ -684,7 +658,7 @@ void TestIsolation(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   desktop_config.canvas_w = 32;
   desktop_config.canvas_h = 32;
   EYEQ::DisplayCoordinator desktop(context, desktop_config);
-  auto desktop_source = MakeFrame(stream, 32, 32, [](int, int) { return Color{0.7f, 0.2f, 0.1f}; });
+  auto desktop_source = MakeFrame(32, 32, [](int, int) { return Color{0.7f, 0.2f, 0.1f}; });
   std::map<int, std::shared_ptr<AVFrame>> desktop_frames;
   desktop_frames[1] = desktop_source;
   desktop.SetMainSource(1);
@@ -718,7 +692,7 @@ void TestIsolation(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   SinkPair sinks;
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
   MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-  auto frame = MakeFrame(stream, 96, 64, [](int x, int y) { return QuadrantPixel(x, y, 96, 64); });
+  auto frame = MakeFrame(96, 64, [](int x, int y) { return QuadrantPixel(x, y, 96, 64); });
   EYEQ::DisplayState request_state = MakeState({5}, 5);
   auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 1001, 0);
   Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "isolated monitor request accepted");
@@ -728,14 +702,14 @@ void TestIsolation(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
   pl_tex_destroy(gpu, &desktop_tex);
 }
 
-void TestUhdOnce(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestUhdOnce(pl_gpu gpu, EYEQ::RenderContext &context) {
   const int width = 3840;
   const int height = 2160;
   const EYEQ::ResolvedOutput resolved = BuildResolved(width, height, EYEQ::PixelFormat::R210, false, 203.0, 16);
   SinkPair sinks;
   auto coordinator = MakeCoordinator(context, EYEQ::DisplayMode::Fill, resolved);
   MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-  auto frame = MakeFrame(stream, width, height, [](int x, int y) { return QuadrantPixel(x, y, 3840, 2160); });
+  auto frame = MakeFrame(width, height, [](int x, int y) { return QuadrantPixel(x, y, 3840, 2160); });
   EYEQ::DisplayState request_state = MakeState({5}, 5);
   auto request = MakeRequest(*coordinator, {{5, frame}}, request_state, 5, 1101, 0);
   Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted, "UHD request accepted");
@@ -789,9 +763,9 @@ Color Ramp(int x, int y, int w) {
   return {v, 1.0f - v, 0.5f * v};
 }
 
-void Feed(EYEQ::DisplayCoordinator &coordinator, AVStream *stream, int w, int h) {
+void Feed(EYEQ::DisplayCoordinator &coordinator, int w, int h) {
   std::map<int, std::shared_ptr<AVFrame>> frames;
-  frames[0] = MakeFrame(stream, w, h, [w](int x, int y) { return Ramp(x, y, w); });
+  frames[0] = MakeFrame(w, h, [w](int x, int y) { return Ramp(x, y, w); });
   coordinator.FeedFrames(frames);
 }
 
@@ -823,8 +797,8 @@ bool DriveTicks(MonitorOutput &monitor, const std::function<bool()> &done, int m
 
 // Composes a solid-color scene (the feed generation changes, so every call produces a
 // new render identity).
-void ComposeSolid(EYEQ::DisplayCoordinator &coordinator, AVStream *stream, int w, int h, const Color &c) {
-  auto frame = MakeFrame(stream, w, h, [c](int, int) { return c; });
+void ComposeSolid(EYEQ::DisplayCoordinator &coordinator, int w, int h, const Color &c) {
+  auto frame = MakeFrame(w, h, [c](int, int) { return c; });
   coordinator.SetMainSource(0);
   coordinator.FeedFrames({{0, frame}});
   EYEQ::DisplayState state = MakeState({0}, 0);
@@ -834,7 +808,7 @@ void ComposeSolid(EYEQ::DisplayCoordinator &coordinator, AVStream *stream, int w
 // Continuous paced submissions must reach the sink in composition order, at strictly
 // increasing display ticks, with bytes that match the independent CPU packing oracle
 // of the frame's own target.
-void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context, AVStream *stream) {
+void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[paced playback: order, display ticks, bytes vs oracle]\n");
   const int w = 64;
   const int h = 48;
@@ -851,7 +825,7 @@ void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context, AVStream *stre
   std::vector<std::vector<float>> frame_rgb;
   std::vector<std::vector<uint8_t>> frame_bytes;
   for (int i = 0; i < kFrames; ++i) {
-    ComposeSolid(*coordinator, stream, w, h, Color{0.05f + 0.15f * i, 0.1f + 0.1f * i, 0.2f});
+    ComposeSolid(*coordinator, w, h, Color{0.05f + 0.15f * i, 0.1f + 0.1f * i, 0.2f});
     const std::size_t schedules_before = sink->schedule_calls().size();
     monitor.Tick(); // enqueue the new composition
     const bool ok = DriveTicks(monitor, [&]() { return sink->schedule_calls().size() > schedules_before; });
@@ -890,7 +864,7 @@ void TestPacedPlaybackOrderAndBytes(EYEQ::RenderContext &context, AVStream *stre
 
 // When the sink cannot schedule (Busy), the bounded queue overflows by dropping the
 // oldest unscheduled frame; the newest frames survive and still reach the sink.
-void TestPacedOverflowDropsOldest(EYEQ::RenderContext &context, AVStream *stream) {
+void TestPacedOverflowDropsOldest(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[paced playback: queue overflow drops the oldest unscheduled frame]\n");
   const int w = 64;
   const int h = 48;
@@ -906,7 +880,7 @@ void TestPacedOverflowDropsOldest(EYEQ::RenderContext &context, AVStream *stream
 
   const int kFrames = 6; // more than the ring capacity
   for (int i = 0; i < kFrames; ++i) {
-    ComposeSolid(*coordinator, stream, w, h, Color{0.05f + 0.12f * i, 0.3f, 0.1f});
+    ComposeSolid(*coordinator, w, h, Color{0.05f + 0.12f * i, 0.3f, 0.1f});
     monitor.Tick();
     YieldToGpu();
   }
@@ -932,7 +906,7 @@ void TestPacedOverflowDropsOldest(EYEQ::RenderContext &context, AVStream *stream
 
 // Pause stops the scheduled session and freezes the last frame as a still; new scenes
 // shown while paused stay stills; resuming jumps to the latest composed frame.
-void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
+void TestPacedPauseResume(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[paced playback: pause freezes, resume jumps to the latest]\n");
   const int w = 64;
   const int h = 48;
@@ -944,7 +918,7 @@ void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
   MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
 
   monitor.SetPlayback(true);
-  ComposeSolid(*coordinator, stream, w, h, Color{0.9f, 0.1f, 0.1f});
+  ComposeSolid(*coordinator, w, h, Color{0.9f, 0.1f, 0.1f});
   monitor.Tick();
   Check(DriveTicks(monitor, [&]() { return sink->schedule_calls().size() >= 1; }), "the first paced frame schedules");
   const std::size_t schedules_after_first = sink->schedule_calls().size();
@@ -958,7 +932,7 @@ void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
 
   // New scenes while paused are stills, never paced schedules.
   for (int i = 0; i < 2; ++i) {
-    ComposeSolid(*coordinator, stream, w, h, Color{0.1f, 0.8f - 0.1f * i, 0.2f});
+    ComposeSolid(*coordinator, w, h, Color{0.1f, 0.8f - 0.1f * i, 0.2f});
     monitor.Tick();
     Check(DriveTicks(monitor, [&]() { return !monitor.in_flight(); }), "paused still completes");
   }
@@ -966,7 +940,7 @@ void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
   Check(sink->still_calls() >= 2, "paused scenes are shown as stills");
 
   // Latest composition before resume.
-  ComposeSolid(*coordinator, stream, w, h, Color{0.2f, 0.2f, 0.9f});
+  ComposeSolid(*coordinator, w, h, Color{0.2f, 0.2f, 0.9f});
   monitor.Tick();
   Check(DriveTicks(monitor, [&]() { return !monitor.in_flight(); }), "the latest paused still completes");
   const std::vector<float> latest_rgb = DownloadTargetRgb(context.gpu(), monitor);
@@ -985,7 +959,7 @@ void TestPacedPauseResume(EYEQ::RenderContext &context, AVStream *stream) {
 // Resuming playback right after a pause must reclaim the freeze still's packer
 // slot: without the reclaim the still's undrained readback holds one ring slot for
 // the whole playback session and the paced queue caps at ring-1.
-void TestPacedResumeReclaimsStillSlot(EYEQ::RenderContext &context, AVStream *stream) {
+void TestPacedResumeReclaimsStillSlot(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[paced playback: resume reclaims the freeze still's slot]\n");
   const int w = 64;
   const int h = 48;
@@ -997,7 +971,7 @@ void TestPacedResumeReclaimsStillSlot(EYEQ::RenderContext &context, AVStream *st
   MonitorOutput monitor(context, *coordinator, std::move(scripted), resolved);
 
   monitor.SetPlayback(true);
-  ComposeSolid(*coordinator, stream, w, h, Color{0.9f, 0.1f, 0.1f});
+  ComposeSolid(*coordinator, w, h, Color{0.9f, 0.1f, 0.1f});
   monitor.Tick();
   Check(DriveTicks(monitor, [&]() { return sink->schedule_calls().size() >= 1; }), "the first paced frame schedules");
 
@@ -1013,7 +987,7 @@ void TestPacedResumeReclaimsStillSlot(EYEQ::RenderContext &context, AVStream *st
   sink->ScriptSchedule(EYEQ::ScheduleOutcome::Busy, 1000);
   const int kFrames = 8; // comfortably more than the ring capacity
   for (int i = 0; i < kFrames; ++i) {
-    ComposeSolid(*coordinator, stream, w, h, Color{0.05f + 0.12f * i, 0.3f, 0.1f});
+    ComposeSolid(*coordinator, w, h, Color{0.05f + 0.12f * i, 0.3f, 0.1f});
     monitor.Tick();
     YieldToGpu();
   }
@@ -1022,7 +996,7 @@ void TestPacedResumeReclaimsStillSlot(EYEQ::RenderContext &context, AVStream *st
   Check(monitor.Close(2000) == EYEQ::CloseStatus::Closed, "reclaim monitor closed");
 }
 
-void TestSharedResultAndResubmit(EYEQ::RenderContext &context, AVStream *stream) {
+void TestSharedResultAndResubmit(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[shared result, resize/OSD stability, resubmission]\n");
   const int w = 64;
   const int h = 48;
@@ -1034,7 +1008,7 @@ void TestSharedResultAndResubmit(EYEQ::RenderContext &context, AVStream *stream)
   auto controller = std::make_unique<MonitorOutput>(context, *coordinator, std::move(scripted), resolved);
 
   EYEQ::DisplayState state = MakeState({0}, 0);
-  Feed(*coordinator, stream, w, h);
+  Feed(*coordinator, w, h);
   auto desktop = CreateTarget(context.gpu(), w, h, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
   coordinator->PresentTo(desktop.frame, state);
   const pl_tex shared = coordinator->result().texture;
@@ -1079,7 +1053,7 @@ void TestSharedResultAndResubmit(EYEQ::RenderContext &context, AVStream *stream)
   pl_tex_destroy(context.gpu(), &desktop.tex);
 }
 
-void TestRecomposeWhileInFlight(EYEQ::RenderContext &context, AVStream *stream) {
+void TestRecomposeWhileInFlight(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[recompose while a monitor request is in flight]\n");
   const int w = 64;
   const int h = 48;
@@ -1092,7 +1066,7 @@ void TestRecomposeWhileInFlight(EYEQ::RenderContext &context, AVStream *stream) 
   auto controller = std::make_unique<MonitorOutput>(context, *coordinator, std::move(scripted), resolved);
 
   EYEQ::DisplayState state = MakeState({0}, 0);
-  Feed(*coordinator, stream, w, h);
+  Feed(*coordinator, w, h);
   auto desktop = CreateTarget(context.gpu(), w, h, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
   coordinator->PresentTo(desktop.frame, state);
   const uint64_t first_render = coordinator->result().identity.render_id;
@@ -1121,7 +1095,7 @@ void TestRecomposeWhileInFlight(EYEQ::RenderContext &context, AVStream *stream) 
   pl_tex_destroy(context.gpu(), &desktop.tex);
 }
 
-void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
+void TestCancelFailureClose(EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[cancel, sink failure, close]\n");
   const int w = 64;
   const int h = 48;
@@ -1136,7 +1110,7 @@ void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
     scripted->ScriptStill(EYEQ::StillOutcome::Busy, 5);
     auto controller = std::make_unique<MonitorOutput>(context, *coordinator, std::move(scripted), resolved);
     EYEQ::DisplayState state = MakeState({0}, 0);
-    Feed(*coordinator, stream, w, h);
+    Feed(*coordinator, w, h);
     auto desktop = CreateTarget(context.gpu(), w, h, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
     coordinator->PresentTo(desktop.frame, state);
     controller->Tick();
@@ -1158,7 +1132,7 @@ void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
     scripted->ScriptStill(EYEQ::StillOutcome::DeviceError, 1);
     auto controller = std::make_unique<MonitorOutput>(context, *coordinator, std::move(scripted), resolved);
     EYEQ::DisplayState state = MakeState({0}, 0);
-    Feed(*coordinator, stream, w, h);
+    Feed(*coordinator, w, h);
     auto desktop = CreateTarget(context.gpu(), w, h, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
     coordinator->PresentTo(desktop.frame, state);
     Check(DriveController(*controller) > 0, "sink failure case: the request drains");
@@ -1182,7 +1156,7 @@ void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
     scripted->ScriptStill(EYEQ::StillOutcome::Busy, 5);
     auto controller = std::make_unique<MonitorOutput>(context, *coordinator, std::move(scripted), resolved);
     EYEQ::DisplayState state = MakeState({0}, 0);
-    Feed(*coordinator, stream, w, h);
+    Feed(*coordinator, w, h);
     auto desktop = CreateTarget(context.gpu(), w, h, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
     coordinator->PresentTo(desktop.frame, state);
     controller->Tick();
@@ -1197,7 +1171,7 @@ void TestCancelFailureClose(EYEQ::RenderContext &context, AVStream *stream) {
 
 // The canvas size need not match the mode: the monitor scales and letterboxes the
 // canvas like the desktop window, so it shows what the window shows.
-void TestScaledCanvas(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream) {
+void TestScaledCanvas(pl_gpu gpu, EYEQ::RenderContext &context) {
   std::fprintf(stdout, "[canvas scaled into the monitor mode]\n");
   const EYEQ::ResolvedOutput resolved = BuildResolved(96, 64, EYEQ::PixelFormat::V210, false, 203.0, 0);
   SinkPair sinks;
@@ -1216,7 +1190,7 @@ void TestScaledCanvas(pl_gpu gpu, EYEQ::RenderContext &context, AVStream *stream
     cfg.canvas_h = 16;
     auto coordinator = std::make_unique<EYEQ::DisplayCoordinator>(context, cfg, nullptr);
     MonitorOutput monitor(context, *coordinator, sinks.take(), resolved);
-    auto frame = MakeFrame(stream, 48, 16,
+    auto frame = MakeFrame(48, 16,
                            [](int x, int) { return x < 24 ? Color{1.0f, 0.0f, 0.0f} : Color{0.0f, 0.0f, 1.0f}; });
     auto request = MakeRequest(*coordinator, {{5, frame}}, MakeState({5}, 5), 5, 701, 7001);
     Check(monitor.Submit(request) == MonitorOutput::SubmitOutcome::Accepted,
@@ -1267,26 +1241,24 @@ int main() {
     EYEQ::RenderContext context(EYEQ::LoggingLevel::WARN, nullptr, nullptr, 0);
     context.CreateHeadlessDevice();
     pl_gpu gpu = context.gpu();
-    SourceOwner owner;
-
-    TestSdrR210(gpu, context, owner.stream);
-    TestPqV210(gpu, context, owner.stream);
-    TestScaledCanvas(gpu, context, owner.stream);
-    TestSlideAndAmplify(gpu, context, owner.stream);
-    TestGrid(gpu, context, owner.stream);
-    TestStillBusy(gpu, context, owner.stream);
-    TestCancel(gpu, context, owner.stream);
-    TestSinkFailures(gpu, context, owner.stream);
-    TestClose(gpu, context, owner.stream);
-    TestIsolation(gpu, context, owner.stream);
-    TestUhdOnce(gpu, context, owner.stream);
-    TestPacedPlaybackOrderAndBytes(context, owner.stream);
-    TestPacedOverflowDropsOldest(context, owner.stream);
-    TestPacedPauseResume(context, owner.stream);
-    TestPacedResumeReclaimsStillSlot(context, owner.stream);
-    TestSharedResultAndResubmit(context, owner.stream);
-    TestRecomposeWhileInFlight(context, owner.stream);
-    TestCancelFailureClose(context, owner.stream);
+    TestSdrR210(gpu, context);
+    TestPqV210(gpu, context);
+    TestScaledCanvas(gpu, context);
+    TestSlideAndAmplify(gpu, context);
+    TestGrid(gpu, context);
+    TestStillBusy(gpu, context);
+    TestCancel(gpu, context);
+    TestSinkFailures(gpu, context);
+    TestClose(gpu, context);
+    TestIsolation(gpu, context);
+    TestUhdOnce(gpu, context);
+    TestPacedPlaybackOrderAndBytes(context);
+    TestPacedOverflowDropsOldest(context);
+    TestPacedPauseResume(context);
+    TestPacedResumeReclaimsStillSlot(context);
+    TestSharedResultAndResubmit(context);
+    TestRecomposeWhileInFlight(context);
+    TestCancelFailureClose(context);
     TestInitFailureRollback(context);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FATAL: %s\n", e.what());
