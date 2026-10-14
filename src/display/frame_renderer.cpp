@@ -68,6 +68,9 @@ FrameRenderer::FrameRenderer(RenderContext &context, const Config &config, Color
   // source (see FillRender::SetClip).
   color_map_params_ = pl_color_map_default_params;
   color_map_params_.tone_mapping_function = &pl_tone_map_spline;
+  // A source gamut wider than the mapping target is clipped, not compressed:
+  // perceptual mapping would also move in-gamut colors near the boundary.
+  color_map_params_.gamut_mapping = &pl_gamut_map_clip;
   render_params_.color_map_params = &color_map_params_;
 
   render_params_.upscaler = get_filter_config(config.scale_method);
