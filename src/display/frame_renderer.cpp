@@ -769,6 +769,12 @@ bool FrameRenderer::EncodeToTarget(struct pl_frame &target, const struct pl_fram
   if (!encoder_ || !target.planes[0].texture || !linear.planes[0].texture) {
     return false;
   }
+  // The encoder is transfer-only: it may only run when the target already uses
+  // the mapping target's primaries (BT.2020/PQ). A BT.709 SDR target needs a gamut
+  // conversion, which the color-managed presentation hop performs.
+  if (target.color.primaries != mapping_target_.primaries) {
+    return false;
+  }
   EncodeParams params;
   switch (target.color.transfer) {
   case PL_COLOR_TRC_PQ:

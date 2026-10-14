@@ -185,18 +185,21 @@ struct OffscreenTarget {
 
 OffscreenTarget CreateTarget(pl_gpu gpu, int width, int height, enum pl_color_primaries primaries,
                              enum pl_color_transfer transfer) {
-  pl_fmt format = pl_find_fmt(
-      gpu, PL_FMT_FLOAT, 4, 32, 32,
-      static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+  pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+                              static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE |
+                                                            PL_FMT_CAP_HOST_READABLE | PL_FMT_CAP_BLITTABLE));
   if (!format) {
     throw std::runtime_error("no rgba32f texture format available");
   }
+  // Blittable like a swapchain image: the color-managed presentation hop clears
+  // the letterbox with pl_tex_clear.
   struct pl_tex_params params = {
       .w = width,
       .h = height,
       .format = format,
       .sampleable = true,
       .renderable = true,
+      .blit_dst = true,
       .host_readable = true,
   };
   OffscreenTarget target;

@@ -33,6 +33,9 @@ FillRender::FillRender(pl_log log, pl_gpu gpu, struct pl_render_params *render_p
   // compose and explicit-encode stages stay dither-free.
   present_params_.dither_params = pl_render_default_params.dither_params;
   present_params_.peak_detect_params = nullptr;
+  // PresentTo clears the letterbox to black itself; libplacebo's border clear
+  // would paint it with the comparison background color instead.
+  present_params_.border = PL_CLEAR_SKIP;
 
   for (int i = 0; i < PL_MAX_PLANES; i++) {
     render_tex_[i] = nullptr;
