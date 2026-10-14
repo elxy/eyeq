@@ -132,6 +132,33 @@ eyeq --hardware-decoder vaapi <test_0> <test_1>
 
 Supported hardware decoders: `auto` (default), `none`, `videotoolbox` (macOS), `vaapi` (Linux), `cuda` (NVIDIA), `d3d12va` (Windows), `d3d11va` (Windows), `dxva2` (Windows).
 
+### HDR Display
+
+```sh
+# Default: EyeQ does not map the luminance and leaves it to the system; HDR10 looks the same as in QuickTime
+eyeq <test_0> <test_1>
+
+# Subjective quality assessment: map to 1000 nits. On macOS, use the reference preset "HDR Video (P3-ST 2084)" to show absolute luminance
+eyeq --target-display-nits 1000 <test_0> <test_1>
+
+# Clip what exceeds the target instead of rolling off the highlights (simulates a reference monitor)
+eyeq --target-display-nits 1000 --tone-mapping clip <test_0> <test_1>
+
+# On a SDR display, let EyeQ map HDR to SDR
+eyeq --target-display-nits sdr <test_0> <test_1>
+
+# Compare a SDR video with a HDR video; a mapping target is required when the main video (the first by default) is SDR
+eyeq --target-display-nits sdr <sdr_video> <hdr_video>
+
+# HDR images without color tags or a mastering peak (e.g. DPX, JPEG XL)
+eyeq --filter setparams=color_primaries=bt2020:color_trc=smpte2084 --default-mastering-nits 1000 <a.dpx> <b.jxl>
+
+# HDR Vivid: map with the Vivid curve to the target display luminance
+eyeq --hdrvivid-render --target-display-nits 1000 <test_0> <test_1>
+```
+
+When a mapping is needed but no mapping target is given, EyeQ fails and tells you what to add. For the mapping rules, the macOS reference and non-reference modes, dynamic metadata and multi-video comparison, see [HDR display and luminance mapping](docs/HDR_DISPLAY_zh.md) (Chinese for now).
+
 ### ICC Color Management
 
 Enable ICC color management with the `--icc-profile` option:
@@ -166,7 +193,7 @@ After launching, the following keyboard and mouse controls are available:
 - A: Step backward 1 frame
 - D: Step forward 1 frame
 - Ctrl + S: Save the current frame as `<frame_number>.<video_id>.<filename>.png`
-- Ctrl + E: Save the rendered frame (post-tone-mapping display output) as `render_<frame_number>.<video_id>.<filename>.dpx`
+- Ctrl + E: Save the rendered frame (the picture after EyeQ's mapping, before it is handed to the system) as `render_<frame_number>.<video_id>.<filename>.dpx`
 - Mouse wheel: Zoom in/out (centered on the cursor position)
 - Middle mouse button drag: Pan the video
 - I: Toggle OSD display
@@ -193,7 +220,7 @@ After launching, the following keyboard and mouse controls are available:
 
 - `<videos>`: Specify videos to compare (multiple allowed). URLs are supported (FFmpeg built via Homebrew supports network protocols by default)
 - `--ref`: Specify a reference video
-- `--main`: Specify the main video. Other videos' rendering resolution and target color space will match the main video. If a reference video is specified, it becomes the main video by default; otherwise, the first video is used unless `--main` is set
+- `--main`: Specify the main video. Other videos match the main video's resolution; without `--target-display-nits`, the output color space also follows the main video. If a reference video is specified, it becomes the main video by default; otherwise, the first video is used unless `--main` is set
 - `--display-mode <mode>`: Display mode — `fill` (single window with key switching), `slide` (side-by-side swipe), `grid` (grid layout). If not specified, the mode is chosen automatically: `slide` for 2 videos, `fill` otherwise
 - `--flicker <secs>`: During playback, alternate between the reference video and the test video at the specified interval (in seconds)
 - `--amplify <ratio>`: Scale pixel differences relative to the reference video; > 1 amplifies, < 1 attenuates
@@ -202,13 +229,13 @@ After launching, the following keyboard and mouse controls are available:
 - `--grid-size <size>`: Grid layout size, e.g. `--grid-size 2x2`. Defaults to automatic selection
 - `--filter <filter>`: Default video filter applied to videos without a per-video filter, using [FFmpeg Filters](https://ffmpeg.org/ffmpeg-filters.html) syntax. Per-video filters can be appended after the video path with `@`, e.g. `video.mp4@"filter"`
 - `--filter-sep <sep>`: Separator for per-video filters (default `@`). Use this when filenames contain `@`
-- `--reference-white <nits>`: Single SDR reference white level in nits (default 203, ITU-R BT.2408). It is used as the source SDR white when the main video is HDR and as the monitor mapping/wire SDR white when monitoring; a pure SDR desktop is unaffected. Replaces `--sdr-white-on-hdr` and `--monitor-sdr-white`
-- `--target-display-nits <nits|sdr>`: The mapping target, i.e. what EyeQ maps every source to. A value in nits is a HDR display with that peak, and the output is PQ; `sdr` is a SDR display, the output is SDR and the mapping target peak is the SDR white. It also is the target display luminance of the Vivid curve with `--hdrvivid-render`, and the monitor peak when monitoring. **There is no default**: without it EyeQ does not map and the system maps the output to the display (see `--tone-mapping`). It is required, and EyeQ fails without it, with `--monitor-device`, with `--hdrvivid-render`, when the main video is SDR while another video is HDR, and with a global `--icc-profile` while a video is HDR (only `sdr` is allowed then). A global `--icc-profile` cannot be combined with a target in nits.
-- `--tone-mapping {system,clip,clip-rgb,spline}`: How EyeQ maps sources brighter than the mapping target. `system`: EyeQ does not map, the output follows the main video and the system maps it, so HDR10 matches QuickTime; this is the default without `--target-display-nits` and cannot be combined with `--target-display-nits`, `--monitor-device` or `--hdrvivid-render`. `clip`: clip to the mapping target and keep the hue; a pixel above it is scaled down by its largest channel. `clip-rgb`: clip R, G and B to the mapping target separately. `spline`: roll off the highlights (libplacebo's spline curve); this is the default with `--target-display-nits`. The last three need `--target-display-nits`. A source mapped by its own dynamic-metadata curve (currently only HDR Vivid with `--hdrvivid-render`) is not affected by this option.
-- `--default-mastering-nits <nits>`: Mastering display peak in nits for HDR sources that have none (e.g. DPX and JPEG XL, whose peak FFmpeg does not read). Sources that carry a peak, MaxCLL and dynamic metadata are left unchanged; a MaxCLL above this value is only reported. When a HDR source has no peak and this option is not given, EyeQ warns and assumes the PQ maximum of 10000 nits, so the picture looks darker.
-- `--hdrvivid-render`: Enable HDR Vivid rendering. Requires `--target-display-nits`.
+- `--reference-white <nits>`: SDR reference white in nits (default 203, ITU-R BT.2408). Used when SDR videos are placed into a HDR output; when monitoring, also the white of a SDR monitor
+- `--target-display-nits <nits|sdr>`: The mapping target. A value in nits is a HDR display with that peak, and the output is PQ; `sdr` is a SDR display, and the output is SDR. There is no default; without it EyeQ does not map and leaves it to the system. It is also the monitor peak when monitoring and the target display luminance of the Vivid curve
+- `--tone-mapping {system,clip,clip-rgb,spline}`: What to do with what exceeds the mapping target. `system`: the default without `--target-display-nits`; EyeQ does nothing and leaves it to the system. `clip`: clip and keep the hue. `clip-rgb`: clip R, G and B separately. `spline`: roll off the highlights; the default with `--target-display-nits`. Does not affect Vivid sources with `--hdrvivid-render`
+- `--default-mastering-nits <nits>`: Mastering peak in nits for HDR sources that have none. Sources that carry a peak are not affected
+- `--hdrvivid-render`: Map HDR Vivid sources with the Vivid curve. Requires `--target-display-nits`
 - `--high-dpi {auto,yes,no}`: High-DPI mode (default `auto`)
-- `--scale-method <method>`: Upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
+- `--scale-method <method>`: Picture upscaling method — `nearest`, `bilinear`, `bicubic`, `lanczos`, `ewa_lanczos`, `ewa_lanczossharp`, `mitchell`, `catmull_rom`, `spline36`, `spline64` (default `nearest`)
 - `--plane-scale-method <method>`: Chroma interpolation method (default `lanczos`)
 - `--seek-to <secs>`: Start playback at the specified time (in seconds)
 - `--seek-to-frame <N>`: Start playback from the Nth frame (0-based)
@@ -220,11 +247,11 @@ After launching, the following keyboard and mouse controls are available:
 - `--loglevel <level>`: Log level — `debug`, `info`, `warning`, `error`, `critical`, `off` (default `info`)
 - `--debug`: Equivalent to `--loglevel debug`
 - `--monitor-status`: Print the read-only DeckLink device/mode catalog (devices, capabilities, output connections, and the native modes per connection/pixel format) and exit. It enables nothing
-- `--monitor-device <auto|selector>`: Enable monitoring on a DeckLink device. `auto` picks a playback-capable device, skipping any that is busy (if every candidate fails, the reason for each is reported); otherwise the selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`); the macOS system color management itself is untouched Requires `--target-display-nits` (the value in nits is the monitor peak; `sdr` for a SDR monitor).
+- `--monitor-device <auto|selector>`: Enable monitoring on a DeckLink device. `auto` picks a playback-capable device, skipping any that is busy (if every candidate fails, the reason for each is reported); otherwise the selector is explicit: `index:<n>` or `id:<persistent-id>`. Enabling monitoring disables every application-side ICC profile (global, `auto` and `N:path`); the macOS system color management itself is untouched. Requires `--target-display-nits`: a value in nits is the monitor peak, `sdr` is for a SDR monitor
 - `--monitor-mode <auto|WxH@N|WxH@N/D>`: Monitor mode. `auto` (default) picks the native mode closest to the main video (exact rate first, then the lowest rate not below the source; within that rate the smallest mode covering the source). An explicit value is exact integer data, e.g. `3840x2160@50` or `3840x2160@30000/1001`, and a mode the device does not natively support is rejected
 - `--monitor-connection {auto,sdi,hdmi}`: Output connection. `auto` (default) follows the device's already active output, preferring SDI when the device reports it; the actual wiring is not probed, so use an explicit value if the device reports both
 - `--monitor-pixel-format {v210,r210}`: Output pixel format (default `v210`)
-- `--monitor-color {auto,sdr709,pq2020}`: Color target. `auto` (default) follows the mapping target: `pq2020` (BT.2020 / PQ) when `--target-display-nits` is a value in nits, `sdr709` (BT.709 / BT.1886) when it is `sdr`. An explicit value that contradicts the mapping target is an error
+- `--monitor-color {auto,sdr709,pq2020}`: Color target. `auto` (default) follows `--target-display-nits`: `pq2020` (BT.2020 / PQ) for a value in nits, `sdr709` (BT.709 / BT.1886) for `sdr`. An explicit value must match it
 
 ### Environment Variables
 
@@ -234,12 +261,12 @@ After launching, the following keyboard and mouse controls are available:
 
 1. **Why does a video look different in QuickTime and EyeQ?**
 
-   The primary reason is that QuickTime applies color management, while EyeQ does not (unless `--icc-profile` is used). A secondary reason is that macOS uses a different EOTF for BT.709 than EyeQ.
-   - For HDR10, EyeQ does not map the luminance by default and, like QuickTime, leaves it to macOS, so both look the same (within 0.4% as measured). With `--target-display-nits`, EyeQ first maps every source to that target and macOS then maps the output again to the display's current headroom; a source mastered above the target then looks different from QuickTime. For absolute PQ, use the reference preset "HDR Video (P3 ST 2084)". See [HDR display and luminance mapping](docs/HDR_DISPLAY_zh.md) (Chinese for now).
-   - For BT.709, QuickTime decodes R'G'B' to RGB using EOTF ≈ 1.961 gamma, while EyeQ uses BT.1886 (≈ 2.4 gamma). As a result, QuickTime appears slightly brighter.
+   The reason depends on the video type:
+   - For HDR10, by default EyeQ, like QuickTime, leaves both the luminance mapping and the color conversion to the display to macOS; as measured, the pixels the two send to the screen differ by less than 1%. The remaining small difference presumably comes from different decoding implementations, e.g. chroma upsampling (EyeQ uses `lanczos` by default, adjustable with `--plane-scale-method`); this is not confirmed. With `--target-display-nits`, EyeQ maps first, and a video mastered above the target looks different from QuickTime. See [HDR display and luminance mapping](docs/HDR_DISPLAY_zh.md) (Chinese for now).
+   - For BT.709, macOS also converts the colors to the display for both, so the colors match; the difference is the transfer function: QuickTime decodes R'G'B' to RGB using EOTF ≈ 1.961 gamma, while EyeQ uses BT.1886 (≈ 2.4 gamma) (measured about 1.95 and 2.38), so QuickTime's shadows and midtones are brighter.
      - QuickTime can also use BT.1886 if the MOV file's nclc tag is set to 1-2-1. See [Quicktime Color Management: why so many ISSUES?!](https://www.youtube.com/watch?v=1QlnhlO6Gu8)
 
-   Other contributing factors include: scaling algorithms (including chroma plane scaling), deblocking, deringing, bit-depth dithering, and some players even apply color enhancement. Compared to [libplacebo's default rendering settings](https://code.videolan.org/videolan/libplacebo/-/blob/v7.351/src/renderer.c?ref_type=heads#L201), EyeQ disables bit-depth dithering and allows customizing the scaling algorithm.
+   Other possible causes include: the picture scaling algorithm (when the video resolution differs from the window's pixels), deblocking, deringing, bit-depth dithering, and some players even apply color enhancement. Compared to [libplacebo's default rendering settings](https://code.videolan.org/videolan/libplacebo/-/blob/v7.351/src/renderer.c?ref_type=heads#L201), EyeQ disables bit-depth dithering, and lets you adjust the picture scaling and the chroma upsampling algorithms separately with `--scale-method` and `--plane-scale-method`.
 
 2. **Why does a saved PNG frame look different in Preview and EyeQ?**
 
@@ -254,9 +281,7 @@ After launching, the following keyboard and mouse controls are available:
 
 3. **Can I compare HDR and SDR videos simultaneously?**
 
-   Yes, but a mapping target (`--target-display-nits`) is needed: EyeQ maps every video to the same target before comparing them.
-   - If the main video is HDR, the target is optional: the output is HDR (PQ) and SDR videos are placed at a reference white of 203 nits; use `--reference-white` to override it.
-   - If the main video is SDR, the target is required and EyeQ fails without it: `--target-display-nits sdr` gives a SDR output with HDR videos mapped to SDR; `--target-display-nits <nits>` gives a HDR (PQ) output with SDR videos placed at the reference white.
+   Yes. If the main video is HDR, compare them directly: SDR videos are placed into the HDR output at the reference white (`--reference-white`, default 203 nits). If the main video is SDR, `--target-display-nits` (`sdr` or a value in nits) is required; see [HDR Display](#hdr-display).
 
 4. **Incompatible pixel format (e.g. `pl_map_avframe_ex() failed`)**
 
@@ -264,14 +289,14 @@ After launching, the following keyboard and mouse controls are available:
 
 5. **How do I play back a DPX frame saved via `Ctrl + E`?**
 
-   The DPX header records transfer/primaries with SMPTE ST 268:2014 values (PQ=14, HLG=15, BT.2020=15) that FFmpeg's DPX decoder does not recognize (it maps transfer/colorimetric only up to 12/10), and its reference high quantity (HDR peak) is not read. EyeQ therefore sees an unknown color space and no mastering peak — add a `setparams` filter to restore the color space, and `--default-mastering-nits` to supply the mastering peak:
+   FFmpeg cannot read the PQ/HLG and the peak recorded in the DPX header. Restore the color space with `setparams` and supply the peak with `--default-mastering-nits`:
 
    ```
    eyeq --default-mastering-nits 1000 \
      'render_0001.0.foo.mkv.dpx@setparams=color_primaries=bt2020:color_trc=smpte2084'
    ```
 
-   Use `color_trc=arib-std-b67` for HLG. Pass the output peak the frame was saved with: the `--target-display-nits` value if one was given, otherwise the source's mastering peak. Without a peak a PQ source is assumed to reach 10000 nits and the picture looks darker. Add `--target-display-nits sdr` to let EyeQ map to SDR.
+   Use the output peak the frame was saved with: the `--target-display-nits` value if one was given, otherwise the source's mastering peak. Use `color_trc=arib-std-b67` for HLG. For the reason, see section 6 of [HDR display and luminance mapping](docs/HDR_DISPLAY_zh.md).
 
 ## License
 

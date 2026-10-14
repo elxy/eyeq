@@ -192,7 +192,20 @@ QuickTime（AVFoundation）不自己压缩HDR10，而是把源元数据交给系
 | 1000 nits母版 | `--target-display-nits 1000` | 0.996–0.997 |
 | 4000 nits母版 | `--target-display-nits 1000` | 0.93–1.01 |
 
-最后一行有差别是预期的：EyeQ先把4000 nits的源压缩到1000 nits，高光的曲线形状由EyeQ决定。
+前三行剩下的差别不随亮度变化，参考模式下也是如此。两者的色彩转换都由macOS完成（EyeQ把BT.2020/PQ色彩空间交给窗口）。按通道看：
+
+| EyeQ设置 | R | G | B |
+|---|---|---|---|
+| 默认（色度上采样`lanczos`） | 0.992 | 0.998 | 0.995 |
+| `--plane-scale-method bilinear` | 0.995 | 0.996 | 0.996 |
+| `--plane-scale-method nearest` | 0.996 | 0.996 | 0.996 |
+
+（EyeQ ÷ QuickTime，非参考模式。）
+
+- 换色度上采样算法后，各通道的比例会变：`bilinear`、`nearest`下三个通道一致，`lanczos`下R、B比G低。这说明色度上采样参与了差别。
+- 但换算法并没有让结果整体更接近QuickTime：G通道反而从0.998变为0.996。所以只能推测差别来自解码实现的不同（色度上采样、YUV转RGB等），QuickTime具体用什么算法未知。以上只是一次截图的结果。
+
+最后一行差别更大，这是预期的：EyeQ先把4000 nits的源压缩到1000 nits，高光的曲线形状由EyeQ决定。
 
 对比时注意：QuickTime失去前台时，会把HDR高光压到EDR约1.36（系统余量不变）；EyeQ不会。肉眼对比两个播放器时，被观看的那一个必须在前台。
 
@@ -257,6 +270,7 @@ QuickTime（AVFoundation）不自己压缩HDR10，而是把源元数据交给系
 - 按窗口当前的输出编码：PQ/BT.2020或SDR。DPX文件头记录了transfer、primaries和峰值。
 - 不指定映射目标时，保存的帧没有经过压缩，亮度可达源的峰值。
 - 因为不含系统映射，非参考模式下保存的帧和屏幕上看到的亮度不同；参考模式下两者一致（实测送屏像素与绝对亮度一致）。
+- 回看保存的DPX时，FFmpeg读不出文件头里的PQ/HLG和峰值（第6节），需要`setparams`加`--default-mastering-nits`。峰值填保存时的输出峰值：指定过映射目标时为该值，否则为源的母版峰值。
 
 ## 6. 源的母版峰值
 
